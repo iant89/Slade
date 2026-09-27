@@ -10,7 +10,7 @@
 /* Providers & models                                                  */
 /* ------------------------------------------------------------------ */
 
-export type ProviderId = 'mock' | 'openai' | 'anthropic' | 'google' | 'openai-compatible'
+export type ProviderId = 'mock' | 'openai' | 'anthropic' | 'google' | 'openrouter' | 'openai-compatible'
 
 export type FailureClass =
   | 'success'

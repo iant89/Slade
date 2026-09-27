@@ -178,7 +178,10 @@ async function runChain(
           usage: state.usage,
           error: undefined,
           errorClass: undefined,
-          attempts: [],
+          // The turn succeeded, but the failures that forced the failover are
+          // part of its story — persist them so the "fell back from" chip can
+          // say *why*, not just *who*.
+          attempts: [...failureRows],
         })
         return
       } catch (err) {

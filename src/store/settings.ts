@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
     openai: { apiKey: '' },
     anthropic: { apiKey: '' },
     google: { apiKey: '' },
+    openrouter: { apiKey: '' },
     'openai-compatible': { apiKey: '' },
   },
   pinnedModelId: undefined,

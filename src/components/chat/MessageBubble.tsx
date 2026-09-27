@@ -130,14 +130,19 @@ function ModelAttribution({
 }) {
   const final = labelOf(message.modelId ?? message.chain?.[message.chain.length - 1])
   const fellBackFrom = message.failedChain && message.failedChain.length > 0
+  // Pair each failed model with the provider's own reason, when we kept one.
+  const reasonByModel = new Map((message.attempts ?? []).map((a) => [a.modelId, a.message]))
+  const failedDetail = (message.failedChain ?? [])
+    .map((id) => {
+      const reason = reasonByModel.get(id)
+      return reason ? `${labelOf(id)} — ${reason}` : labelOf(id)
+    })
+    .join('; ')
   return (
     <span className="msg-model">
       <span className="msg-model-name">{final || 'Assistant'}</span>
       {fellBackFrom ? (
-        <span
-          className="msg-fallback"
-          title={`Failed before answering: ${message.failedChain!.map(labelOf).join(', ')}`}
-        >
+        <span className="msg-fallback" title={failedDetail ? `Failed before answering: ${failedDetail}` : undefined}>
           ← fell back from {message.failedChain!.map(labelOf).filter(Boolean).join(', ')}
         </span>
       ) : null}
