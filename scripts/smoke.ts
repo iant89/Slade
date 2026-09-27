@@ -19,7 +19,7 @@ const store = new Map<string, string>()
 
 import { useSettings } from '../src/store/settings'
 import { useChat } from '../src/store/chat'
-import { useHealth } from '../src/store/health'
+import { cooldownMsFor, useHealth } from '../src/store/health'
 import { sendUserMessage, stopGeneration } from '../src/engine/send'
 import { classifyHttp } from '../src/providers/base'
 import type { ProviderError } from '../src/providers/base'
@@ -194,6 +194,73 @@ async function testFailover() {
     'pro re-entered cooldown after mid-stream drop',
     (useHealth.getState().byModel['mock-pro']?.cooldownUntil ?? 0) > Date.now(),
   )
+}
+
+/**
+ * The reported symptom that drove this test: "Every model in the chain failed
+ * — tried GPT-4o (quota exhausted)", with nothing else attempted. The other
+ * models had been benched by an earlier auth failure — permanently, and
+ * silently, so the summary gave no hint they ever existed.
+ *
+ * Contracts pinned here:
+ *  1. An auth failure benches a model with a *timer*, never forever.
+ *  2. When the chain dies, the summary names the models that sat out, and why.
+ *  3. Real models with no API key are skipped up front (never burn a turn on a
+ *     guaranteed auth failure) and the reason is actionable.
+ *  4. Once the bench expires, the model quietly rejoins the chain.
+ */
+async function testChainVisibility() {
+  console.log('chain visibility (no silent benches):')
+
+  check('auth failures get a bounded cooldown', cooldownMsFor('auth', 1) > 0, String(cooldownMsFor('auth', 1)))
+  check('auth backoff caps out instead of banning forever', cooldownMsFor('auth', 99) <= 30 * 60_000, String(cooldownMsFor('auth', 99)))
+
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'auth' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+  useChat.getState().newConversation()
+  await sendUserMessage('auth bench check', [])
+  const a = lastAssistant()
+  check('chain survives an auth failure', a.status === 'complete' && a.modelId === 'mock-lite', `${a.status}/${String(a.modelId)}`)
+  const proHealth = useHealth.getState().byModel['mock-pro']
+  check('auth bench is a cooldown, not a permanent error', proHealth?.state === 'cooldown', proHealth?.state)
+  check('auth bench expires on a timer', (proHealth?.cooldownUntil ?? 0) > Date.now(), String(proHealth?.cooldownUntil))
+
+  // Chain dies on one model; the benched one must be named in the summary.
+  useSettings.getState().setModel('mock-lite', { simulate: 'hard_quota' })
+  useChat.getState().newConversation()
+  await sendUserMessage('why did only one model try', [])
+  const dead = lastAssistant()
+  check('exhausted chain still errors', dead.status === 'error', dead.status)
+  check('summary names the model that sat out', (dead.error ?? '').includes('Simulacron Pro'), dead.error)
+  check('summary says why it sat out', /cooling down/i.test(dead.error ?? ''), dead.error)
+
+  // A real model with no API key is skipped up front and explained.
+  const s = useSettings.getState()
+  s.setModel('mock-pro', { simulate: 'hard_quota' })
+  s.setModel('gpt-4o', { enabled: true })
+  useHealth.getState().markHealthy('mock-lite')
+  useChat.getState().newConversation()
+  await sendUserMessage('keyless skip check', [])
+  const dead2 = lastAssistant()
+  check(
+    'keyless model is never attempted',
+    !(dead2.attempts ?? []).some((t) => t.modelId === 'gpt-4o'),
+    JSON.stringify(dead2.attempts?.map((t) => t.modelId)),
+  )
+  check('summary explains the missing key', (dead2.error ?? '').includes('GPT-4o') && /no api key/i.test(dead2.error ?? ''), dead2.error)
+  s.setModel('gpt-4o', { enabled: false })
+
+  // Bench expires (simulated) → the model quietly rejoins the chain.
+  useHealth.getState().markHealthy('mock-pro')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useChat.getState().newConversation()
+  await sendUserMessage('welcome back', [])
+  const back = lastAssistant()
+  check('recovered model serves again', back.status === 'complete' && back.modelId === 'mock-pro', `${back.status}/${String(back.modelId)}`)
+
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
 }
 
 async function testStop() {
@@ -442,6 +509,7 @@ async function main() {
   await testGoogleAgainstFakeProvider()
   await testFailedTurnExplainsItself()
   await testFailover()
+  await testChainVisibility()
   await testStop()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)

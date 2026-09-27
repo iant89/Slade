@@ -6,7 +6,7 @@ import { useUI } from '../store/ui'
 import { adapterFor } from '../providers/registry'
 import { ProviderError } from '../providers/base'
 import { buildTurns } from './turns'
-import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates } from './strategy'
+import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates, skippedModels } from './strategy'
 import { uid } from '../lib/id'
 
 /* ------------------------------------------------------------------ */
@@ -132,7 +132,12 @@ async function runChain(
   if (!conv) return
 
   const primaryModelId = conv.modelId ?? settings.pinnedModelId
-  const candidates = routeCandidates(settings, useHealth.getState().byModel, primaryModelId)
+  const healthByModel = useHealth.getState().byModel
+  const candidates = routeCandidates(settings, healthByModel, primaryModelId)
+  // Captured at chain start: if the chain dies, the summary must also say why
+  // enabled models never got a turn — otherwise a one-model attempt reads as
+  // "the failover engine is broken" instead of "these models are benched".
+  const skipped = skippedModels(settings, healthByModel)
   const turns = await buildTurns(conv, { upToMessageId: userMessageId })
 
   const controller = new AbortController()
@@ -152,9 +157,10 @@ async function runChain(
 
   try {
     if (candidates.length === 0) {
-      throw new ChainExhausted(
-        'No eligible models right now — every model is disabled, cooling down, or missing an API key. Clear cooldowns or enable a model in Settings → Models.',
-      )
+      const detail = skipped.length
+        ? skipped.map((s) => `${s.label}: ${s.reason}`).join('; ')
+        : 'every model is disabled. Enable a model in Settings → Models.'
+      throw new ChainExhausted(`No eligible models right now — ${detail}. Clear cooldowns or enable a model in Settings → Models.`)
     }
 
     for (let i = 0; i < candidates.length; i++) {
@@ -202,7 +208,7 @@ async function runChain(
           // Pre-stream failure: clean handoff to the next candidate.
           state.failedChain.push(model.id)
           persistAttempt()
-          if (isLast) throw new ChainExhausted(failureSummary(failureRows))
+          if (isLast) throw new ChainExhausted(failureSummary(failureRows, remainingSkipped(failureRows, skipped)))
           useUI.getState().toast({
             kind: 'warn',
             title: `${label}: ${shortFailure(pe)}`,
@@ -223,7 +229,7 @@ async function runChain(
             })
           } else {
             persistAttempt()
-            throw new ChainExhausted(failureSummary(failureRows))
+            throw new ChainExhausted(failureSummary(failureRows, remainingSkipped(failureRows, skipped)))
           }
         }
       }
@@ -266,6 +272,15 @@ async function runChain(
 
 function lastOf<T>(arr: T[]): T | undefined {
   return arr[arr.length - 1]
+}
+
+/** A model already accounted for in `failureRows` would be double-reported. */
+function remainingSkipped(
+  failureRows: { modelId: string }[],
+  skipped: ReturnType<typeof skippedModels>,
+): ReturnType<typeof skippedModels> {
+  const attempted = new Set(failureRows.map((r) => r.modelId))
+  return skipped.filter((s) => !attempted.has(s.modelId))
 }
 
 function shortFailure(pe: ProviderError): string {

@@ -50,7 +50,7 @@ you can watch the failover engine work.
   handling policy.
 - **Automatic switching** — re-issue with full conversation context and attachments intact.
 - **Cooldowns & backoff** — exhausted models get timed cooldowns with exponential backoff
-  (soft limits ~30 s doubling; hard quota ~5 min doubling), never permanent bans.
+  (soft limits ~30 s doubling; hard quota and auth ~5 min doubling), never permanent bans.
 - **Health tracking** — per-model state (available / cooling down / disabled / erroring),
   latency EMA, request and token counters, last error.
 - **Strategies** — strict priority, fastest-first (measured latency), or cheapest-first.

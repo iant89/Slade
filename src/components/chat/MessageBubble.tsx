@@ -349,8 +349,14 @@ function ErrorBanner({ message }: { message: Message }) {
           onClick={async () => {
             setBusy(true)
             // Retry gets a clean slate: clear cooldowns so the chain can walk.
+            // Every enabled model is revived, not just the ones in failedChain —
+            // models benched by an earlier auth error never appear in the failed
+            // chain, and leaving them out is what made retries hit the same wall.
             const { useHealth } = await import('../../store/health')
-            for (const id of message.failedChain ?? []) useHealth.getState().markHealthy(id)
+            const { useSettings } = await import('../../store/settings')
+            for (const m of useSettings.getState().s.models) {
+              if (m.enabled) useHealth.getState().markHealthy(m.id)
+            }
             await retryAssistant(message.id)
             toast({ kind: 'info', title: 'Retrying with cooldowns cleared…' })
           }}
