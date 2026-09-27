@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS: Settings = {
     autoScroll: 'smooth',
     failoverStrategy: 'priority',
     requestTimeoutMs: 60_000,
+    firstTokenTimeoutMs: 120_000,
   },
   artifacts: {
     collapsedByDefault: false,

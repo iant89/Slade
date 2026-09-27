@@ -251,6 +251,15 @@ export class MockAdapter implements ProviderAdapter {
         return new ProviderError('network', 'Simulated: network unreachable.', true)
       case 'auth':
         return new ProviderError('auth', 'Simulated: invalid API key.', false)
+      case 'bad_request':
+        // Shaped like a real Gemini 400, which is what the old UI flattened
+        // into "unknown error".
+        return new ProviderError(
+          'bad_request',
+          'Simulated: GenerateContentRequest.generation_config.max_output_tokens must be greater than the thinking budget. (INVALID_ARGUMENT)',
+          false,
+          400,
+        )
       default:
         return new ProviderError('unknown', 'Simulated failure.', true)
     }

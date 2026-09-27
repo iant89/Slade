@@ -91,12 +91,44 @@ as context**):
 - **Models** — enable/disable, drag-reorder priority, per-model temperature / max-tokens /
   system-prompt overrides, usage counters, failure simulation for demo models
 - **Defaults** — temperature, top-p, max tokens, system prompt, streaming, typing
-  indicator, auto-scroll, failover strategy, request timeout, artifact preferences
+  indicator, auto-scroll, failover strategy, first-token timeout, stream timeout,
+  artifact preferences
 - **Providers** — masked API keys (stored locally, never logged), connection test with
   instant pass/fail
 - **Appearance** — light/dark/system theme, font size, message density, code theme,
   reduced motion, Enter-to-send
 - **Data** — export/import everything as JSON, clear history, reset to defaults
+
+## When a turn fails
+
+A failed turn is only useful if it says *why*. Slade keeps the provider's own
+explanation end to end:
+
+- Every attempt is classified (`auth`, `hard_quota`, `soft_rate_limit`, `bad_request`,
+  `timeout`, `network`, `overloaded`, `aborted`) **and** carries the provider's message,
+  the HTTP status and how long the attempt took.
+- The error banner under the turn lists each model that was tried, with its reason, and
+  offers **Copy** for a full diagnostics dump.
+- "Test" in **Settings → Providers** sends a real request to the model you have actually
+  configured, not a cheap `GET /models`. A key that can list models but cannot generate
+  with them — blocked key, depleted credit, no access to that model — fails the test
+  with the reason attached instead of showing a green light.
+- `bad_request` (HTTP 400 and friends) and `auth` failures never put a model into
+  cooldown: waiting cannot fix a payload the provider already refused, and benching the
+  model would only hide the message on the next turn.
+- First-token and stream timeouts are separate budgets. Reasoning models (Gemini 2.5,
+  o-series, extended thinking) get a generous first-token window instead of being cut
+  off mid-thought and benched for it.
+
+### Common provider messages
+
+| The message says | What it means |
+| --- | --- |
+| `max_output_tokens must be greater than the thinking budget` | Gemini 2.5 thinking models need a **Max tokens** value above the thinking budget — raise it, or cap thinking per model. |
+| `Your prepayment credits are depleted` | The Google key's billing account is out of credit. |
+| `Requests to this API method … are blocked` | Google blocked the key (it was found publicly exposed). Rotate it in AI Studio. |
+| `Network error — the browser could not reach the provider` | CORS, an ad blocker, or no route. Slade is a static SPA and calls providers straight from the browser; a corporate proxy or restrictive extension will block it. |
+| `No response after Ns — the request never produced a first token` | The request was accepted but nothing came back. Check the route, then raise **First-token timeout** if the model is simply slow to think. |
 
 ## Deploy to GitHub Pages
 
@@ -135,11 +167,13 @@ Prompts and attachments go nowhere else.
 - WCAG-minded: keyboard operability, focus-trapped modal, ARIA live regions announcing
   streamed responses, visible focus, reduced-motion support, AA-contrast themes
 - Graceful degradation: missing previews fall back to neutral cards; when every model in
-  the chain fails you get a clear error with a one-click retry
+  the chain fails you get a per-model breakdown with the provider's own reason and a
+  one-click retry
 
 ```bash
 npm run build      # type-checks then produces dist/
 npm run preview    # serve the production build
+npm run test:smoke # headless engine + provider tests (no browser, no API keys)
 ```
 
 ## Layout

@@ -90,6 +90,7 @@ function RailRow({ modelId }: { modelId: string }) {
             <option value="timeout">simulate: mid-stream timeout</option>
             <option value="network">simulate: network error</option>
             <option value="auth">simulate: auth failure</option>
+            <option value="bad_request">simulate: rejected request</option>
           </select>
         </div>
       )}

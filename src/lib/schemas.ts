@@ -6,7 +6,7 @@ import type { Settings } from '../types'
 /* ------------------------------------------------------------------ */
 
 export const providerIdSchema = z.enum(['mock', 'openai', 'anthropic', 'google', 'openai-compatible'])
-export const mockSimulateSchema = z.enum(['ok', 'soft_rate_limit', 'hard_quota', 'timeout', 'network', 'auth'])
+export const mockSimulateSchema = z.enum(['ok', 'soft_rate_limit', 'hard_quota', 'timeout', 'network', 'auth', 'bad_request'])
 
 export const modelDefSchema = z.object({
   id: z.string().min(1),
@@ -41,6 +41,9 @@ export const settingsSchema = z.object({
     autoScroll: z.enum(['smooth', 'instant', 'off']),
     failoverStrategy: z.enum(['priority', 'fastest', 'cheapest']),
     requestTimeoutMs: z.number().int().min(5_000).max(600_000),
+    // Added after the first release: defaulted so older saved settings keep
+    // validating and upgrade in place.
+    firstTokenTimeoutMs: z.number().int().min(5_000).max(600_000).default(120_000),
   }),
   artifacts: z.object({
     collapsedByDefault: z.boolean(),
@@ -86,7 +89,41 @@ export const messageSchema = z.object({
     .optional(),
   error: z.string().optional(),
   errorClass: z
-    .enum(['success', 'soft_rate_limit', 'hard_quota', 'auth', 'timeout', 'network', 'overloaded', 'aborted', 'unknown'])
+    .enum([
+      'success',
+      'soft_rate_limit',
+      'hard_quota',
+      'auth',
+      'timeout',
+      'network',
+      'overloaded',
+      'aborted',
+      'bad_request',
+      'unknown',
+    ])
+    .optional(),
+  attempts: z
+    .array(
+      z.object({
+        modelId: z.string(),
+        label: z.string(),
+        failure: z.enum([
+          'success',
+          'soft_rate_limit',
+          'hard_quota',
+          'auth',
+          'timeout',
+          'network',
+          'overloaded',
+          'aborted',
+          'unknown',
+        ]),
+        message: z.string(),
+        status: z.number().int().optional(),
+        elapsedMs: z.number().int().nonnegative(),
+        midStream: z.boolean(),
+      }),
+    )
     .optional(),
   editedAt: z.number().optional(),
   ttftMs: z.number().optional(),

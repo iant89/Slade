@@ -1,4 +1,4 @@
-import type { FailureClass, Handoff, ModelDef, Settings, StreamEvent, Usage } from '../types'
+import type { AttemptFailure, FailureClass, Handoff, ModelDef, Settings, StreamEvent, Usage } from '../types'
 import { useChat, titleFromPrompt } from '../store/chat'
 import { useSettings, effectiveParams, providerKey } from '../store/settings'
 import { useHealth } from '../store/health'
@@ -41,12 +41,6 @@ interface ChainState {
   failedChain: string[]
   handoffs: Handoff[]
   usage?: Usage
-}
-
-interface FailureRow {
-  label: string
-  failure: FailureClass
-  message: string
 }
 
 class ChainExhausted extends Error {
@@ -152,7 +146,7 @@ async function runChain(
     handoffs: [],
     usage: undefined,
   }
-  const failureRows: FailureRow[] = []
+  const failureRows: AttemptFailure[] = []
 
   const persistAttempt = () => updateAttemptFields(assistantMessageId, state)
 
@@ -166,6 +160,7 @@ async function runChain(
     for (let i = 0; i < candidates.length; i++) {
       const model = candidates[i]!
       if (controller.signal.aborted) break
+      const startedAt = performance.now()
       try {
         await attemptModel({ model, turns, settings, controller, state, assistantMessageId, attempt })
         finalize(assistantMessageId, {
@@ -177,6 +172,7 @@ async function runChain(
           usage: state.usage,
           error: undefined,
           errorClass: undefined,
+          attempts: [],
         })
         return
       } catch (err) {
@@ -190,7 +186,15 @@ async function runChain(
         // Classify, apply cooldown policy, then walk the chain.
         const cooldownUntil = useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
         const label = modelLabel(settings.models, model.id)
-        const row: FailureRow = { label, failure: pe.failure, message: pe.message }
+        const row: AttemptFailure = {
+          modelId: model.id,
+          label,
+          failure: pe.failure,
+          message: pe.message,
+          status: pe.status,
+          elapsedMs: Math.round(performance.now() - startedAt),
+          midStream: state.content.length > 0,
+        }
         failureRows.push(row)
         const isLast = i === candidates.length - 1
 
@@ -202,9 +206,9 @@ async function runChain(
           useUI.getState().toast({
             kind: 'warn',
             title: `${label}: ${shortFailure(pe)}`,
-            detail: cooldownUntil
-              ? `Cooling down ~${Math.round(cooldownUntil / 1000)}s — failing over…`
-              : 'Failing over to the next model…',
+            // The provider's own reason, not a generic one — this is the line
+            // that tells the user what to actually go and fix.
+            detail: `${pe.message}${cooldownUntil ? ` · cooling down ~${Math.round(cooldownUntil / 1000)}s` : ''}`,
           })
         } else {
           // Mid-stream failure: keep partial output, mark the handoff, continue.
@@ -215,7 +219,7 @@ async function runChain(
             useUI.getState().toast({
               kind: 'warn',
               title: `${label} dropped mid-stream (${shortFailure(pe)})`,
-              detail: `Handing off to ${modelLabel(settings.models, nextModel.id)} — your text so far is preserved.`,
+              detail: `Handing off to ${modelLabel(settings.models, nextModel.id)} — ${pe.message}`,
             })
           } else {
             persistAttempt()
@@ -237,7 +241,10 @@ async function runChain(
         handoffs: [...state.handoffs],
         usage: state.usage,
         error: err.summary,
-        errorClass: 'unknown',
+        // Keep the real class of the last failure. Hardcoding 'unknown' here
+        // is what made every failure read as "Unknown error" in the UI.
+        errorClass: lastOf(failureRows)?.failure ?? 'unknown',
+        attempts: [...failureRows],
       })
       useUI.getState().toast({ kind: 'error', title: 'Every model in the chain failed', detail: err.summary })
     } else {
@@ -269,6 +276,7 @@ function shortFailure(pe: ProviderError): string {
     case 'timeout': return 'timed out'
     case 'network': return 'network error'
     case 'overloaded': return 'overloaded'
+    case 'bad_request': return 'request rejected'
     default: return 'error'
   }
 }
@@ -298,6 +306,7 @@ function finalize(
     usage?: Usage
     error?: string
     errorClass?: FailureClass | undefined
+    attempts?: AttemptFailure[]
   },
 ): void {
   useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, ...patch }))
@@ -343,20 +352,23 @@ async function attemptModel(args: {
   const onAbort = () => attemptController.abort()
   controller.signal.addEventListener('abort', onAbort, { once: true })
 
-  // Idle timeout: armed at start, reset on every delta. A stalled stream is
-  // classified as a timeout and the chain moves on.
-  let timedOut = false
-  let idleTimer: ReturnType<typeof setTimeout> | null = null
-  const armIdle = () => {
-    if (idleTimer) clearTimeout(idleTimer)
-    idleTimer = setTimeout(() => {
-      timedOut = true
+  // Two separate budgets, because "no first token yet" and "the stream went
+  // quiet" are different problems with different fixes. Reasoning models
+  // (Gemini 2.5, o-series, extended thinking) routinely take longer than the
+  // idle budget to produce their first token; timing those out on the *same*
+  // budget as a stalled stream is what put healthy models into cooldown.
+  let timedOut: 'first-token' | 'stalled' | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const arm = (kind: 'first-token' | 'stalled', ms: number) => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timedOut = kind
       attemptController.abort()
-    }, settings.defaults.requestTimeoutMs)
+    }, ms)
   }
-  const disarmIdle = () => {
-    if (idleTimer) clearTimeout(idleTimer)
-    idleTimer = null
+  const disarm = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
   }
 
   const startedAt = performance.now()
@@ -379,7 +391,7 @@ async function attemptModel(args: {
         }
         state.content += ev.text
         useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, content: state.content }))
-        armIdle()
+        arm('stalled', settings.defaults.requestTimeoutMs)
         break
       }
       case 'usage':
@@ -392,7 +404,7 @@ async function attemptModel(args: {
     }
   }
 
-  armIdle()
+  arm('first-token', settings.defaults.firstTokenTimeoutMs)
   try {
     await adapter.run({
       model,
@@ -407,7 +419,7 @@ async function attemptModel(args: {
       onEvent,
     })
     if (!gotFirstDelta) {
-      throw new ProviderError('unknown', 'Provider returned an empty response.', true)
+      throw new ProviderError('unknown', 'The provider accepted the request but returned no text at all.', false)
     }
     const latencyMs = Math.round(performance.now() - startedAt)
     state.usage = mergeUsage(state.usage, usagePiece)
@@ -417,12 +429,25 @@ async function attemptModel(args: {
     if (attempt.userAborted) {
       throw new ProviderError('aborted', 'Cancelled.', false)
     }
-    if (timedOut) {
-      throw new ProviderError('timeout', 'The stream stalled and timed out.', true)
+    if (timedOut === 'first-token') {
+      const secs = Math.round(settings.defaults.firstTokenTimeoutMs / 1000)
+      throw new ProviderError(
+        'timeout',
+        `No response after ${secs}s — the request never produced a first token. The key is accepted but the model did not answer (network path, proxy, or an overloaded provider).`,
+        true,
+      )
+    }
+    if (timedOut === 'stalled') {
+      const secs = Math.round(settings.defaults.requestTimeoutMs / 1000)
+      throw new ProviderError(
+        'timeout',
+        `The stream went quiet for ${secs}s after it had started and was cut off.`,
+        true,
+      )
     }
     throw err
   } finally {
-    disarmIdle()
+    disarm()
     controller.signal.removeEventListener('abort', onAbort)
   }
 }

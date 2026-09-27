@@ -49,9 +49,16 @@ export function routeCandidates(
   ]
 }
 
+/**
+ * One-line recap of a dead chain. Deliberately keeps the provider's own wording
+ * for the last failure — "Unknown error" is the single most useless thing this
+ * app can say when a key, a quota or a payload is the real problem.
+ */
 export function failureSummary(rows: { label: string; failure: FailureClass; message: string }[]): string {
   if (rows.length === 0) return 'No eligible models were available.'
-  const parts = rows.map((r) => `${r.label} (${r.failure === 'auth' ? FAILURE_LABEL.auth.toLowerCase() : FAILURE_LABEL[r.failure].toLowerCase()})`)
+  const parts = rows.map(
+    (r) => `${r.label} (${r.failure === 'auth' ? FAILURE_LABEL.auth.toLowerCase() : FAILURE_LABEL[r.failure].toLowerCase()})`,
+  )
   const last = rows[rows.length - 1]!
   return `Every model in the chain failed — tried ${parts.join(', ')}. Last error: ${last.message}`
 }

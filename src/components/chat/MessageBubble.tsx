@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../../types'
+import { FAILURE_LABEL } from '../../types'
 import { useChat } from '../../store/chat'
 import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
@@ -282,29 +283,87 @@ function AssistantBody({
 function ErrorBanner({ message }: { message: Message }) {
   const toast = useUI((s) => s.toast)
   const [busy, setBusy] = useState(false)
+  const [showDetail, setShowDetail] = useState(false)
+  const attempts = message.attempts ?? []
+
+  const diagnostics = () =>
+    [
+      `Slade — failed turn diagnostics`,
+      ...attempts.map(
+        (a, i) =>
+          `${i + 1}. ${a.label} [${FAILURE_LABEL[a.failure]}${a.status ? ` · HTTP ${a.status}` : ''}] after ${a.elapsedMs}ms${
+            a.midStream ? ' (dropped mid-stream)' : ''
+          }\n   ${a.message}`,
+      ),
+      `Summary: ${message.error ?? 'none'}`,
+    ].join('\n')
+
   return (
     <div className="msg-error" role="alert">
       <span className="msg-error-icon">
         <IconAlert size={14} />
       </span>
-      <span className="msg-error-text">{message.error ?? 'Unknown error'}</span>
-      <button
-        className="btn small primary"
-        type="button"
-        disabled={busy}
-        onClick={async () => {
-          setBusy(true)
-          // Retry gets a clean slate: clear cooldowns so the chain can walk.
-          const { useHealth } = await import('../../store/health')
-          for (const id of message.failedChain ?? []) useHealth.getState().markHealthy(id)
-          await retryAssistant(message.id)
-          toast({ kind: 'info', title: 'Retrying with cooldowns cleared…' })
-        }}
-      >
-        <IconRefresh size={12} /> Retry
-      </button>
+      <div className="msg-error-body">
+        <span className="msg-error-text">{message.error ?? 'The turn failed without a reason.'}</span>
+        {attempts.length > 0 && (
+          <>
+            <button className="link-inline" type="button" onClick={() => setShowDetail((v) => !v)}>
+              {showDetail ? 'Hide' : 'Show'} what each provider said
+            </button>
+            {showDetail && (
+              <ul className="msg-error-attempts">
+                {attempts.map((a, i) => (
+                  <li key={`${a.modelId}-${i}`}>
+                    <span className={`err-chip err-${a.failure}`}>{FAILURE_LABEL[a.failure]}</span>
+                    <span className="err-model">{a.label}</span>
+                    <span className="err-meta">
+                      {a.status ? `HTTP ${a.status} · ` : ''}
+                      {formatMs(a.elapsedMs)}
+                      {a.midStream ? ' · dropped mid-stream' : ''}
+                    </span>
+                    <span className="err-msg">{a.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+      <div className="msg-error-actions">
+        {attempts.length > 0 && (
+          <button
+            className="btn small ghost"
+            type="button"
+            onClick={async () => {
+              await copyText(diagnostics())
+              toast({ kind: 'info', title: 'Diagnostics copied to the clipboard.' })
+            }}
+          >
+            <IconCopy size={12} /> Copy
+          </button>
+        )}
+        <button
+          className="btn small primary"
+          type="button"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            // Retry gets a clean slate: clear cooldowns so the chain can walk.
+            const { useHealth } = await import('../../store/health')
+            for (const id of message.failedChain ?? []) useHealth.getState().markHealthy(id)
+            await retryAssistant(message.id)
+            toast({ kind: 'info', title: 'Retrying with cooldowns cleared…' })
+          }}
+        >
+          <IconRefresh size={12} /> Retry
+        </button>
+      </div>
     </div>
   )
+}
+
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 /* ------------------------------------------------------------------ */

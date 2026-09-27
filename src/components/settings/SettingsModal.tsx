@@ -218,6 +218,7 @@ function ModelsTab() {
                         { value: 'timeout', label: 'Timeout mid-stream' },
                         { value: 'network', label: 'Network error' },
                         { value: 'auth', label: 'Auth failure' },
+                        { value: 'bad_request', label: 'Rejected request (HTTP 400)' },
                       ]}
                       onChange={(v) => setModel(m.id, { simulate: v })}
                     />
@@ -359,14 +360,24 @@ function DefaultsTab() {
         onChange={(v) => set({ failoverStrategy: v })}
       />
       <SliderRow
-        label="Request timeout"
+        label="First-token timeout"
+        value={defaults.firstTokenTimeoutMs / 1000}
+        min={15}
+        max={300}
+        step={5}
+        format={(v) => `${v}s`}
+        onChange={(v) => set({ firstTokenTimeoutMs: v * 1000 })}
+        hint="How long to wait for a model's first token. Keep this generous — reasoning models (Gemini 2.5, o-series) think before they answer."
+      />
+      <SliderRow
+        label="Stream timeout"
         value={defaults.requestTimeoutMs / 1000}
         min={10}
         max={300}
         step={5}
         format={(v) => `${v}s`}
         onChange={(v) => set({ requestTimeoutMs: v * 1000 })}
-        hint="Idle time before a stalled stream is treated as a timeout and handed off"
+        hint="Idle time between chunks once a model is already streaming, before it counts as stalled"
       />
 
       <SectionTitle>Artifacts</SectionTitle>
@@ -411,11 +422,14 @@ function ProvidersTab() {
     setTests((t) => ({ ...t, [pid]: 'testing' }))
     const adapter = adapterFor(pid)
     const cfg = providers[pid] ?? { apiKey: '' }
-    const res = await adapter.testKey(cfg.apiKey, cfg.baseURL)
+    // Test against a model the user actually has configured, so the result
+    // means "this chain can answer", not "this key can list a catalogue".
+    const models = useSettings.getState().s.models
+    const configured = models.find((m) => m.provider === pid && m.enabled) ?? models.find((m) => m.provider === pid)
+    const res = await adapter.testKey(cfg.apiKey, cfg.baseURL, configured)
     setTests((t) => ({ ...t, [pid]: { ok: res.ok, message: res.message } }))
     if (res.ok) {
-      useHealth.getState().markHealthy('gpt-4o') // clear auth-error state for this provider's models
-      for (const m of useSettings.getState().s.models) {
+      for (const m of models) {
         if (m.provider === pid) useHealth.getState().markHealthy(m.id)
       }
     }

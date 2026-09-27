@@ -405,6 +405,48 @@ kbd {
 }
 .msg-error-icon { color: var(--danger); margin-top: 1px; }
 .msg-error-text { flex: 1; color: var(--text); }
+.msg-error-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.msg-error-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.link-inline {
+  background: none; border: 0; padding: 0; align-self: flex-start;
+  color: var(--text-dim); font: inherit; font-size: 0.95em;
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.link-inline:hover { color: var(--text); }
+.msg-error-attempts {
+  list-style: none; margin: 2px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.msg-error-attempts li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  padding: 7px 9px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+.err-chip {
+  grid-row: 1;
+  justify-self: start;
+  font-size: 0.78em; font-weight: 600; letter-spacing: 0.02em;
+  padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+  white-space: nowrap;
+}
+.err-soft_rate_limit, .err-overloaded { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.err-bad_request { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.err-timeout, .err-network, .err-unknown { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.err-model { font-weight: 600; color: var(--text); }
+.err-meta { color: var(--text-dim); font-size: 0.9em; }
+.err-msg {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
 .msg-edit { width: 100%; display: flex; flex-direction: column; gap: 8px; }
 .msg-edit textarea {
   width: 100%; min-height: 64px;
