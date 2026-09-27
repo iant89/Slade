@@ -1,0 +1,7 @@
+month,region,units,revenue_usd,refund_rate
+July,West,1240,48960.00,0.021
+July,East,1610,63595.00,0.017
+August,West,1385,54707.50,0.019
+August,East,1750,69125.00,0.014
+September,West,1502,59329.00,0.012
+September,East,1904,75208.00,0.011
