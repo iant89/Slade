@@ -38,9 +38,9 @@ you can watch the failover engine work.
    card lands in the thread.
 5. Use `/sample` in the composer (or drag & drop any file) to attach a CSV, TypeScript
    file, Markdown doc, image or WAV — each renders as a rich, type-aware artifact card.
-6. Add real API keys in **Settings → Providers** (OpenAI, Anthropic, Google Gemini, or any
-   OpenAI-compatible endpoint such as Groq/OpenRouter/Ollama) to route to live models with
-   the same engine.
+6. Add real API keys in **Settings → Providers** (OpenAI, Anthropic, Google Gemini,
+   **OpenRouter** — one key in front of hundreds of models — or any OpenAI-compatible
+   endpoint such as Groq/Ollama) to route to live models with the same engine.
 
 ## The failover engine
 
@@ -50,7 +50,7 @@ you can watch the failover engine work.
   handling policy.
 - **Automatic switching** — re-issue with full conversation context and attachments intact.
 - **Cooldowns & backoff** — exhausted models get timed cooldowns with exponential backoff
-  (soft limits ~30 s doubling; hard quota ~5 min doubling), never permanent bans.
+  (soft limits ~30 s doubling; hard quota and auth ~5 min doubling), never permanent bans.
 - **Health tracking** — per-model state (available / cooling down / disabled / erroring),
   latency EMA, request and token counters, last error.
 - **Strategies** — strict priority, fastest-first (measured latency), or cheapest-first.
@@ -93,8 +93,10 @@ as context**):
 - **Defaults** — temperature, top-p, max tokens, system prompt, streaming, typing
   indicator, auto-scroll, failover strategy, first-token timeout, stream timeout,
   artifact preferences
-- **Providers** — masked API keys (stored locally, never logged), connection test with
-  instant pass/fail
+- **Providers** — masked API keys (stored locally, never logged), connection tests with
+  instant pass/fail and real generation, and first-class OpenRouter support
+  (`openrouter/auto` ships in the default registry; any `vendor/model` id works, with
+  Slade's attribution headers and streamed token usage)
 - **Appearance** — light/dark/system theme, font size, message density, code theme,
   reduced motion, Enter-to-send
 - **Data** — export/import everything as JSON, clear history, reset to defaults
@@ -181,7 +183,7 @@ npm run test:smoke # headless engine + provider tests (no browser, no API keys)
 ```
 src/
   engine/       failover chain walk, routing strategies, turn builder
-  providers/    openai · anthropic · google · openai-compatible · built-in mock
+  providers/    openai · anthropic · google · openrouter · openai-compatible · built-in mock
   store/        zustand stores + persistence + cooldown policy
   components/   chat, artifacts, settings, layout, common
   lib/          mime classification, csv, clipboard, schemas, storage

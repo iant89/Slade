@@ -24,14 +24,31 @@ export function cooldownMsFor(failure: FailureClass, consecutiveFailures: number
       return backoff(15_000, 5 * 60_000)
     case 'unknown':
       return backoff(20_000, 5 * 60_000)
+    case 'auth':
+      // A rejected key is usually sticky — but not always (rotated keys,
+      // flaky proxies, a provider hiccup that returns 400 instead of 429).
+      // The design rule is "never permanent bans", so auth gets the longest
+      // backoff instead of a silent, eternal bench. Skipping it for the rest
+      // of *this* turn is still right — the same key will fail again in
+      // milliseconds — but future turns must get another shot.
+      return backoff(5 * 60_000, CAP_MS)
     default:
-      // auth, bad_request, aborted, success: waiting cannot change the answer.
+      // bad_request, aborted, success: waiting cannot change the answer.
       return 0
   }
 }
 
 function hydrate(): Record<string, ModelHealth> {
-  return loadRaw<Record<string, ModelHealth>>(KEYS.health, {})
+  const byModel = loadRaw<Record<string, ModelHealth>>(KEYS.health, {})
+  // Migration: older builds parked auth failures in a permanent `error` state
+  // with no timer, so persisted records can still carry it. Revive those
+  // models — the next failure re-classifies them onto a timed cooldown.
+  for (const h of Object.values(byModel)) {
+    if (h.state === 'error' && !(h.cooldownUntil && h.cooldownUntil > Date.now())) {
+      h.state = 'available'
+    }
+  }
+  return byModel
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -89,7 +106,12 @@ export const useHealth = create<HealthState>((set, get) => {
           totalFailures: h.totalFailures + 1,
           lastError: { at, failure, message },
           cooldownUntil: cooldownUntil || undefined,
-          state: failure === 'auth' ? 'error' : cooldownUntil ? 'cooldown' : h.state,
+          // Any failure with a cooldown benches the model *until the timer
+          // expires* — never forever. The old code parked auth failures in a
+          // permanent `error` state that nothing ever cleared, which silently
+          // shrank the chain until a whole provider lineup disappeared from
+          // failover with no explanation.
+          state: cooldownUntil ? 'cooldown' : h.state,
         }
         return { byModel }
       })

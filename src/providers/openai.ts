@@ -1,4 +1,5 @@
 import type { AttemptConfig, ProviderAdapter, KeyTestResult } from './base'
+import type { ProviderId } from '../types'
 import { ProviderError, classifyNetworkError, errorFromResponse, sseData } from './base'
 import type { ModelDef } from '../types'
 
@@ -42,11 +43,30 @@ function buildMessages(cfg: AttemptConfig): ApiMessage[] {
 }
 
 export class OpenAIAdapter implements ProviderAdapter {
-  id = 'openai' as const
+  id: ProviderId = 'openai'
   label = 'OpenAI'
 
+  /** Where requests go unless the model (or a key test) says otherwise. */
+  protected get defaultBaseURL(): string {
+    return 'https://api.openai.com/v1'
+  }
+
+  protected resolveBase(baseURL?: string, model?: ModelDef): string {
+    return (baseURL ?? model?.baseURL ?? this.defaultBaseURL).replace(/\/+$/, '')
+  }
+
+  /** Extra request headers; provider flavours (OpenRouter) add their own. */
+  protected extraHeaders(_cfg: AttemptConfig): Record<string, string> {
+    return {}
+  }
+
+  /** Last chance for a provider flavour to amend the request body. */
+  protected amendBody(_body: Record<string, unknown>, _cfg: AttemptConfig): void {
+    /* plain OpenAI wants nothing extra */
+  }
+
   async run(cfg: AttemptConfig): Promise<void> {
-    const base = (cfg.model.baseURL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+    const base = this.resolveBase(undefined, cfg.model)
     const body: Record<string, unknown> = {
       model: cfg.model.apiModel,
       messages: buildMessages(cfg),
@@ -56,12 +76,13 @@ export class OpenAIAdapter implements ProviderAdapter {
       stream: cfg.stream,
     }
     if (cfg.stream) body.stream_options = { include_usage: true }
+    this.amendBody(body, cfg)
 
     let res: Response
     try {
       res = await fetch(`${base}/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}`, ...this.extraHeaders(cfg) },
         body: JSON.stringify(body),
         signal: cfg.signal,
       })
@@ -130,7 +151,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   async testKey(apiKey: string, baseURL?: string, model?: ModelDef): Promise<KeyTestResult> {
-    const base = (baseURL ?? model?.baseURL ?? 'https://api.openai.com/v1').replace(/\/+$/, '')
+    const base = this.resolveBase(baseURL, model)
     try {
       const res = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${apiKey}` } })
       if (!res.ok) {
@@ -162,3 +183,36 @@ export class OpenAIAdapter implements ProviderAdapter {
 }
 
 export const openaiAdapter = new OpenAIAdapter()
+
+/* ------------------------------------------------------------------ */
+/* OpenRouter                                                          */
+/*                                                                     */
+/* OpenRouter speaks OpenAI's wire format, so it rides on the same     */
+/* adapter with three differences: its own default endpoint, the       */
+/* attribution headers OpenRouter's rankings use, and OpenRouter's     */
+/* documented `usage: { include: true }` flag so streamed turns still  */
+/* report token counts (stream_options alone is not honoured by every  */
+/* upstream model).                                                    */
+/* ------------------------------------------------------------------ */
+
+export class OpenRouterAdapter extends OpenAIAdapter {
+  override id: ProviderId = 'openrouter'
+  override label = 'OpenRouter'
+
+  protected override get defaultBaseURL(): string {
+    return 'https://openrouter.ai/api/v1'
+  }
+
+  protected override extraHeaders(): Record<string, string> {
+    return {
+      'HTTP-Referer': 'https://github.com/iant89/Slade',
+      'X-Title': 'Slade',
+    }
+  }
+
+  protected override amendBody(body: Record<string, unknown>, cfg: AttemptConfig): void {
+    if (cfg.stream) body.usage = { include: true }
+  }
+}
+
+export const openrouterAdapter = new OpenRouterAdapter()

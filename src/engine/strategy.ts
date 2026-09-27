@@ -3,6 +3,22 @@ import { FAILURE_LABEL } from '../types'
 import type { ModelHealth } from '../types'
 import { isRoutable } from '../store/health'
 
+/** One enabled model that routing skipped, and why. */
+export interface SkippedModel {
+  modelId: string
+  label: string
+  reason: string
+}
+
+/**
+ * A model whose provider has no API key can only ever answer with an auth
+ * failure. Filtering such models out of routing (and naming them in the
+ * skipped list) beats burning a chain slot on a request guaranteed to fail.
+ */
+export function modelHasKey(settings: Settings, m: ModelDef): boolean {
+  return m.provider === 'mock' || Boolean(settings.providers[m.provider]?.apiKey?.trim())
+}
+
 /**
  * Build the ordered candidate chain for a completion.
  *
@@ -42,10 +58,12 @@ export function routeCandidates(
   })
 
   const primary = primaryModelId ? enabled.find((m) => m.id === primaryModelId) : undefined
-  if (!primary) return sorted.filter((m) => isRoutable(healthByModel[m.id], true))
+  if (!primary) return sorted.filter((m) => modelHasKey(settings, m) && isRoutable(healthByModel[m.id], true))
   return [
-    primary, // a manual override is honored even while cooling down — the user asked for it
-    ...sorted.filter((m) => m.id !== primary.id && isRoutable(healthByModel[m.id], true)),
+    // A manual override is honored even while cooling down or missing a key —
+    // the user asked for this model, so its failure message should say why.
+    primary,
+    ...sorted.filter((m) => m.id !== primary.id && modelHasKey(settings, m) && isRoutable(healthByModel[m.id], true)),
   ]
 }
 
@@ -53,14 +71,56 @@ export function routeCandidates(
  * One-line recap of a dead chain. Deliberately keeps the provider's own wording
  * for the last failure — "Unknown error" is the single most useless thing this
  * app can say when a key, a quota or a payload is the real problem.
+ *
+ * When enabled models were *skipped* by routing (cooling down, benched with an
+ * auth error), they are named too — a summary that only says "tried GPT-4o"
+ * while three other models silently sat out is how users end up believing the
+ * chain is broken when it is actually just hiding.
  */
-export function failureSummary(rows: { label: string; failure: FailureClass; message: string }[]): string {
+export function failureSummary(
+  rows: { label: string; failure: FailureClass; message: string }[],
+  skipped: SkippedModel[] = [],
+): string {
   if (rows.length === 0) return 'No eligible models were available.'
   const parts = rows.map(
     (r) => `${r.label} (${r.failure === 'auth' ? FAILURE_LABEL.auth.toLowerCase() : FAILURE_LABEL[r.failure].toLowerCase()})`,
   )
   const last = rows[rows.length - 1]!
-  return `Every model in the chain failed — tried ${parts.join(', ')}. Last error: ${last.message}`
+  const skippedNote = skipped.length
+    ? ` Also skipped: ${skipped.map((s) => `${s.label} (${s.reason})`).join(', ')}.`
+    : ''
+  return `Every model in the chain failed — tried ${parts.join(', ')}. Last error: ${last.message}${skippedNote}`
+}
+
+/**
+ * Enabled models that routing filtered out, with a human reason for each.
+ * Used to explain why a chain was shorter than the user's model list.
+ */
+export function skippedModels(settings: Settings, healthByModel: Record<string, ModelHealth>): SkippedModel[] {
+  const now = Date.now()
+  const out: SkippedModel[] = []
+  for (const m of settings.models) {
+    if (!m.enabled) continue
+    const h = healthByModel[m.id]
+    const keyed = modelHasKey(settings, m)
+    if (keyed && isRoutable(h, true)) continue
+    let reason: string
+    if (!keyed) {
+      reason = `no API key configured for ${m.provider} — add one in Settings`
+    } else if (h?.state === 'error') {
+      reason = h.lastError
+        ? `${FAILURE_LABEL[h.lastError.failure].toLowerCase()} — fix the key in Settings, then retry`
+        : 'auth failure — retest its key in Settings'
+    } else if (h?.cooldownUntil && h.cooldownUntil > now) {
+      const secs = Math.max(1, Math.round((h.cooldownUntil - now) / 1000))
+      const cause = h.lastError ? ` after ${FAILURE_LABEL[h.lastError.failure].toLowerCase()}` : ''
+      reason = `cooling down, ~${secs}s left${cause}`
+    } else {
+      reason = 'not routable'
+    }
+    out.push({ modelId: m.id, label: m.label, reason })
+  }
+  return out
 }
 
 export function newAssistantPlaceholder(conversationId: string): Message {

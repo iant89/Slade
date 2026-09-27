@@ -160,7 +160,7 @@ function ModelsTab() {
                     <input value={m.apiModel} onChange={(e) => setModel(m.id, { apiModel: e.target.value })} />
                   </FieldRow>
                   {m.provider === 'openai-compatible' && (
-                    <FieldRow label="Base URL" hint="Any OpenAI-compatible endpoint (Groq, OpenRouter, Ollama…)">
+                    <FieldRow label="Base URL" hint="Any OpenAI-compatible endpoint (Groq, Together, Ollama…)">
                       <input
                         value={m.baseURL ?? ''}
                         placeholder="https://api.groq.com/openai/v1"
@@ -279,11 +279,16 @@ function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onC
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
           <option value="google">Google Gemini</option>
+          <option value="openrouter">OpenRouter</option>
           <option value="openai-compatible">OpenAI-compatible (custom URL)</option>
         </select>
       </FieldRow>
       <FieldRow label="Model ID">
-        <input value={apiModel} onChange={(e) => setApiModel(e.target.value)} placeholder="gpt-4o-mini" />
+        <input
+          value={apiModel}
+          onChange={(e) => setApiModel(e.target.value)}
+          placeholder={provider === 'openrouter' ? 'openrouter/auto or vendor/model' : 'gpt-4o-mini'}
+        />
       </FieldRow>
       {provider === 'openai-compatible' && (
         <FieldRow label="Base URL">
@@ -406,7 +411,8 @@ const PROVIDER_LIST: { id: ProviderId; label: string; hint: string; keyUrl?: str
   { id: 'openai', label: 'OpenAI', hint: 'GPT-4o and friends', keyUrl: 'https://platform.openai.com/api-keys' },
   { id: 'anthropic', label: 'Anthropic', hint: 'Claude models', keyUrl: 'https://console.anthropic.com/settings/keys' },
   { id: 'google', label: 'Google Gemini', hint: 'Gemini models', keyUrl: 'https://aistudio.google.com/app/apikey' },
-  { id: 'openai-compatible', label: 'OpenAI-compatible', hint: 'Groq, OpenRouter, Together, Ollama…' },
+  { id: 'openrouter', label: 'OpenRouter', hint: 'One key, hundreds of models', keyUrl: 'https://openrouter.ai/settings/keys' },
+  { id: 'openai-compatible', label: 'OpenAI-compatible', hint: 'Groq, Together, Ollama…' },
   { id: 'mock', label: 'Built-in simulator', hint: 'No key needed — powers the demo models' },
 ]
 

@@ -5,7 +5,7 @@ import type { Settings } from '../types'
 /* Zod-validated configuration                                         */
 /* ------------------------------------------------------------------ */
 
-export const providerIdSchema = z.enum(['mock', 'openai', 'anthropic', 'google', 'openai-compatible'])
+export const providerIdSchema = z.enum(['mock', 'openai', 'anthropic', 'google', 'openrouter', 'openai-compatible'])
 export const mockSimulateSchema = z.enum(['ok', 'soft_rate_limit', 'hard_quota', 'timeout', 'network', 'auth', 'bad_request'])
 
 export const modelDefSchema = z.object({

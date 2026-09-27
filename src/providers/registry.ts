@@ -1,7 +1,7 @@
 import type { ModelDef, ProviderId } from '../types'
 import type { ProviderAdapter } from './base'
 import { mockAdapter } from './mock'
-import { openaiAdapter } from './openai'
+import { openaiAdapter, openrouterAdapter } from './openai'
 import { anthropicAdapter } from './anthropic'
 import { googleAdapter } from './google'
 
@@ -10,7 +10,9 @@ const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
   openai: openaiAdapter,
   anthropic: anthropicAdapter,
   google: googleAdapter,
-  // OpenAI-compatible endpoints (Groq, OpenRouter, Together, Ollama…) speak
+  // One key in front of hundreds of models; OpenAI wire format underneath.
+  openrouter: openrouterAdapter,
+  // OpenAI-compatible endpoints (Groq, Together, Ollama…) speak
   // the same wire format as OpenAI, just with a different base URL.
   'openai-compatible': openaiAdapter,
 }
@@ -75,6 +77,16 @@ export const DEFAULT_MODELS: ModelDef[] = [
     costPer1kIn: 0.0003,
     costPer1kOut: 0.0025,
     contextWindow: 1_000_000,
+  },
+  {
+    id: 'openrouter-auto',
+    label: 'OpenRouter Auto',
+    provider: 'openrouter',
+    // OpenRouter's own router model: picks a capable model per prompt.
+    // Any "vendor/model" id from openrouter.ai/models works in its place.
+    apiModel: 'openrouter/auto',
+    enabled: false,
+    contextWindow: 200_000,
   },
   {
     id: 'llama-3-3-70b',

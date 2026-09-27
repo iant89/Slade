@@ -19,12 +19,13 @@ const store = new Map<string, string>()
 
 import { useSettings } from '../src/store/settings'
 import { useChat } from '../src/store/chat'
-import { useHealth } from '../src/store/health'
+import { cooldownMsFor, useHealth } from '../src/store/health'
 import { sendUserMessage, stopGeneration } from '../src/engine/send'
 import { classifyHttp } from '../src/providers/base'
 import type { ProviderError } from '../src/providers/base'
 import { mockAdapter } from '../src/providers/mock'
 import { googleAdapter } from '../src/providers/google'
+import { openrouterAdapter } from '../src/providers/openai'
 import type { ModelDef } from '../src/types'
 import { createServer } from 'node:http'
 
@@ -196,6 +197,73 @@ async function testFailover() {
   )
 }
 
+/**
+ * The reported symptom that drove this test: "Every model in the chain failed
+ * — tried GPT-4o (quota exhausted)", with nothing else attempted. The other
+ * models had been benched by an earlier auth failure — permanently, and
+ * silently, so the summary gave no hint they ever existed.
+ *
+ * Contracts pinned here:
+ *  1. An auth failure benches a model with a *timer*, never forever.
+ *  2. When the chain dies, the summary names the models that sat out, and why.
+ *  3. Real models with no API key are skipped up front (never burn a turn on a
+ *     guaranteed auth failure) and the reason is actionable.
+ *  4. Once the bench expires, the model quietly rejoins the chain.
+ */
+async function testChainVisibility() {
+  console.log('chain visibility (no silent benches):')
+
+  check('auth failures get a bounded cooldown', cooldownMsFor('auth', 1) > 0, String(cooldownMsFor('auth', 1)))
+  check('auth backoff caps out instead of banning forever', cooldownMsFor('auth', 99) <= 30 * 60_000, String(cooldownMsFor('auth', 99)))
+
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'auth' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+  useChat.getState().newConversation()
+  await sendUserMessage('auth bench check', [])
+  const a = lastAssistant()
+  check('chain survives an auth failure', a.status === 'complete' && a.modelId === 'mock-lite', `${a.status}/${String(a.modelId)}`)
+  const proHealth = useHealth.getState().byModel['mock-pro']
+  check('auth bench is a cooldown, not a permanent error', proHealth?.state === 'cooldown', proHealth?.state)
+  check('auth bench expires on a timer', (proHealth?.cooldownUntil ?? 0) > Date.now(), String(proHealth?.cooldownUntil))
+
+  // Chain dies on one model; the benched one must be named in the summary.
+  useSettings.getState().setModel('mock-lite', { simulate: 'hard_quota' })
+  useChat.getState().newConversation()
+  await sendUserMessage('why did only one model try', [])
+  const dead = lastAssistant()
+  check('exhausted chain still errors', dead.status === 'error', dead.status)
+  check('summary names the model that sat out', (dead.error ?? '').includes('Simulacron Pro'), dead.error)
+  check('summary says why it sat out', /cooling down/i.test(dead.error ?? ''), dead.error)
+
+  // A real model with no API key is skipped up front and explained.
+  const s = useSettings.getState()
+  s.setModel('mock-pro', { simulate: 'hard_quota' })
+  s.setModel('gpt-4o', { enabled: true })
+  useHealth.getState().markHealthy('mock-lite')
+  useChat.getState().newConversation()
+  await sendUserMessage('keyless skip check', [])
+  const dead2 = lastAssistant()
+  check(
+    'keyless model is never attempted',
+    !(dead2.attempts ?? []).some((t) => t.modelId === 'gpt-4o'),
+    JSON.stringify(dead2.attempts?.map((t) => t.modelId)),
+  )
+  check('summary explains the missing key', (dead2.error ?? '').includes('GPT-4o') && /no api key/i.test(dead2.error ?? ''), dead2.error)
+  s.setModel('gpt-4o', { enabled: false })
+
+  // Bench expires (simulated) → the model quietly rejoins the chain.
+  useHealth.getState().markHealthy('mock-pro')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useChat.getState().newConversation()
+  await sendUserMessage('welcome back', [])
+  const back = lastAssistant()
+  check('recovered model serves again', back.status === 'complete' && back.modelId === 'mock-pro', `${back.status}/${String(back.modelId)}`)
+
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+}
+
 async function testStop() {
   console.log('stop generation:')
   useHealth.getState().markHealthy('mock-pro')
@@ -271,6 +339,24 @@ async function startFakeProvider(routes: Record<string, FakeRoute>) {
   return { base: `http://127.0.0.1:${port}/v1beta`, seen, close: () => server.close() }
 }
 
+const OR_STREAM_OK = [
+  JSON.stringify({ choices: [{ delta: { content: 'Routed ' } }] }),
+  JSON.stringify({ choices: [{ delta: { content: 'through OpenRouter.' }, finish_reason: 'STOP' }] }),
+  JSON.stringify({ choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }),
+  '[DONE]',
+]
+
+function openrouterModel(base: string): ModelDef {
+  return {
+    id: 'openrouter-test',
+    label: 'OpenRouter Test',
+    provider: 'openrouter',
+    apiModel: 'openrouter/auto',
+    baseURL: base,
+    enabled: true,
+  }
+}
+
 function geminiModel(base: string): ModelDef {
   return {
     id: 'gemini-test',
@@ -279,6 +365,119 @@ function geminiModel(base: string): ModelDef {
     apiModel: 'gemini-2.5-flash',
     baseURL: base,
     enabled: true,
+  }
+}
+
+/**
+ * First-class OpenRouter support: same wire format as OpenAI, but its own
+ * key slot, default endpoint, attribution headers and streaming-usage flag.
+ */
+async function testOpenRouter() {
+  console.log('openrouter adapter (fake provider):')
+  const bodies: Record<string, unknown>[] = []
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      bodies.push(body)
+      return { status: 200, sse: OR_STREAM_OK }
+    },
+    // The key test lists models first, then spends one cheap token.
+    '/v1beta/models': () => ({ status: 200, json: { data: [{ id: 'openrouter/auto' }] } }),
+  })
+
+  try {
+    const cfg: Parameters<typeof openrouterAdapter.run>[0] = {
+      model: openrouterModel(fake.base),
+      turns: [{ role: 'user', text: 'hi' }],
+      systemPrompt: '',
+      temperature: 0.7,
+      maxTokens: 1024,
+      topP: 1,
+      stream: true,
+      apiKey: 'sk-or-fake-key',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    }
+
+    const deltas: string[] = []
+    const usage: number[] = []
+    await openrouterAdapter.run({
+      ...cfg,
+      onEvent: (ev) => {
+        if (ev.type === 'delta') deltas.push(ev.text)
+        if (ev.type === 'usage' && ev.completionTokens) usage.push(ev.completionTokens)
+      },
+    })
+    check('streams the answer', deltas.join('') === 'Routed through OpenRouter.', deltas.join('|'))
+    check('reports streamed usage', usage[0] === 3, String(usage))
+
+    const seen = fake.seen.find((r) => r.url.includes('chat/completions'))
+    check('key rides the bearer header', seen?.headers['authorization'] === 'Bearer sk-or-fake-key', JSON.stringify(seen?.headers))
+    check('sends the X-Title attribution header', seen?.headers['x-title'] === 'Slade', JSON.stringify(seen?.headers))
+    check('sends the HTTP-Referer attribution header', typeof seen?.headers['http-referer'] === 'string', JSON.stringify(seen?.headers))
+    check('asks for usage in streamed turns', JSON.stringify(bodies[0]?.usage) === JSON.stringify({ include: true }), JSON.stringify(bodies[0]))
+
+    // Default endpoint is OpenRouter's own, not api.openai.com. The resolver
+    // is protected, so peek at it through the prototype chain.
+    const resolveBase = (openrouterAdapter as unknown as { resolveBase: (b?: string, m?: ModelDef) => string }).resolveBase.bind(openrouterAdapter)
+    check('defaults to openrouter.ai when no baseURL is set', resolveBase() === 'https://openrouter.ai/api/v1', resolveBase())
+    check('model baseURL still wins', resolveBase(undefined, openrouterModel(fake.base)) === fake.base.replace(/\/+$/, ''))
+
+    // Key test spends one cheap token, like the OpenAI flavour does.
+    const probe = await openrouterAdapter.testKey('sk-or-fake-key', fake.base, openrouterModel(fake.base))
+    check('key test passes against a live endpoint', probe.ok === true, probe.message)
+  } finally {
+    fake.close()
+  }
+}
+
+/**
+ * OpenRouter quota walls (HTTP 402) must classify as hard_quota, bench the
+ * model on a timed cooldown, and hand the turn to the next model — the same
+ * engine behaviour every other provider gets.
+ */
+async function testOpenRouterFailover() {
+  console.log('openrouter failover:')
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': () => ({
+      status: 402,
+      json: { error: { code: 402, message: 'Your account balance is insufficient.', status: 'PAYMENT_REQUIRED' } },
+    }),
+  })
+
+  const settings = useSettings.getState()
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+  settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+  // Pin it primary: the model under test is appended last in priority order,
+  // and the mocks would otherwise serve the turn before it ever runs.
+  settings.pin('openrouter-test')
+
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    useChat.getState().newConversation()
+    await sendUserMessage('quota wall check', [])
+    const a = lastAssistant()
+    check('turn completes via failover', a.status === 'complete', `${a.status}: ${a.error ?? ''}`)
+    check(
+      'failed chain records the OpenRouter attempt',
+      JSON.stringify(a.failedChain) === JSON.stringify(['openrouter-test']),
+      JSON.stringify(a.failedChain),
+    )
+    // The turn succeeded via failover, but the failed primary's diagnostics
+    // must survive on the message so the "fell back from" chip can explain why.
+    check('402 classifies as hard quota', a.attempts?.[0]?.failure === 'hard_quota', JSON.stringify(a.attempts))
+    check(
+      'quota reason survives to the transcript',
+      (a.attempts?.[0]?.message ?? '').includes('insufficient'),
+      JSON.stringify(a.attempts?.map((t) => t.message)),
+    )
+    check('serving model recorded', a.modelId === 'mock-pro', String(a.modelId))
+    const h = useHealth.getState().byModel['openrouter-test']
+    check('quota wall benches on a timed cooldown', h?.state === 'cooldown' && (h?.cooldownUntil ?? 0) > Date.now(), h?.state)
+  } finally {
+    settings.removeModel('openrouter-test')
+    fake.close()
   }
 }
 
@@ -439,9 +638,12 @@ async function main() {
   testClassify()
   testErrorDetail()
   await testMockStream()
+  await testOpenRouter()
   await testGoogleAgainstFakeProvider()
   await testFailedTurnExplainsItself()
   await testFailover()
+  await testChainVisibility()
+  await testOpenRouterFailover()
   await testStop()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)

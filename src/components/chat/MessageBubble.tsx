@@ -130,14 +130,19 @@ function ModelAttribution({
 }) {
   const final = labelOf(message.modelId ?? message.chain?.[message.chain.length - 1])
   const fellBackFrom = message.failedChain && message.failedChain.length > 0
+  // Pair each failed model with the provider's own reason, when we kept one.
+  const reasonByModel = new Map((message.attempts ?? []).map((a) => [a.modelId, a.message]))
+  const failedDetail = (message.failedChain ?? [])
+    .map((id) => {
+      const reason = reasonByModel.get(id)
+      return reason ? `${labelOf(id)} — ${reason}` : labelOf(id)
+    })
+    .join('; ')
   return (
     <span className="msg-model">
       <span className="msg-model-name">{final || 'Assistant'}</span>
       {fellBackFrom ? (
-        <span
-          className="msg-fallback"
-          title={`Failed before answering: ${message.failedChain!.map(labelOf).join(', ')}`}
-        >
+        <span className="msg-fallback" title={failedDetail ? `Failed before answering: ${failedDetail}` : undefined}>
           ← fell back from {message.failedChain!.map(labelOf).filter(Boolean).join(', ')}
         </span>
       ) : null}
@@ -349,8 +354,14 @@ function ErrorBanner({ message }: { message: Message }) {
           onClick={async () => {
             setBusy(true)
             // Retry gets a clean slate: clear cooldowns so the chain can walk.
+            // Every enabled model is revived, not just the ones in failedChain —
+            // models benched by an earlier auth error never appear in the failed
+            // chain, and leaving them out is what made retries hit the same wall.
             const { useHealth } = await import('../../store/health')
-            for (const id of message.failedChain ?? []) useHealth.getState().markHealthy(id)
+            const { useSettings } = await import('../../store/settings')
+            for (const m of useSettings.getState().s.models) {
+              if (m.enabled) useHealth.getState().markHealthy(m.id)
+            }
             await retryAssistant(message.id)
             toast({ kind: 'info', title: 'Retrying with cooldowns cleared…' })
           }}
