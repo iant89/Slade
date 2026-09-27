@@ -25,6 +25,7 @@ export function cooldownMsFor(failure: FailureClass, consecutiveFailures: number
     case 'unknown':
       return backoff(20_000, 5 * 60_000)
     default:
+      // auth, bad_request, aborted, success: waiting cannot change the answer.
       return 0
   }
 }
@@ -77,7 +78,10 @@ export const useHealth = create<HealthState>((set, get) => {
         const byModel = { ...st.byModel }
         const h = ensure(byModel, modelId)
         const consecutive = h.consecutiveFailures + 1
-        cooldownMs = failure === 'auth' ? 0 : cooldownMsFor(failure, consecutive)
+        // Note: the cooldown is a function of the *class*, not of `retryable`.
+        // A hard quota is not retryable within this turn but is still worth
+        // benching for future ones; a bad request is neither.
+        cooldownMs = cooldownMsFor(failure, consecutive)
         cooldownUntil = cooldownMs ? at + cooldownMs : 0
         byModel[modelId] = {
           ...h,

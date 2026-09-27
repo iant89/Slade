@@ -1,10 +1,30 @@
 import type { AttemptConfig, ProviderAdapter, KeyTestResult } from './base'
+import type { ModelDef } from '../types'
 import { ProviderError, classifyNetworkError, errorFromResponse, sseData, splitDataURL } from './base'
 
 interface Block {
   type: 'text' | 'image'
   text?: string
   source?: { type: 'base64'; media_type: string; data: string }
+}
+
+const ANTHROPIC_BASE = 'https://api.anthropic.com/v1'
+
+/** Anthropic reports stream failures as typed frames, not HTTP codes. */
+function streamError(type: string, message: string): ProviderError {
+  switch (type) {
+    case 'overloaded_error':
+      return new ProviderError('overloaded', message, true)
+    case 'rate_limit_error':
+      return new ProviderError('soft_rate_limit', message, true)
+    case 'authentication_error':
+    case 'permission_error':
+      return new ProviderError('auth', message, false)
+    case 'invalid_request_error':
+      return new ProviderError('unknown', message, false)
+    default:
+      return new ProviderError('unknown', message, true)
+  }
 }
 
 export class AnthropicAdapter implements ProviderAdapter {
@@ -31,9 +51,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       messages,
     }
 
+    const base = (cfg.model.baseURL ?? ANTHROPIC_BASE).replace(/\/+$/, '')
+
     let res: Response
     try {
-      res = await fetch('https://api.anthropic.com/v1/messages', {
+      res = await fetch(`${base}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -72,7 +94,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           delta?: { text?: string }
           message?: { usage?: { input_tokens?: number; output_tokens?: number } }
           usage?: { input_tokens?: number; output_tokens?: number }
-          error?: { message?: string }
+          error?: { message?: string; type?: string }
         }
         try {
           json = JSON.parse(data)
@@ -86,7 +108,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         } else if (json.type === 'message_delta' && json.usage) {
           cfg.onEvent({ type: 'usage', completionTokens: json.usage.output_tokens })
         } else if (json.type === 'error' && json.error) {
-          throw new ProviderError('overloaded', json.error.message ?? 'Provider stream error.', true)
+          throw streamError(json.error.type ?? '', json.error.message ?? 'Provider stream error.')
         }
       }
       cfg.onEvent({ type: 'done' })
@@ -95,10 +117,14 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 
-  async testKey(apiKey: string): Promise<KeyTestResult> {
+  async testKey(apiKey: string, baseURL?: string, model?: ModelDef): Promise<KeyTestResult> {
+    const base = (baseURL ?? model?.baseURL ?? ANTHROPIC_BASE).replace(/\/+$/, '')
+    // Exercise the cheapest configured model — a real messages call, because
+    // "the key is accepted" and "the key can actually answer" are different
+    // claims and only the second one matters here.
+    const apiModel = model?.apiModel ?? 'claude-3-5-haiku-latest'
     try {
-      // 1-token request; cheapest possible liveness check.
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      const res = await fetch(`${base}/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -106,9 +132,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },
-        body: JSON.stringify({ model: 'claude-3-5-haiku-latest', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({ model: apiModel, max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] }),
       })
-      if (res.ok) return { ok: true, message: 'Connected — key accepted.' }
+      if (res.ok) return { ok: true, message: `Connected — key accepted, and ${apiModel} answers.` }
       const err = await errorFromResponse(res)
       return { ok: false, message: err.message, failure: err.failure }
     } catch (err) {

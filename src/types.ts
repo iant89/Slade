@@ -21,10 +21,12 @@ export type FailureClass =
   | 'network'
   | 'overloaded'
   | 'aborted'
+  /** The provider understood the request and refused it (HTTP 400 and friends). */
+  | 'bad_request'
   | 'unknown'
 
 /** What a mock model should do on its next request (failover demo control). */
-export type MockSimulate = 'ok' | 'soft_rate_limit' | 'hard_quota' | 'timeout' | 'network' | 'auth'
+export type MockSimulate = 'ok' | 'soft_rate_limit' | 'hard_quota' | 'timeout' | 'network' | 'auth' | 'bad_request'
 
 export interface ModelOverrides {
   temperature?: number
@@ -60,6 +62,7 @@ export const FAILURE_LABEL: Record<FailureClass, string> = {
   network: 'Network error',
   overloaded: 'Provider overloaded',
   aborted: 'Cancelled',
+  bad_request: 'Request rejected',
   unknown: 'Unknown error',
 }
 
@@ -128,6 +131,24 @@ export interface Artifact {
 export type Role = 'user' | 'assistant'
 export type MessageStatus = 'pending' | 'streaming' | 'complete' | 'error' | 'cancelled'
 
+/**
+ * One model that was tried for a turn, and what the provider actually said.
+ * Persisted with the message so a failed turn can explain itself later.
+ */
+export interface AttemptFailure {
+  modelId: string
+  label: string
+  failure: FailureClass
+  /** Provider-supplied reason, already redacted and humanized. */
+  message: string
+  /** HTTP status when the failure came from a response, else 0. */
+  status?: number
+  /** Wall-clock ms spent on this attempt before it failed. */
+  elapsedMs: number
+  /** True when the model failed after it had already started streaming. */
+  midStream: boolean
+}
+
 /** A mid-stream handoff from one model to another. */
 export interface Handoff {
   fromModelId: string
@@ -162,6 +183,8 @@ export interface Message {
   usage?: Usage
   error?: string
   errorClass?: FailureClass
+  /** Per-model detail for every attempt that failed during this turn. */
+  attempts?: AttemptFailure[]
   editedAt?: number
   /** Latency to first token, ms. */
   ttftMs?: number
@@ -214,7 +237,10 @@ export interface DefaultsSettings {
   typingIndicator: boolean
   autoScroll: 'smooth' | 'instant' | 'off'
   failoverStrategy: FailoverStrategy
+  /** Max gap between streamed chunks before the stream is declared stalled. */
   requestTimeoutMs: number
+  /** How long to wait for the *first* token. Reasoning models need more. */
+  firstTokenTimeoutMs: number
 }
 
 export interface ArtifactSettings {
