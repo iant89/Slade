@@ -98,6 +98,27 @@ as context**):
   reduced motion, Enter-to-send
 - **Data** — export/import everything as JSON, clear history, reset to defaults
 
+## Deploy to GitHub Pages
+
+Deployment is fully automated via GitHub Actions (`.github/workflows/deploy-pages.yml`):
+
+- **Triggers** — every push to `main`, plus a manual *Run workflow* button
+  (Actions → Deploy to GitHub Pages → Run workflow).
+- **Build** — `npm ci && npm run build` with `VITE_PUBLIC_BASE=/<repo>/` so asset
+  URLs match the project-page path `https://<user>.github.io/<repo>/` (the base
+  is read in `vite.config.ts`; local dev stays at `/`).
+- **Deploy** — the official `actions/upload-pages-artifact` + `actions/deploy-pages`
+  flow (no orphan `gh-pages` branch). A `.nojekyll` is shipped so GitHub serves
+  `dist/` as-is, and `actions/configure-pages` with `enablement: true` flips
+  Settings → Pages → Source to *GitHub Actions* automatically on the first run.
+
+To deploy manually without CI:
+
+```bash
+VITE_PUBLIC_BASE=/Slade/ npm run build   # adjust if the repo is renamed
+npx vite preview                         # serves the production build
+```
+
 ## Privacy & security
 
 API keys stay in your browser's local storage and are sent **only** to the provider you
