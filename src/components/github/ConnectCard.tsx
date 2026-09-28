@@ -26,6 +26,7 @@ export function ConnectCard() {
   const signOut = useGitHub((s) => s.signOut)
   const toast = useUI((s) => s.toast)
   const openSettings = useUI((s) => s.openSettings)
+  const configureGithub = useUI((s) => s.configureGithub)
 
   const [draftClientId, setDraftClientId] = useState(clientId)
   const [tokenDraft, setTokenDraft] = useState('')
@@ -165,7 +166,7 @@ export function ConnectCard() {
             <button className="btn primary" onClick={() => void startSignIn()} disabled={authStatus === 'connecting'} type="button">
               <IconGithub size={14} /> Sign in with GitHub
             </button>
-            <button className="btn ghost small" onClick={() => openSettings('github')} type="button">
+            <button className="btn ghost small" onClick={() => configureGithub()} aria-label="Configure GitHub sign-in (Client ID, relay, scopes)" type="button">
               Configure
             </button>
           </div>

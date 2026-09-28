@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ModelDef, ProviderId } from '../../types'
 import { useSettings, DEFAULT_SETTINGS } from '../../store/settings'
 import { useHealth } from '../../store/health'
@@ -519,9 +519,58 @@ function GitHubTab() {
   const signOut = useGitHub((s) => s.signOut)
   const loadRepos = useGitHub((s) => s.loadRepos)
   const toast = useUI((s) => s.toast)
+  const configRequest = useUI((s) => s.githubConfigRequest)
   const [cid, setCid] = useState(clientId)
   const [relay, setRelay] = useState(relayUrl)
   const [scopeDraft, setScopeDraft] = useState(scope)
+  const [configHighlight, setConfigHighlight] = useState(false)
+  const oauthRef = useRef<HTMLDivElement | null>(null)
+  const clientIdInputRef = useRef<HTMLInputElement | null>(null)
+  const highlightTimerRef = useRef<number | null>(null)
+  // Track the last request id we handled, so a re-render caused by an
+  // unrelated state change won't restart the highlight/focus. StrictMode
+  // setup→cleanup→setup in dev will see the same id twice, so we guard that
+  // by resetting it in cleanup.
+  const lastHandledRequestRef = useRef(0)
+
+  // Keep the local drafts in sync if the saved values change (e.g. a sign-in
+  // finishes, or another tab saves them).
+  useEffect(() => setCid(clientId), [clientId])
+  useEffect(() => setRelay(relayUrl), [relayUrl])
+  useEffect(() => setScopeDraft(scope), [scope])
+
+  // When the user clicks "Configure" next to "Sign in with GitHub", the
+  // settings modal opens on the GitHub tab and (even if it was already open
+  // on that tab — the case where the button used to *do nothing*) we scroll
+  // the OAuth/relay/scopes block into view, briefly highlight it, and focus
+  // the Client ID field so the next keystroke goes straight in.
+  useEffect(() => {
+    if (!configRequest || configRequest === lastHandledRequestRef.current) return
+    lastHandledRequestRef.current = configRequest
+    const node = oauthRef.current
+    if (!node) return
+    node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setConfigHighlight(true)
+    // Focus the Client ID input after the smooth scroll settles.
+    const focusTimer = window.setTimeout(() => clientIdInputRef.current?.focus(), 400)
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current)
+    highlightTimerRef.current = window.setTimeout(() => {
+      setConfigHighlight(false)
+      highlightTimerRef.current = null
+    }, 2400)
+    return () => {
+      window.clearTimeout(focusTimer)
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current)
+        highlightTimerRef.current = null
+      }
+      // Drop the guard so StrictMode's second setup pass (or an unmount/remount
+      // of the tab) can re-run the animation. Clear the visual state so we
+      // don't leave the highlight stuck if the effect is torn down.
+      lastHandledRequestRef.current = 0
+      setConfigHighlight(false)
+    }
+  }, [configRequest])
 
   return (
     <div>
@@ -531,6 +580,7 @@ function GitHubTab() {
       </div>
       {authError ? <div className="provider-test fail" role="status"><IconAlert size={12} /> {authError}</div> : null}
 
+      <div ref={oauthRef} className={`gh-config-block${configHighlight ? ' highlight' : ''}`}>
       <SectionTitle>OAuth app</SectionTitle>
       <p className="settings-note">
         Slade uses GitHub&rsquo;s <strong>device flow</strong>: you get a short code, approve it on github.com, and the
@@ -539,6 +589,7 @@ function GitHubTab() {
       <FieldRow label="Client ID" hint="OAuth app → Enable Device Flow → copy the Client ID (the public one)">
         <div className="gh-row">
           <input
+            ref={clientIdInputRef}
             className="gh-input"
             value={cid}
             placeholder="Iv1.… or Ov23li…"
@@ -628,6 +679,7 @@ function GitHubTab() {
           </li>
         ))}
       </ul>
+      </div>{/* .gh-config-block */}
 
       <SectionTitle>Publishing defaults</SectionTitle>
       <SelectRow

@@ -1612,6 +1612,16 @@ input[type='range']::-moz-range-thumb {
 .gh-settings-card .gh-connect,
 .gh-settings-card .gh-device,
 .gh-settings-card .gh-account { margin-bottom: 0; background: var(--bg-panel); }
+.gh-config-block {
+  border-radius: var(--radius-m);
+  padding: 4px 12px 10px;
+  margin: 0 -12px 6px;
+  transition: background-color 0.5s ease, box-shadow 0.5s ease;
+}
+.gh-config-block.highlight {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
 .gh-scope-list { list-style: none; margin: 6px 0 14px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .gh-scope-list li { display: flex; align-items: center; gap: 9px; font-size: 0.76em; color: var(--text-muted); }
 .gh-scope-list code {
