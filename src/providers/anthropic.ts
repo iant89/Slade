@@ -1,6 +1,14 @@
 import type { AttemptConfig, ProviderAdapter, KeyTestResult } from './base'
 import type { ModelDef } from '../types'
-import { ProviderError, classifyNetworkError, errorFromResponse, sseData, splitDataURL } from './base'
+import {
+  ProviderError,
+  classifyNetworkError,
+  emptyCompletionError,
+  errorFromResponse,
+  isTruncatingFinish,
+  sseData,
+  splitDataURL,
+} from './base'
 
 interface Block {
   type: 'text' | 'image'
@@ -74,24 +82,46 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     if (!cfg.stream) {
       const data = (await res.json()) as {
-        content?: { type: string; text?: string }[]
+        content?: { type: string; text?: string; thinking?: string }[]
+        stop_reason?: string | null
         usage?: { input_tokens?: number; output_tokens?: number }
       }
+      let answerChars = 0
+      let thinkingChars = 0
       for (const block of data.content ?? []) {
-        if (block.type === 'text' && block.text) cfg.onEvent({ type: 'delta', text: block.text })
+        if (block.type === 'text' && block.text) {
+          answerChars += block.text.length
+          cfg.onEvent({ type: 'delta', text: block.text })
+        }
+        // Extended thinking: the scratchpad, billed inside output_tokens.
+        if (block.type === 'thinking' && block.thinking) {
+          thinkingChars += block.thinking.length
+          cfg.onEvent({ type: 'reasoning', text: block.thinking })
+        }
       }
       if (data.usage) {
         cfg.onEvent({ type: 'usage', promptTokens: data.usage.input_tokens, completionTokens: data.usage.output_tokens })
       }
-      cfg.onEvent({ type: 'done' })
+      if (answerChars === 0) {
+        throw emptyCompletionError({
+          finishReason: data.stop_reason,
+          reasoningChars: thinkingChars,
+          maxTokens: cfg.maxTokens,
+        })
+      }
+      cfg.onEvent({ type: 'done', finishReason: data.stop_reason ?? undefined, truncated: isTruncatingFinish(data.stop_reason) })
       return
     }
+
+    let answerChars = 0
+    let thinkingChars = 0
+    let stopReason: string | null | undefined
 
     try {
       for await (const data of sseData(res)) {
         let json: {
           type?: string
-          delta?: { text?: string }
+          delta?: { text?: string; thinking?: string; stop_reason?: string | null }
           message?: { usage?: { input_tokens?: number; output_tokens?: number } }
           usage?: { input_tokens?: number; output_tokens?: number }
           error?: { message?: string; type?: string }
@@ -102,16 +132,30 @@ export class AnthropicAdapter implements ProviderAdapter {
           continue
         }
         if (json.type === 'content_block_delta' && json.delta?.text) {
+          answerChars += json.delta.text.length
           cfg.onEvent({ type: 'delta', text: json.delta.text })
+        } else if (json.type === 'content_block_delta' && json.delta?.thinking) {
+          // `thinking_delta`: extended-thinking scratchpad. Not answer text,
+          // but proof the model is working — the engine treats it as liveness.
+          thinkingChars += json.delta.thinking.length
+          cfg.onEvent({ type: 'reasoning', text: json.delta.thinking })
         } else if (json.type === 'message_start' && json.message?.usage) {
           cfg.onEvent({ type: 'usage', promptTokens: json.message.usage.input_tokens })
-        } else if (json.type === 'message_delta' && json.usage) {
-          cfg.onEvent({ type: 'usage', completionTokens: json.usage.output_tokens })
+        } else if (json.type === 'message_delta') {
+          if (json.delta?.stop_reason) stopReason = json.delta.stop_reason
+          if (json.usage) cfg.onEvent({ type: 'usage', completionTokens: json.usage.output_tokens })
         } else if (json.type === 'error' && json.error) {
           throw streamError(json.error.type ?? '', json.error.message ?? 'Provider stream error.')
         }
       }
-      cfg.onEvent({ type: 'done' })
+      if (answerChars === 0) {
+        throw emptyCompletionError({
+          finishReason: stopReason,
+          reasoningChars: thinkingChars,
+          maxTokens: cfg.maxTokens,
+        })
+      }
+      cfg.onEvent({ type: 'done', finishReason: stopReason ?? undefined, truncated: isTruncatingFinish(stopReason) })
     } catch (err) {
       throw classifyNetworkError(err)
     }

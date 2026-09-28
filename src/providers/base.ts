@@ -100,6 +100,81 @@ export interface ProviderAdapter {
 }
 
 /* ------------------------------------------------------------------ */
+/* "The provider answered — but there is no answer in it"              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Stop reasons that mean "the output cap ended this", not "the model
+ * finished". Providers spell it differently; all of them are lowercase-folded
+ * before the lookup.
+ */
+const TRUNCATING_FINISH = new Set(['length', 'max_tokens', 'max_output_tokens', 'token_limit_exceeded'])
+
+export function isTruncatingFinish(finishReason: string | undefined | null): boolean {
+  return Boolean(finishReason && TRUNCATING_FINISH.has(finishReason.toLowerCase()))
+}
+
+/** What an adapter observed when a completion came back with no answer text. */
+export interface EmptyCompletion {
+  /** The provider's own finish/stop reason, when it sent one. */
+  finishReason?: string | null
+  /** Characters of internal reasoning the model produced. */
+  reasoningChars: number
+  /** Reasoning tokens the provider billed, when it reported them. */
+  reasoningTokens?: number
+  /** The output cap the request was sent with. */
+  maxTokens: number
+  /** Upstream that actually served the request (routers: `openrouter/auto`). */
+  routedModel?: string
+}
+
+/**
+ * Explain an empty completion instead of shrugging at it.
+ *
+ * A 200 with no text has three genuinely different causes, and only one of
+ * them is a mystery:
+ *
+ * 1. **The budget went to reasoning.** Reasoning models bill thinking against
+ *    the same `max_tokens` as the answer, so a model that thinks for longer
+ *    than the cap returns `finish_reason: "length"` with empty content — and,
+ *    per OpenRouter's own docs, retrying it unchanged fails again. Classified
+ *    `token_budget`: no cooldown (the model is fine), and the engine raises
+ *    the cap and asks once more.
+ * 2. **The budget was simply too small** — same remedy, different wording,
+ *    because there is no reasoning to point at.
+ * 3. **Nothing at all**, with a `stop` finish: the case the old generic
+ *    "returned no text at all" message was written for. Kept verbatim so the
+ *    one truly unexplained outcome still reads the way it always did.
+ */
+export function emptyCompletionError(e: EmptyCompletion): ProviderError {
+  const route = e.routedModel ? ` Routed to ${e.routedModel}.` : ''
+  const finish = e.finishReason ? ` The provider's stop reason was "${e.finishReason}".` : ''
+  const reasoned = e.reasoningTokens
+    ? `${e.reasoningTokens.toLocaleString('en-US')} reasoning tokens billed`
+    : `${e.reasoningChars.toLocaleString('en-US')} characters of reasoning streamed`
+
+  if (isTruncatingFinish(e.finishReason) && (e.reasoningTokens || e.reasoningChars > 0)) {
+    return new ProviderError(
+      'token_budget',
+      `The model spent its whole ${e.maxTokens.toLocaleString('en-US')}-token output budget thinking and never reached an answer (${reasoned}).${route}${finish} Raise the output cap — retrying with the same budget will fail the same way.`,
+      false,
+    )
+  }
+  if (isTruncatingFinish(e.finishReason)) {
+    return new ProviderError(
+      'token_budget',
+      `The model hit its ${e.maxTokens.toLocaleString('en-US')}-token output cap before writing any answer text.${route}${finish} Raise Max tokens in Settings → Defaults.`,
+      false,
+    )
+  }
+  return new ProviderError(
+    'unknown',
+    `The provider accepted the request but returned no text at all.${route}${finish}`,
+    false,
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Shared helpers                                                      */
 /* ------------------------------------------------------------------ */
 

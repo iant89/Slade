@@ -3,8 +3,10 @@ import type { AttemptConfig, ProviderAdapter, KeyTestResult } from './base'
 import {
   ProviderError,
   classifyNetworkError,
+  emptyCompletionError,
   errorFromResponse,
   extractApiErrorMessage,
+  isTruncatingFinish,
   sseData,
   splitDataURL,
 } from './base'
@@ -23,7 +25,7 @@ interface Candidate {
 
 interface GenerateResponse {
   candidates?: Candidate[]
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number }
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
   promptFeedback?: { blockReason?: string; blockMessage?: string }
   error?: { message?: string; status?: string; code?: number }
 }
@@ -46,14 +48,36 @@ const TERMINAL_FINISH: Record<string, string> = {
   UNEXPECTED_TOOL_CALL: 'stopped — unexpected tool call',
 }
 
-/** Turn a 200-with-no-content response into an accurate, non-retryable error. */
-function noContentError(candidates: Candidate[], promptFeedback?: { blockReason?: string; blockMessage?: string }): ProviderError | null {
+/**
+ * Turn a 200-with-no-content response into an accurate, non-retryable error.
+ *
+ * `answeredChars` is what the stream already delivered. A `MAX_TOKENS` finish
+ * after real output is a truncation, not a failure — the engine reports it as
+ * such, and throwing here instead would discard a good partial answer and
+ * trigger a needless failover.
+ */
+function noContentError(
+  candidates: Candidate[],
+  promptFeedback: { blockReason?: string; blockMessage?: string } | undefined,
+  info: { answeredChars: number; thinkingChars: number; thoughtsTokens?: number; maxTokens: number },
+): ProviderError | null {
   const block = promptFeedback?.blockReason
   if (block) {
     const why = block === 'OTHER' ? 'blocked for safety or terms-of-service reasons' : `blocked (${block})`
     return new ProviderError('unknown', `The provider ${why}${promptFeedback?.blockMessage ? `: ${promptFeedback.blockMessage}` : '.'}`, false)
   }
+  if (info.answeredChars > 0) return null
   const finish = candidates[0]?.finishReason
+  // Gemini 2.5 thinking models bill thoughts against maxOutputTokens: a budget
+  // that only fits the thinking produces MAX_TOKENS and no answer at all.
+  if (isTruncatingFinish(finish)) {
+    return emptyCompletionError({
+      finishReason: finish,
+      reasoningChars: info.thinkingChars,
+      reasoningTokens: info.thoughtsTokens,
+      maxTokens: info.maxTokens,
+    })
+  }
   if (finish && finish !== 'STOP') {
     const why = TERMINAL_FINISH[finish] ?? `stopped early (${finish})`
     return new ProviderError('unknown', `The provider ${why} and returned no answer text.`, false)
@@ -125,22 +149,48 @@ export class GoogleAdapter implements ProviderAdapter {
     }
     if (!res.ok) throw await errorFromResponse(res)
 
+    // What the stream has carried so far — the evidence for explaining an
+    // empty answer, and the reason a MAX_TOKENS finish is not always a failure.
+    let answeredChars = 0
+    let thinkingChars = 0
+    let thoughtsTokens: number | undefined
+    let finishReason: string | undefined
+
     const emit = (json: GenerateResponse) => {
       for (const candidate of json.candidates ?? []) {
+        if (candidate.finishReason) finishReason = candidate.finishReason
         for (const part of candidate.content?.parts ?? []) {
+          if (!part.text) continue
           // Gemini 2.5 streams its reasoning as `thought` parts. Those are
-          // internal; rendering them would dump scratchpad into the answer.
-          if (part.text && !part.thought) cfg.onEvent({ type: 'delta', text: part.text })
+          // internal; rendering them would dump scratchpad into the answer —
+          // but they are proof the model is working, so they are reported as
+          // reasoning rather than dropped.
+          if (part.thought) {
+            thinkingChars += part.text.length
+            cfg.onEvent({ type: 'reasoning', text: part.text })
+          } else {
+            answeredChars += part.text.length
+            cfg.onEvent({ type: 'delta', text: part.text })
+          }
         }
       }
       if (json.usageMetadata) {
+        thoughtsTokens = json.usageMetadata.thoughtsTokenCount ?? thoughtsTokens
         cfg.onEvent({
           type: 'usage',
           promptTokens: json.usageMetadata.promptTokenCount,
           completionTokens: json.usageMetadata.candidatesTokenCount,
+          reasoningTokens: json.usageMetadata.thoughtsTokenCount,
         })
       }
     }
+
+    const emptyInfo = () => ({
+      answeredChars,
+      thinkingChars,
+      thoughtsTokens,
+      maxTokens: cfg.maxTokens,
+    })
 
     if (!cfg.stream) {
       let json: GenerateResponse
@@ -151,10 +201,10 @@ export class GoogleAdapter implements ProviderAdapter {
       }
       const frameError = errorFromFrame(json)
       if (frameError) throw frameError
-      const blocked = noContentError(json.candidates ?? [], json.promptFeedback)
-      if (blocked) throw blocked
       emit(json)
-      cfg.onEvent({ type: 'done' })
+      const blocked = noContentError(json.candidates ?? [], json.promptFeedback, emptyInfo())
+      if (blocked) throw blocked
+      cfg.onEvent({ type: 'done', finishReason, truncated: isTruncatingFinish(finishReason) })
       return
     }
 
@@ -169,11 +219,16 @@ export class GoogleAdapter implements ProviderAdapter {
         }
         const frameError = errorFromFrame(json)
         if (frameError) throw frameError
-        const blocked = noContentError(json.candidates ?? [], json.promptFeedback)
-        if (blocked) throw blocked
         emit(json)
+        // After emit: a frame can carry the finish reason together with the
+        // last of the answer text, and text already delivered counts.
+        const blocked = noContentError(json.candidates ?? [], json.promptFeedback, emptyInfo())
+        if (blocked) throw blocked
       }
-      cfg.onEvent({ type: 'done' })
+      if (answeredChars === 0) {
+        throw emptyCompletionError({ finishReason, reasoningChars: thinkingChars, reasoningTokens: thoughtsTokens, maxTokens: cfg.maxTokens })
+      }
+      cfg.onEvent({ type: 'done', finishReason, truncated: isTruncatingFinish(finishReason) })
     } catch (err) {
       throw classifyNetworkError(err)
     }
@@ -206,7 +261,13 @@ export class GoogleAdapter implements ProviderAdapter {
           candidates?: Candidate[]
           promptFeedback?: { blockReason?: string }
         } | null
-        const blocked = data ? noContentError(data.candidates ?? [], data.promptFeedback) : null
+        const blocked = data
+          ? noContentError(data.candidates ?? [], data.promptFeedback, {
+              answeredChars: 0,
+              thinkingChars: 0,
+              maxTokens: 1024,
+            })
+          : null
         if (blocked) return { ok: false, message: blocked.message, failure: blocked.failure }
         // A 200 with nothing in it is not a pass. This is the false green
         // light that made the old key test useless.

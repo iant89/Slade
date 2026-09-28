@@ -106,7 +106,8 @@ import { MODEL_CATALOG, catalogFor, formatCtx, formatPrice } from '../src/lib/mo
 import { useUI } from '../src/store/ui'
 import { googleAdapter } from '../src/providers/google'
 import { openrouterAdapter } from '../src/providers/openai'
-import type { ModelDef } from '../src/types'
+import { escalateTokens, requestMaxTokens } from '../src/engine/completion'
+import type { ModelDef, StreamEvent } from '../src/types'
 import { createServer } from 'node:http'
 
 let failures = 0
@@ -724,6 +725,396 @@ async function testOpenRouterFailover() {
     check('quota wall benches on a timed cooldown', h?.state === 'cooldown' && (h?.cooldownUntil ?? 0) > Date.now(), h?.state)
   } finally {
     settings.removeModel('openrouter-test')
+    fake.close()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reasoning models: the "returned no text at all" family              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The stream shapes OpenRouter documents for reasoning models: thinking
+ * arrives on `delta.reasoning` / `reasoning_content` / `reasoning_details`,
+ * and a budget consumed entirely by thinking ends with `finish_reason:
+ * "length"` and *zero* content. `openrouter/auto` routes to reasoning models
+ * routinely, which is how an orchestrator step used to come back with nothing
+ * but "the provider accepted the request but returned no text at all".
+ */
+function orReasoningOnlyStream(billedTokens: number): string[] {
+  return [
+    JSON.stringify({
+      model: 'deepseek/deepseek-r1',
+      choices: [{ index: 0, delta: { role: 'assistant', reasoning: 'A single-file React/TS vault needs a store first. ' } }],
+    }),
+    JSON.stringify({ choices: [{ index: 0, delta: { reasoning_content: 'Filtering, tags, import/export…' } }] }),
+    JSON.stringify({
+      choices: [
+        {
+          index: 0,
+          delta: {
+            reasoning_details: [
+              { type: 'text', text: 'Sketch the component tree before writing code.' },
+              { type: 'encrypted', data: 'ZZ9vcmFuZ2U=' },
+            ],
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 900,
+        completion_tokens: billedTokens,
+        completion_tokens_details: { reasoning_tokens: billedTokens },
+      },
+    }),
+    JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'length', native_finish_reason: 'length' }] }),
+    '[DONE]',
+  ]
+}
+
+function orTextStream(text: string, finishReason = 'stop'): string[] {
+  return [
+    JSON.stringify({ model: 'deepseek/deepseek-r1', choices: [{ index: 0, delta: { role: 'assistant', content: text } }] }),
+    JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 12, completion_tokens: 40 } }),
+    '[DONE]',
+  ]
+}
+
+/** The answer written into the reasoning channel, content left null. */
+function orAnswerInReasoningStream(answer: string): string[] {
+  return [
+    JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', reasoning: answer } }] }),
+    JSON.stringify({
+      choices: [{ index: 0, delta: { content: null }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 40, completion_tokens: 26, completion_tokens_details: { reasoning_tokens: 25 } },
+    }),
+    '[DONE]',
+  ]
+}
+
+/** OpenRouter mid-stream error frame: HTTP status in `error.code`. */
+function orMidStreamError(code: number, message: string, errorType: string): string[] {
+  return [
+    JSON.stringify({ choices: [{ index: 0, delta: { content: 'Partial ' } }] }),
+    JSON.stringify({
+      id: 'gen-1',
+      object: 'chat.completion.chunk',
+      model: 'deepseek/deepseek-r1',
+      provider: 'DeepSeek',
+      error: { code, message, metadata: { error_type: errorType, provider_code: 'rate_limited' } },
+      choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }],
+    }),
+    '[DONE]',
+  ]
+}
+
+/** The stream the reasoning fake provider serves next (set by `runOpenRouter`). */
+let orServing: string[] = []
+
+async function runOpenRouter(model: ModelDef, sse: string[], opts?: { stream?: boolean; maxTokens?: number }) {
+  orServing = sse
+  const events: StreamEvent[] = []
+  let error: { failure?: string; message?: string } | undefined
+  try {
+    await openrouterAdapter.run({
+      model,
+      turns: [{ role: 'user', text: 'Build the single-file React/TS prompt vault app' }],
+      systemPrompt: 'You are a specialist worker model in Slade.',
+      temperature: 0.7,
+      maxTokens: opts?.maxTokens ?? 4096,
+      topP: 1,
+      stream: opts?.stream ?? true,
+      apiKey: 'sk-or-fake-key',
+      signal: new AbortController().signal,
+      onEvent: (ev) => events.push(ev),
+    })
+  } catch (err) {
+    error = err as { failure?: string; message?: string }
+  }
+  const text = (type: string) => events.filter((e) => e.type === type).map((e) => (e as { text: string }).text).join('')
+  return { events, error, content: text('delta'), reasoning: text('reasoning') }
+}
+
+async function testReasoningStreams() {
+  console.log('reasoning-model streams (fake OpenRouter):')
+  const bodies: Record<string, unknown>[] = []
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      bodies.push(body)
+      return { status: 200, sse: orServing }
+    },
+  })
+  const model = openrouterModel(fake.base)
+
+  try {
+    /* --- the reported failure: thinking ate the whole budget ------------- */
+    const r = await runOpenRouter(model, orReasoningOnlyStream(4096))
+    check('reasoning-only stream is not a silent success', Boolean(r.error), JSON.stringify(r.events))
+    check('it classifies as token_budget, not unknown', r.error?.failure === 'token_budget', String(r.error?.failure))
+    check('the message names the budget that was consumed', /4,096-token output budget/.test(r.error?.message ?? ''), r.error?.message)
+    check('the message says the tokens went to reasoning', /reasoning tokens billed/.test(r.error?.message ?? ''), r.error?.message)
+    check('the message names the model the router picked', (r.error?.message ?? '').includes('deepseek/deepseek-r1'), r.error?.message)
+    check('the message says what to do instead of retrying', /raise the output cap/i.test(r.error?.message ?? ''), r.error?.message)
+    check('the old generic message is gone', !(r.error?.message ?? '').includes('returned no text at all'), r.error?.message)
+
+    /* --- reasoning is liveness, not answer text -------------------------- */
+    const ok = await runOpenRouter(model, [
+      JSON.stringify({ choices: [{ index: 0, delta: { reasoning: 'Thinking about the vault schema…' } }] }),
+      ...orTextStream('Here is the prompt vault app.'),
+    ])
+    check('reasoning arrives on its own channel', ok.reasoning.includes('Thinking about the vault schema'), ok.reasoning)
+    check('reasoning never leaks into the answer', !ok.content.includes('Thinking about'), ok.content)
+    check('the answer still streams', ok.content === 'Here is the prompt vault app.', ok.content)
+    check('a completed stream is not marked truncated', ok.events.some((e) => e.type === 'done' && !e.truncated))
+
+    /* --- truncation is reported, not swallowed --------------------------- */
+    const cut = await runOpenRouter(model, orTextStream('export default function PromptVault() {', 'length'))
+    check('partial answer survives a token-cap stop', cut.content.length > 10, cut.content)
+    check('the stop is flagged as truncation', cut.events.some((e) => e.type === 'done' && e.truncated === true), JSON.stringify(cut.events.at(-1)))
+
+    /* --- answer mislabelled as reasoning is recovered -------------------- */
+    const recovered = await runOpenRouter(model, orAnswerInReasoningStream('{"mode":"answer","answer":"hi"}'))
+    check('an answer written into the reasoning channel is recovered', recovered.content === '{"mode":"answer","answer":"hi"}', recovered.content)
+    check('recovery is not an error', !recovered.error, recovered.error?.message)
+
+    /* --- mid-stream error frames keep their HTTP classification ---------- */
+    const rateLimited = await runOpenRouter(model, orMidStreamError(429, 'Rate limit exceeded', 'rate_limit_exceeded'))
+    check('mid-stream 429 classifies as a rate limit', rateLimited.error?.failure === 'soft_rate_limit', String(rateLimited.error?.failure))
+    const quota = await runOpenRouter(model, orMidStreamError(402, 'Your account balance is insufficient.', 'insufficient_balance'))
+    check('mid-stream 402 classifies as hard quota', quota.error?.failure === 'hard_quota', String(quota.error?.failure))
+    check('every request carried the cap the diagnosis quotes', bodies.every((b) => typeof b.max_tokens === 'number'), JSON.stringify(bodies.map((b) => b.max_tokens)))
+  } finally {
+    fake.close()
+  }
+
+  /* --- non-streaming, against its own fake ------------------------------- */
+  const nonStreamFake = await startFakeProvider({
+    '/v1beta/chat/completions': () => ({
+      status: 200,
+      json: {
+        model: 'openai/o3',
+        choices: [{ message: { role: 'assistant', content: null, reasoning: 'Let me consider the vault schema…' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 800, completion_tokens: 4096, completion_tokens_details: { reasoning_tokens: 4096 } },
+      },
+    }),
+  })
+  try {
+    const r = await runOpenRouter(openrouterModel(nonStreamFake.base), [], { stream: false, maxTokens: 4096 })
+    check('non-streaming reasoning-only is diagnosed too', r.error?.failure === 'token_budget', String(r.error?.failure))
+    check('non-streaming message names the reasoning tokens', /4,096 reasoning tokens/.test(r.error?.message ?? ''), r.error?.message)
+  } finally {
+    nonStreamFake.close()
+  }
+}
+
+/**
+ * The engine's response to a budget failure: the *same* model is asked again
+ * with a bigger cap before the chain walks on, because the next candidate
+ * would hit the identical wall at the identical budget.
+ */
+async function testReasoningBudgetRetry() {
+  console.log('token-budget retry (plain chain):')
+  check('escalation quadruples a small cap', escalateTokens(4096) === 16_384, String(escalateTokens(4096)))
+  check('escalation never lands below 16k', escalateTokens(512) === 16_384, String(escalateTokens(512)))
+  check('escalation is capped at 64k', escalateTokens(32_000) === 64_000, String(escalateTokens(32_000)))
+  check('escalation respects the context window', escalateTokens(4096, 24_000) === 12_000, String(escalateTokens(4096, 24_000)))
+  check('escalation gives up when there is no headroom', escalateTokens(64_000) === 64_000, String(escalateTokens(64_000)))
+
+  const settings = useSettings.getState()
+  const stepFloor = settings.s.agent.stepMaxTokens
+  check('agent steps get a roomier cap than chat', stepFloor > settings.s.defaults.maxTokens, `${stepFloor} vs ${settings.s.defaults.maxTokens}`)
+  check(
+    'a request floor lifts the cap',
+    requestMaxTokens(settings.s, { ...openrouterModel('http://x/v1beta'), overrides: { maxTokens: 1024 } }, stepFloor) === stepFloor,
+  )
+  check(
+    'a roomier per-model override still wins',
+    requestMaxTokens(settings.s, { ...openrouterModel('http://x/v1beta'), overrides: { maxTokens: 32_000 } }, stepFloor) === 32_000,
+  )
+
+  /* --- one wasted attempt, then the same model answers ------------------- */
+  const bodies: Record<string, unknown>[] = []
+  let calls = 0
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      bodies.push(body)
+      calls++
+      if (calls === 1) return { status: 200, sse: orReasoningOnlyStream(Number(body.max_tokens ?? 4096)) }
+      return { status: 200, sse: orTextStream('```tsx:PromptVault.tsx\nexport default function PromptVault() {}\n```') }
+    },
+  })
+
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.setDefaults({ maxTokens: 4096 })
+  settings.pin('openrouter-test')
+
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    useChat.getState().newConversation()
+    await sendUserMessage('Build a prompt vault SFA using React/TypeScript', [])
+    const a = lastAssistant()
+    check('the turn completed after the budget retry', a.status === 'complete', `${a.status}: ${a.error ?? ''}`)
+    check('the same model was retried instead of failing over', calls === 2, `${calls} calls`)
+    check('the retry raised max_tokens', Number(bodies[1]?.max_tokens) > Number(bodies[0]?.max_tokens), `${bodies[0]?.max_tokens} → ${bodies[1]?.max_tokens}`)
+    check('the retry landed on the 16k floor', Number(bodies[1]?.max_tokens) === 16_384, String(bodies[1]?.max_tokens))
+    check('no failover was recorded', (a.failedChain ?? []).length === 0, JSON.stringify(a.failedChain))
+    check('reasoning tokens are reported in usage', (a.usage?.reasoningTokens ?? 0) > 0 || (a.usage?.completionTokens ?? 0) > 0, JSON.stringify(a.usage))
+    const h = useHealth.getState().byModel['openrouter-test']
+    check('a budget failure does not bench a healthy model', h?.state !== 'cooldown', String(h?.state))
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true })
+    settings.setModel('mock-lite', { enabled: true })
+    fake.close()
+  }
+
+  /* --- every attempt runs out: fail loudly, with the real reason --------- */
+  const deadBodies: number[] = []
+  const deadFake2 = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      deadBodies.push(Number(body.max_tokens ?? 0))
+      return { status: 200, sse: orReasoningOnlyStream(Number(body.max_tokens ?? 4096)) }
+    },
+  })
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(deadFake2.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    useChat.getState().newConversation()
+    await sendUserMessage('Build a prompt vault SFA using React/TypeScript', [])
+    const a = lastAssistant()
+    check('an unanswerable budget fails the turn', a.status === 'error', a.status)
+    check('the error is classified token_budget', a.errorClass === 'token_budget', String(a.errorClass))
+    check('the error explains the reasoning burn', /budget thinking/.test(a.error ?? ''), a.error)
+    check('the engine retried exactly once', deadBodies.length === 2, JSON.stringify(deadBodies))
+    check('the retry used a bigger cap', deadBodies[1]! > deadBodies[0]!, JSON.stringify(deadBodies))
+    const h = useHealth.getState().byModel['openrouter-test']
+    check('still no cooldown — the model is not sick', h?.state !== 'cooldown', String(h?.state))
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true })
+    settings.setModel('mock-lite', { enabled: true })
+    deadFake2.close()
+  }
+
+  /* --- a truncated answer says so --------------------------------------- */
+  const cutFake = await startFakeProvider({
+    '/v1beta/chat/completions': () => ({ status: 200, sse: orTextStream('export default function PromptVault() {', 'length') }),
+  })
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(cutFake.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    useChat.getState().newConversation()
+    await sendUserMessage('Build a prompt vault SFA using React/TypeScript', [])
+    const a = lastAssistant()
+    check('a truncated answer still completes', a.status === 'complete', `${a.status}: ${a.error ?? ''}`)
+    check('the message is flagged as cut off', a.truncated === true, String(a.truncated))
+    const html = renderToString(createElement(MessageBubble, { message: a }))
+    check('the bubble tells the user it was cut off', html.includes('Cut off at the output token cap'), html.slice(-400))
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true })
+    settings.setModel('mock-lite', { enabled: true })
+    cutFake.close()
+  }
+}
+
+/**
+ * The reported bug, end to end: agent mode, `openrouter/auto` as the whole
+ * roster, and a worker step whose first attempt spends its budget thinking.
+ */
+async function testAgentReasoningBudget() {
+  console.log('orchestrator step that ran out of budget (regression):')
+  const bodies: Record<string, unknown>[] = []
+  let calls = 0
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      bodies.push(body)
+      calls++
+      if (calls === 1) {
+        // Planning.
+        return {
+          status: 200,
+          sse: orTextStream(
+            JSON.stringify({
+              mode: 'plan',
+              reply: 'One build step, then a review.',
+              subtasks: [
+                {
+                  title: 'Build the single-file React/TS prompt vault app',
+                  model: '',
+                  prompt: 'Build a single-file React/TypeScript prompt vault app with tagging, search and JSON import/export.',
+                },
+              ],
+            }),
+          ),
+        }
+      }
+      if (calls === 2) {
+        // The worker's first attempt: all budget, no answer.
+        return { status: 200, sse: orReasoningOnlyStream(Number(body.max_tokens ?? 0)) }
+      }
+      if (calls === 3) {
+        // The worker's escalated retry.
+        return {
+          status: 200,
+          sse: orTextStream('```tsx:PromptVault.tsx\nexport default function PromptVault() {\n  return <main>vault</main>\n}\n```'),
+        }
+      }
+      return { status: 200, sse: orTextStream('Done — the prompt vault app is below.\n\n```tsx:PromptVault.tsx\nexport default function PromptVault() {}\n```') }
+    },
+  })
+
+  const settings = useSettings.getState()
+  const stepFloor = settings.s.agent.stepMaxTokens
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    freshAgentConversation()
+    await sendUserMessage('Build a prompt vault SFA using React/TypeScript', [])
+    const run = lastAssistant()
+    const step = run.agent?.steps[0]
+
+    check('the run completed', run.status === 'complete', `${run.status}: ${run.error ?? ''}`)
+    check('the step did not fail', step?.status === 'complete', `${step?.status}: ${step?.error ?? ''}`)
+    check('the step error the user saw is gone', !(step?.error ?? '').includes('returned no text at all'), step?.error)
+    check('the step kept the worker deliverable', (step?.result ?? '').includes('PromptVault.tsx'), step?.result?.slice(0, 80))
+    check(
+      'the wasted attempt is explained on the step',
+      (step?.attempts ?? []).some((a) => a.failure === 'token_budget' && /Retrying with/.test(a.message)),
+      JSON.stringify(step?.attempts),
+    )
+    check('orchestrator calls use the step budget', Number(bodies[0]?.max_tokens) === stepFloor, String(bodies[0]?.max_tokens))
+    check('the worker step used the step budget', Number(bodies[1]?.max_tokens) === stepFloor, String(bodies[1]?.max_tokens))
+    check('the in-step retry raised the cap', Number(bodies[2]?.max_tokens) > stepFloor, `${bodies[2]?.max_tokens} vs ${stepFloor}`)
+    check('the final answer was synthesized', run.content.includes('prompt vault'), run.content.slice(0, 80))
+
+    const html = renderToString(createElement(MessageBubble, { message: run }))
+    check('the plan card still renders', html.includes('agent-plan'), 'no plan card markup')
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+    settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+    useHealth.getState().markHealthy('mock-pro')
+    useHealth.getState().markHealthy('mock-lite')
     fake.close()
   }
 }
@@ -1802,6 +2193,9 @@ async function main() {
   await testFailover()
   await testChainVisibility()
   await testOpenRouterFailover()
+  await testReasoningStreams()
+  await testReasoningBudgetRetry()
+  await testAgentReasoningBudget()
   await testStop()
   testPlannerParsing()
   testWorkerResolution()

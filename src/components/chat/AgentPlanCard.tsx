@@ -120,6 +120,14 @@ function StepRow({
             <span className="agent-step-fallback">← {fellBackFrom.map(labelOf).join(', ')}</span>
           )}
           <span className="agent-step-model">{model}</span>
+          {step.truncated && step.status === 'complete' && (
+            <span
+              className="agent-step-truncated"
+              title="The worker stopped at the output token cap, so this deliverable may be incomplete. Raise “Max tokens per step” in Settings → Agent."
+            >
+              cut off
+            </span>
+          )}
           {step.elapsedMs != null && step.status !== 'running' && (
             <span className="agent-step-time">{formatMs(step.elapsedMs)}</span>
           )}

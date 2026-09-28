@@ -32,6 +32,11 @@ export function cooldownMsFor(failure: FailureClass, consecutiveFailures: number
       // of *this* turn is still right — the same key will fail again in
       // milliseconds — but future turns must get another shot.
       return backoff(5 * 60_000, CAP_MS)
+    case 'token_budget':
+      // The model is healthy — the *request* was too small for it. Benching it
+      // would hide a working model behind a configuration problem, and the
+      // engine already retries it once with a raised cap in the same turn.
+      return 0
     default:
       // bad_request, aborted, success: waiting cannot change the answer.
       return 0

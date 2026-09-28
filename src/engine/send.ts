@@ -7,6 +7,7 @@ import { adapterFor } from '../providers/registry'
 import { ProviderError } from '../providers/base'
 import { buildTurns } from './turns'
 import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates, skippedModels } from './strategy'
+import { escalateTokens } from './completion'
 import { finishRun, getRun, registerRun, stopGeneration, isGenerating, type ActiveRun } from './active'
 import { runAgentTurn } from './agent'
 import { uid } from '../lib/id'
@@ -157,7 +158,14 @@ async function runChain(
       if (controller.signal.aborted) break
       const startedAt = performance.now()
       try {
-        await attemptModel({ model, turns, settings, controller, state, assistantMessageId, attempt })
+        const outcome = await attemptModel({ model, turns, settings, controller, state, assistantMessageId, attempt })
+        if (outcome.truncated) {
+          useUI.getState().toast({
+            kind: 'warn',
+            title: `${modelLabel(settings.models, model.id)} stopped at the output cap`,
+            detail: `The answer was cut off at ${outcome.maxTokensUsed.toLocaleString('en-US')} tokens — raise Max output tokens in Settings → Defaults for the rest of it.`,
+          })
+        }
         finalize(assistantMessageId, {
           status: 'complete',
           modelId: lastOf(state.chain),
@@ -165,6 +173,7 @@ async function runChain(
           failedChain: [...state.failedChain],
           handoffs: [...state.handoffs],
           usage: state.usage,
+          truncated: outcome.truncated || undefined,
           error: undefined,
           errorClass: undefined,
           // The turn succeeded, but the failures that forced the failover are
@@ -284,6 +293,7 @@ function shortFailure(pe: ProviderError): string {
     case 'network': return 'network error'
     case 'overloaded': return 'overloaded'
     case 'bad_request': return 'request rejected'
+    case 'token_budget': return 'ran out of output budget'
     default: return 'error'
   }
 }
@@ -311,6 +321,7 @@ function finalize(
     failedChain?: string[]
     handoffs?: Handoff[]
     usage?: Usage
+    truncated?: boolean
     error?: string
     errorClass?: FailureClass | undefined
     attempts?: AttemptFailure[]
@@ -338,6 +349,25 @@ function finalizeCancelled(assistantMessageId: string, state: ChainState, keep: 
 /* Single model attempt                                                */
 /* ------------------------------------------------------------------ */
 
+/** What one adapter run observed, readable by the caller even after a throw. */
+interface ObservedTurn {
+  contentChars: number
+  reasoningChars: number
+  usage?: Usage
+  truncated: boolean
+  timedOut: 'first-token' | 'stalled' | null
+}
+
+/**
+ * Run one model for this turn, with a single automatic retry at a larger
+ * output cap.
+ *
+ * A `token_budget` failure is the provider saying "I answered, but the cap ran
+ * out before any answer text" — what a reasoning model does when its thinking
+ * costs more than `max_tokens` allows. The model is fine and the next candidate
+ * in the chain would hit the identical wall at the identical cap, so the cap is
+ * raised and the same model is asked once more before failover walks on.
+ */
 async function attemptModel(args: {
   model: ModelDef
   turns: Awaited<ReturnType<typeof buildTurns>>
@@ -346,30 +376,87 @@ async function attemptModel(args: {
   state: ChainState
   assistantMessageId: string
   attempt: ActiveRun
-}): Promise<void> {
-  const { model, turns, settings, controller, state, assistantMessageId, attempt } = args
-  const adapter = adapterFor(model.provider)
+}): Promise<{ truncated: boolean; maxTokensUsed: number }> {
+  const { model, settings, controller, state, attempt } = args
   const apiKey = providerKey(settings, model)
   if (model.provider !== 'mock' && !apiKey) {
     throw new ProviderError('auth', `No API key configured for ${model.provider}.`, false)
   }
 
   const params = effectiveParams(settings, model.id)
+  let budget = params.maxTokens
+  let escalated = false
+
+  for (;;) {
+    const startedAt = performance.now()
+    const observed: ObservedTurn = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
+    const contentBefore = state.content.length
+    try {
+      await attemptOnce({ ...args, maxTokens: budget, apiKey, observed })
+      if (observed.usage) state.usage = mergeUsage(state.usage, observed.usage)
+      useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
+      announce(`Response from ${model.label}.`)
+      return { truncated: observed.truncated, maxTokensUsed: budget }
+    } catch (err) {
+      if (attempt.userAborted || controller.signal.aborted) {
+        throw new ProviderError('aborted', 'Cancelled.', false)
+      }
+      const pe =
+        err instanceof ProviderError ? err : new ProviderError('unknown', err instanceof Error ? err.message : String(err), true)
+
+      // Nothing was streamed, so re-issuing cannot duplicate text.
+      if (!escalated && pe.failure === 'token_budget' && state.content.length === contentBefore) {
+        const next = escalateTokens(budget, model.contextWindow)
+        if (next > budget) {
+          escalated = true
+          useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
+          useUI.getState().toast({
+            kind: 'warn',
+            title: `${model.label} ran out of output budget`,
+            detail: `${pe.message} Retrying the same model with ${next.toLocaleString('en-US')} output tokens.`,
+          })
+          budget = next
+          continue
+        }
+      }
+      throw pe
+    }
+  }
+}
+
+/**
+ * One adapter run with both timeout budgets armed around it.
+ *
+ * Two separate budgets, because "no first token yet" and "the stream went
+ * quiet" are different problems with different fixes. Reasoning models
+ * (Gemini 2.5, o-series, extended thinking) routinely take longer than the
+ * idle budget to produce their first *answer* token; their reasoning deltas
+ * count as liveness, so they are not cut off mid-thought and benched for it.
+ */
+async function attemptOnce(args: {
+  model: ModelDef
+  turns: Awaited<ReturnType<typeof buildTurns>>
+  settings: Settings
+  controller: AbortController
+  state: ChainState
+  assistantMessageId: string
+  attempt: ActiveRun
+  maxTokens: number
+  apiKey: string
+  observed: ObservedTurn
+}): Promise<void> {
+  const { model, turns, settings, controller, state, assistantMessageId, maxTokens, apiKey, observed } = args
+  const adapter = adapterFor(model.provider)
+  const params = effectiveParams(settings, model.id)
   const attemptController = new AbortController()
   const onAbort = () => attemptController.abort()
   controller.signal.addEventListener('abort', onAbort, { once: true })
 
-  // Two separate budgets, because "no first token yet" and "the stream went
-  // quiet" are different problems with different fixes. Reasoning models
-  // (Gemini 2.5, o-series, extended thinking) routinely take longer than the
-  // idle budget to produce their first token; timing those out on the *same*
-  // budget as a stalled stream is what put healthy models into cooldown.
-  let timedOut: 'first-token' | 'stalled' | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   const arm = (kind: 'first-token' | 'stalled', ms: number) => {
     if (timer) clearTimeout(timer)
     timer = setTimeout(() => {
-      timedOut = kind
+      observed.timedOut = kind
       attemptController.abort()
     }, ms)
   }
@@ -379,14 +466,11 @@ async function attemptModel(args: {
   }
 
   const startedAt = performance.now()
-  let gotFirstDelta = false
-  let usagePiece: Usage | undefined
 
   const onEvent = (ev: StreamEvent): void => {
     switch (ev.type) {
       case 'delta': {
-        if (!gotFirstDelta) {
-          gotFirstDelta = true
+        if (observed.contentChars === 0) {
           state.chain.push(model.id)
           useChat.getState().mutateMessage(assistantMessageId, (m) => ({
             ...m,
@@ -395,16 +479,30 @@ async function attemptModel(args: {
             modelId: model.id,
             chain: [...state.chain],
           }))
+          arm('stalled', settings.defaults.requestTimeoutMs)
         }
+        observed.contentChars += ev.text.length
         state.content += ev.text
         useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, content: state.content }))
-        arm('stalled', settings.defaults.requestTimeoutMs)
         break
       }
+      case 'reasoning':
+        // Thinking is not answer text and never reaches the transcript, but it
+        // is proof the model is alive: swap the first-token budget for the
+        // idle budget so a long thought is not mistaken for a dead stream.
+        observed.reasoningChars += ev.text.length
+        arm('stalled', settings.defaults.requestTimeoutMs)
+        break
       case 'usage':
-        usagePiece = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens }
+        // Providers split usage across frames; keep what a frame omitted.
+        observed.usage = {
+          promptTokens: ev.promptTokens ?? observed.usage?.promptTokens,
+          completionTokens: ev.completionTokens ?? observed.usage?.completionTokens,
+          reasoningTokens: ev.reasoningTokens ?? observed.usage?.reasoningTokens,
+        }
         break
       case 'done':
+        observed.truncated = Boolean(ev.truncated)
         break
       case 'error':
         throw new ProviderError(ev.failure, ev.message, ev.retryable)
@@ -418,25 +516,23 @@ async function attemptModel(args: {
       turns,
       systemPrompt: params.systemPrompt,
       temperature: params.temperature,
-      maxTokens: params.maxTokens,
+      maxTokens,
       topP: params.topP,
       stream: settings.defaults.stream,
       apiKey,
       signal: attemptController.signal,
       onEvent,
     })
-    if (!gotFirstDelta) {
+    if (observed.contentChars === 0) {
+      // Backstop: adapters diagnose their own empty responses, so this only
+      // fires when one finished a stream emitting nothing and said nothing.
       throw new ProviderError('unknown', 'The provider accepted the request but returned no text at all.', false)
     }
-    const latencyMs = Math.round(performance.now() - startedAt)
-    state.usage = mergeUsage(state.usage, usagePiece)
-    useHealth.getState().recordSuccess(model.id, latencyMs, usagePiece)
-    announce(`Response from ${model.label}.`)
   } catch (err) {
-    if (attempt.userAborted) {
+    if (controller.signal.aborted) {
       throw new ProviderError('aborted', 'Cancelled.', false)
     }
-    if (timedOut === 'first-token') {
+    if (observed.timedOut === 'first-token') {
       const secs = Math.round(settings.defaults.firstTokenTimeoutMs / 1000)
       throw new ProviderError(
         'timeout',
@@ -444,11 +540,13 @@ async function attemptModel(args: {
         true,
       )
     }
-    if (timedOut === 'stalled') {
+    if (observed.timedOut === 'stalled') {
       const secs = Math.round(settings.defaults.requestTimeoutMs / 1000)
       throw new ProviderError(
         'timeout',
-        `The stream went quiet for ${secs}s after it had started and was cut off.`,
+        observed.contentChars === 0 && observed.reasoningChars > 0
+          ? `The model reasoned for ${secs}s+ and then went quiet without ever starting its answer.`
+          : `The stream went quiet for ${secs}s after it had started and was cut off.`,
         true,
       )
     }

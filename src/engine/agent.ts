@@ -274,6 +274,10 @@ export async function runAgentTurn(
       systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps),
       settings,
       candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
+      // Every orchestrator call gets the step budget, not the chat default: a
+      // reasoning model bills its thinking against the same cap, and a cap
+      // that only fits the answer is how a step comes back with nothing in it.
+      maxTokensFloor: settings.agent.stepMaxTokens,
       signal,
       silent: true,
     })
@@ -304,6 +308,7 @@ export async function runAgentTurn(
         systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps),
         settings,
         candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
+        maxTokensFloor: settings.agent.stepMaxTokens,
         signal,
         silent: true,
       })
@@ -397,6 +402,7 @@ export async function runAgentTurn(
           systemPrompt: workerSystemPrompt(),
           settings,
           candidates: ordered,
+          maxTokensFloor: settings.agent.stepMaxTokens,
           signal,
           onDelta: (t) => {
             acc += t
@@ -413,6 +419,10 @@ export async function runAgentTurn(
           failedChain: result.failedChain,
           attempts: result.attempts,
           elapsedMs: Math.round(performance.now() - startedAt),
+          // A worker cut off at the token cap hands the synthesis pass a
+          // half-finished file; the step card says so instead of letting the
+          // truncation look like the worker's choice.
+          truncated: result.truncated || undefined,
         })
       } catch (err) {
         if (err instanceof ProviderError && err.failure === 'aborted') throw err
@@ -463,6 +473,7 @@ export async function runAgentTurn(
     ]
 
     let content = ''
+    let synthTruncated = false
     try {
       const synth = await runCompletion({
         purpose: 'Synthesis',
@@ -470,6 +481,7 @@ export async function runAgentTurn(
         systemPrompt: synthSystemPrompt(),
         settings,
         candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
+        maxTokensFloor: settings.agent.stepMaxTokens,
         signal,
         onDelta: (t) => {
           content += t
@@ -479,6 +491,7 @@ export async function runAgentTurn(
       collectAttempts(synth.attempts)
       usageAcc.current = mergeUsage(usageAcc.current, synth.usage)
       content = synth.text
+      synthTruncated = Boolean(synth.truncated)
     } catch (err) {
       if (err instanceof ProviderError && err.failure === 'aborted') throw err
       // Synthesis failed on every candidate — stitch the worker output
@@ -500,6 +513,10 @@ export async function runAgentTurn(
     const finalRunState = readRun(assistantMessageId)
     const workerIds = [...new Set((finalRunState?.steps ?? []).map((s) => s.modelId))]
     const hadFailures = (finalRunState?.steps ?? []).some((s) => s.status === 'error')
+    const cutOff = (finalRunState?.steps ?? []).filter((s) => s.truncated)
+    if (cutOff.length > 0) {
+      note = `${note ? `${note} ` : ''}${cutOff.length === 1 ? `One worker step was` : `${cutOff.length} worker steps were`} cut off at the output token cap, so ${cutOff.length === 1 ? 'its' : 'their'} deliverable may be incomplete — raise “Max tokens per step” in Settings → Agent.`
+    }
 
     finalize(assistantMessageId, {
       status: 'complete',
@@ -507,6 +524,7 @@ export async function runAgentTurn(
       modelId: orchestrator.id,
       chain: [orchestrator.id, ...workerIds.filter((id) => id !== orchestrator.id)],
       usage: usageAcc.current,
+      truncated: synthTruncated || undefined,
       error: undefined,
       errorClass: undefined,
       agent: {

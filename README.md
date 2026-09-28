@@ -86,6 +86,10 @@ orchestration, and everything is persisted with the message.
 
 - **Orchestrator model** — chain top by default, or pin any enabled model.
 - **Max subtasks per run** (1–8) and **parallel workers** (1–4, 1 = sequential).
+- **Max tokens per step** (default 16 384) — the output ceiling for the plan call, every
+  worker step and the synthesis. It sits well above the chat **Max output tokens** default
+  on purpose: a step is a whole deliverable ("build the app"), and reasoning models bill
+  their thinking against the same cap. A ceiling costs nothing unless the tokens are used.
 - **Expand worker output** — completed steps show their full result by default.
 
 
@@ -103,6 +107,12 @@ orchestration, and everything is persisted with the message.
 - **Strategies** — strict priority, fastest-first (measured latency), or cheapest-first.
 - **Manual control** — pin a primary model, per-conversation model override, per-message
   retry with cooldowns cleared.
+- **Reasoning-aware** — thinking tokens (`delta.reasoning`, Gemini `thought` parts, Anthropic
+  `thinking_delta`) are read as liveness, never rendered as the answer, and a model that spends
+  its whole `max_tokens` budget reasoning is retried **once at a larger cap** before the chain
+  walks on. Walking on would be pointless: the next model gets the same too-small budget.
+- **Truncation is visible** — an answer cut off by the token cap completes (the partial text is
+  kept) and says so, instead of looking like the model chose to stop mid-file.
 - **Idempotent** — a failover never duplicates the prompt or double-charges the turn.
 
 ## Artifact cards
@@ -247,6 +257,9 @@ explanation end to end:
 | `Requests to this API method … are blocked` | Google blocked the key (it was found publicly exposed). Rotate it in AI Studio. |
 | `Network error — the browser could not reach the provider` | CORS, an ad blocker, or no route. Slade is a static SPA and calls providers straight from the browser; a corporate proxy or restrictive extension will block it. |
 | `No response after Ns — the request never produced a first token` | The request was accepted but nothing came back. Check the route, then raise **First-token timeout** if the model is simply slow to think. |
+| `The model spent its whole N-token output budget thinking and never reached an answer` | A reasoning model (routers like `openrouter/auto` pick them often) billed its thinking against `max_tokens` and hit the cap before writing any answer text. Slade retries once at 4× the cap; if that still fails, raise **Max output tokens** (chat) or **Max tokens per step** (agent). Retrying unchanged cannot help — the tokens are already billed. |
+| `Cut off at the output token cap` | The answer arrived but stopped at the cap. Raise **Max output tokens** and retry for the rest. |
+| `The provider accepted the request but returned no text at all` | A 200 with nothing in it and no stop reason to explain it — cold start, or an upstream that returned an empty choice. Retry; if it persists, pin a concrete model instead of a router. |
 
 ## Deploy to GitHub Pages
 

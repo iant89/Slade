@@ -155,6 +155,14 @@ export const MODEL_CATALOG: CatalogModel[] = [
   /* ---------------- OpenRouter ---------------- */
   {
     provider: 'openrouter',
+    apiModel: 'openrouter/auto',
+    label: 'Auto Router',
+    contextWindow: 2 * M,
+    strengths: ['agents', 'reasoning', 'value'],
+    note: 'OpenRouter picks the model per prompt and bills that model’s rate. It routes to reasoning models often, so keep the output token cap roomy — thinking is billed against it.',
+  },
+  {
+    provider: 'openrouter',
     apiModel: 'deepseek/deepseek-v4-pro',
     label: 'DeepSeek V4 Pro',
     contextWindow: 1_048_576,

@@ -23,6 +23,14 @@ export type FailureClass =
   | 'aborted'
   /** The provider understood the request and refused it (HTTP 400 and friends). */
   | 'bad_request'
+  /**
+   * The provider answered, but the output budget ran out before any *answer*
+   * text arrived — typically a reasoning model that spent every token
+   * thinking. Not a sick model: a too-small `max_tokens`. Waiting cannot fix
+   * it (so no cooldown); raising the budget can, and the engine does exactly
+   * that once before walking the chain.
+   */
+  | 'token_budget'
   | 'unknown'
 
 /** What a mock model should do on its next request (failover demo control). */
@@ -63,6 +71,7 @@ export const FAILURE_LABEL: Record<FailureClass, string> = {
   overloaded: 'Provider overloaded',
   aborted: 'Cancelled',
   bad_request: 'Request rejected',
+  token_budget: 'Token budget',
   unknown: 'Unknown error',
 }
 
@@ -72,8 +81,19 @@ export const FAILURE_LABEL: Record<FailureClass, string> = {
 
 export type StreamEvent =
   | { type: 'delta'; text: string }
-  | { type: 'usage'; promptTokens?: number; completionTokens?: number }
-  | { type: 'done' }
+  /**
+   * Internal reasoning ("thinking") text. It is provenance for the answer,
+   * never the answer itself — the engine uses it as liveness (a model that is
+   * still thinking has not stalled) and as evidence when a turn comes back
+   * with no content at all.
+   */
+  | { type: 'reasoning'; text: string }
+  | { type: 'usage'; promptTokens?: number; completionTokens?: number; reasoningTokens?: number }
+  /**
+   * `finishReason` is the provider's own stop reason; `truncated` is true when
+   * that reason was the token cap rather than the model finishing its answer.
+   */
+  | { type: 'done'; finishReason?: string; truncated?: boolean }
   | { type: 'error'; failure: FailureClass; message: string; retryable: boolean }
 
 export interface ChatTurn {
@@ -168,6 +188,8 @@ export interface AgentStep {
   /** Worker model ids that failed before this step produced output. */
   failedChain: string[]
   elapsedMs?: number
+  /** True when the worker's output was cut off by the token cap. */
+  truncated?: boolean
 }
 
 export interface AgentRun {
@@ -223,6 +245,12 @@ export interface Handoff {
 export interface Usage {
   promptTokens?: number
   completionTokens?: number
+  /**
+   * Tokens billed for internal reasoning. Always a subset of
+   * `completionTokens` — when the two are close and the answer is empty, the
+   * budget was consumed by thinking rather than by output.
+   */
+  reasoningTokens?: number
 }
 
 export interface Message {
@@ -249,6 +277,8 @@ export interface Message {
   editedAt?: number
   /** Latency to first token, ms. */
   ttftMs?: number
+  /** True when the answer stopped at the output token cap instead of finishing. */
+  truncated?: boolean
   /** Present when this reply was produced by the orchestrator agent. */
   agent?: AgentRun
 }
@@ -324,6 +354,14 @@ export interface AgentSettings {
   maxParallel: number
   /** When false the plan card collapses worker outputs to one line each. */
   expandStepResults: boolean
+  /**
+   * Output token ceiling for the orchestrator's own calls (plan, each worker
+   * step, synthesis). Deliberately well above the chat default: a step is a
+   * whole deliverable ("build the app"), and reasoning models bill their
+   * thinking against the same cap — a 4k ceiling is how a step comes back
+   * empty. Raising a ceiling costs nothing unless the tokens are used.
+   */
+  stepMaxTokens: number
 }
 
 export interface AppearanceSettings {
