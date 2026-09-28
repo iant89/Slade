@@ -42,7 +42,8 @@ function planSystemPrompt(settings: Settings, maxSteps: number): string {
   const workers = settings.models.filter((m) => m.enabled && modelHasKey(settings, m))
   const roster = workers
     .map((m) => {
-      const bits = [m.provider === 'mock' ? 'built-in simulator' : m.provider]
+      const provider = settings.providers.find((p) => p.id === m.provider)
+      const bits = [provider?.kind === 'mock' ? 'built-in simulator' : provider?.label ?? m.provider]
       if (m.costPer1kOut != null) bits.push(`$${m.costPer1kOut}/1k out`)
       if (m.contextWindow != null) bits.push(`${Math.round(m.contextWindow / 1000)}k ctx`)
       return `- "${m.label}" (${bits.join(', ')})`

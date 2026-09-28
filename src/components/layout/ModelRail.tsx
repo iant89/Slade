@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useSettings } from '../../store/settings'
+import { useSettings, providerById } from '../../store/settings'
 import { useHealth, isRoutable } from '../../store/health'
 import { useUI } from '../../store/ui'
 import { formatCount, relativeCooldown } from '../../lib/format'
-import { adapterFor } from '../../providers/registry'
 import { IconChevronDown, IconChevronRight, IconPin, IconX, IconZap } from '../icons'
 
 function RailRow({ modelId }: { modelId: string }) {
@@ -20,6 +19,7 @@ function RailRow({ modelId }: { modelId: string }) {
 
   if (!model) return null
   const h = health[model.id]
+  const provider = providerById(settings, model.provider)
   const cooling = h?.cooldownUntil && h.cooldownUntil > Date.now()
   const state = !model.enabled ? 'disabled' : h?.state === 'error' ? 'error' : cooling ? 'cooldown' : 'available'
   const isPinned = settings.pinnedModelId === model.id
@@ -53,7 +53,7 @@ function RailRow({ modelId }: { modelId: string }) {
         </button>
       </div>
       <div className="rail-row-sub">
-        <span className="rail-provider">{adapterFor(model.provider).label}</span>
+        <span className="rail-provider">{provider?.label ?? model.provider}</span>
         {h?.avgLatencyMs != null && (
           <span className="rail-latency">
             <IconZap size={10} /> {h.avgLatencyMs}ms
@@ -74,7 +74,7 @@ function RailRow({ modelId }: { modelId: string }) {
         {state === 'error' && <span className="rail-error">needs key / auth</span>}
         {state === 'available' && !isRoutable(h, true) && <span className="rail-cooldown">cooling</span>}
       </div>
-      {model.provider === 'mock' && model.enabled && (
+      {provider?.kind === 'mock' && model.enabled && (
         <div className="rail-simulate">
           <label className="sr-only" htmlFor={`sim-${model.id}`}>
             Simulated behavior for {model.label}

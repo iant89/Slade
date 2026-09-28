@@ -102,6 +102,11 @@ import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
 import { AddModelForm } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
+import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
+import { DEFAULT_PROVIDERS } from '../src/providers/registry'
+import { SUPPORTED_PROVIDERS, nextProviderLabel, supportedProvider } from '../src/lib/providerCatalog'
+import { validateSettings } from '../src/lib/schemas'
+import { DEFAULT_SETTINGS } from '../src/store/settings'
 import { MODEL_CATALOG, catalogFor, formatCtx, formatPrice } from '../src/lib/modelCatalog'
 import { useUI } from '../src/store/ui'
 import { googleAdapter } from '../src/providers/google'
@@ -2183,6 +2188,101 @@ function testModelPicker() {
   check('openrouter rows keep vendor-prefixed IDs', orTable.includes('z-ai/glm-5.2') && orTable.includes('moonshotai/kimi-k2.7-code'))
 }
 
+/**
+ * Providers are user-managed like models: Settings → Providers lists the
+ * configured connections, "Add a provider" opens a dialog with every
+ * supported kind, and deleting a connection cascades to its models. Covers
+ * the catalog, the legacy-shape migration, the store actions, and the
+ * dialog's SSR render.
+ */
+function testProviderManagement() {
+  console.log('provider management (add/delete):')
+
+  // Catalog integrity: the add-dialog's source of truth.
+  const kinds = SUPPORTED_PROVIDERS.map((p) => p.kind)
+  check('every adapter kind is represented in the catalog', kinds.length === 6 && new Set(kinds).size === 6, kinds.join(','))
+  check('catalog labels are unique', new Set(SUPPORTED_PROVIDERS.map((p) => p.label)).size === SUPPORTED_PROVIDERS.length)
+  check('the simulator needs no key', supportedProvider('mock')?.noKey === true)
+  check('openai-compatible exposes a base URL field', supportedProvider('openai-compatible')?.supportsBaseURL === true)
+  check('every real provider documents where to get a key', (['openai', 'anthropic', 'google', 'openrouter'] as const).every((k) => typeof supportedProvider(k)?.keyUrl === 'string'))
+
+  // Defaults: one factory instance per kind, ids = kinds, and every factory
+  // model resolves to one of them.
+  const defaultIds = DEFAULT_PROVIDERS.map((p) => p.id)
+  check('factory provider ids are unique', new Set(defaultIds).size === DEFAULT_PROVIDERS.length)
+  check('factory instances keep their kind as id', DEFAULT_PROVIDERS.every((p) => p.id === p.kind))
+  check(
+    'every factory model resolves to a factory provider',
+    DEFAULT_SETTINGS.models.every((m) => DEFAULT_SETTINGS.providers.some((p) => p.id === m.provider)),
+  )
+
+  // Migration: settings saved before providers were user-managed carry a
+  // record keyed by kind. Validation must upgrade it in place.
+  const legacy = {
+    version: 1,
+    models: [
+      { id: 'm1', label: 'GPT', provider: 'openai', apiModel: 'gpt-4o', enabled: true },
+    ],
+    defaults: {
+      temperature: 0.7, topP: 1, maxTokens: 4096, systemPrompt: '',
+      stream: true, typingIndicator: true, autoScroll: 'smooth',
+      failoverStrategy: 'priority', requestTimeoutMs: 60_000, firstTokenTimeoutMs: 120_000,
+    },
+    artifacts: { collapsedByDefault: false, autoExpandImages: true, maxPreviewHeight: 420 },
+    appearance: { theme: 'dark', fontSize: 15, density: 'cozy', codeTheme: 'auto', reduceMotion: false, enterToSend: true },
+    providers: { openai: { apiKey: 'sk-legacy' }, 'openai-compatible': { apiKey: '', baseURL: 'https://api.groq.com/openai/v1' } },
+  }
+  const migrated = validateSettings(legacy)
+  check('legacy record settings still validate', migrated !== null)
+  const migratedProviders = migrated?.providers ?? []
+  const openaiInstance = migratedProviders.find((p) => p.id === 'openai')
+  check('legacy record becomes a provider-instance list', Array.isArray(migratedProviders) && migratedProviders.length === 2)
+  check('migrated instances keep kind-as-id and gain label/kind', openaiInstance?.kind === 'openai' && openaiInstance?.label === 'OpenAI')
+  check('migrated keys and base URLs survive', openaiInstance?.apiKey === 'sk-legacy' && migratedProviders.find((p) => p.id === 'openai-compatible')?.baseURL === 'https://api.groq.com/openai/v1')
+  check('migrated models keep pointing at the same provider', migrated?.models[0]?.provider === 'openai')
+
+  // Store round-trip: add a connection, hang models off it, delete it and
+  // confirm the cascade (models gone, pin cleared).
+  const snapshot = useSettings.getState().s
+  try {
+    useSettings.getState().resetSettings()
+    check('factory state starts with the supported set', useSettings.getState().s.providers.length === SUPPORTED_PROVIDERS.length)
+
+    const groq = { id: 'prov_test_groq', kind: 'openai-compatible' as const, label: 'Groq', apiKey: '' }
+    useSettings.getState().addProvider(groq)
+    check('added provider appears in the list', useSettings.getState().s.providers.some((p) => p.id === groq.id))
+
+    useSettings.getState().addProvider(groq)
+    check('adding a duplicate id is a no-op', useSettings.getState().s.providers.filter((p) => p.id === groq.id).length === 1)
+
+    const onGroq = (n: string): ModelDef => ({ id: n, label: n, provider: groq.id, apiModel: 'llama-3.3-70b', enabled: true })
+    useSettings.getState().addModel(onGroq('groq-a'))
+    useSettings.getState().addModel(onGroq('groq-b'))
+    useSettings.getState().pin('groq-b')
+    // The factory "OpenAI-compatible" instance exists, so a second one is numbered.
+    check('labels deduplicate per kind', nextProviderLabel('openai-compatible', useSettings.getState().s.providers) === 'OpenAI-compatible 2')
+
+    const removed = useSettings.getState().removeProvider(groq.id)
+    const after = useSettings.getState().s
+    check('removing the provider cascade-deletes its models', removed.length === 2 && !after.models.some((m) => m.id === 'groq-a' || m.id === 'groq-b'), removed.join(','))
+    check('a pin on a cascade-deleted model is cleared', after.pinnedModelId === undefined)
+    check('the provider itself is gone', !after.providers.some((p) => p.id === groq.id))
+    check('removing an unknown provider is a no-op', useSettings.getState().removeProvider('nope').length === 0)
+
+    // Label dedup counts same-kind instances, not all instances.
+    check('same-kind labels get numbered', nextProviderLabel('openai', [{ id: 'x', kind: 'openai', label: 'OpenAI', apiKey: '' }]) === 'OpenAI 2')
+  } finally {
+    useSettings.getState().replaceAll(snapshot)
+  }
+
+  // SSR: the dialog lists every supported provider, with the simulator
+  // marked as key-free.
+  const picker = renderToString(createElement(ProviderPickerList, { onPick: () => {} })).replace(/<!-- -->/g, '')
+  check('add-provider dialog lists all supported providers', SUPPORTED_PROVIDERS.every((p) => picker.includes(p.label)), picker.slice(0, 120))
+  check('the simulator row says no key is needed', picker.includes('no key needed'))
+  check('each row offers where to get a key', picker.includes('Get a key'))
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -2212,6 +2312,7 @@ async function main() {
   testGitHubStore()
   testGitHubUiRenders()
   testModelPicker()
+  testProviderManagement()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

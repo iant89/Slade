@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import type { Settings } from '../types'
+import type { ProviderDef, Settings } from '../types'
+import { normalizeProviderDef } from './providerCatalog'
 
 /* ------------------------------------------------------------------ */
 /* Zod-validated configuration                                         */
@@ -11,7 +12,8 @@ export const mockSimulateSchema = z.enum(['ok', 'soft_rate_limit', 'hard_quota',
 export const modelDefSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
-  provider: providerIdSchema,
+  /** Id of a provider *instance* in `settings.providers` (factory ids equal their kind). */
+  provider: z.string().min(1),
   apiModel: z.string().min(1),
   baseURL: z.string().optional(),
   enabled: z.boolean(),
@@ -27,6 +29,27 @@ export const modelDefSchema = z.object({
     .optional(),
   simulate: mockSimulateSchema.optional(),
 })
+
+/**
+ * One persisted provider connection. `kind` and `label` are optional on
+ * input: entries saved before providers were user-managed carry only the key
+ * config, and normalizeProviderDef derives the rest from the id.
+ */
+export const providerDefSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: providerIdSchema.optional(),
+    label: z.string().optional(),
+    apiKey: z.string(),
+    baseURL: z.string().optional(),
+  })
+  .transform(normalizeProviderDef)
+
+/** Legacy shape: a record keyed by provider kind (`{ openai: { apiKey } }`). */
+const legacyProviderRecordSchema = z.record(
+  z.string(),
+  z.object({ apiKey: z.string(), baseURL: z.string().optional() }),
+)
 
 export const settingsSchema = z.object({
   version: z.literal(1),
@@ -72,7 +95,16 @@ export const settingsSchema = z.object({
       stepMaxTokens: z.number().int().min(1024).max(200_000).default(16_384),
     })
     .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true, stepMaxTokens: 16_384 }),
-  providers: z.record(z.string(), z.object({ apiKey: z.string(), baseURL: z.string().optional() })),
+  // New shape: a list of provider instances. Old backups/settings keep a
+  // record keyed by kind; the union migrates it in place so a provider entry
+  // appears for every key and models referencing the key keep working.
+  providers: z
+    .union([z.array(providerDefSchema), legacyProviderRecordSchema])
+    .transform((raw): ProviderDef[] =>
+      Array.isArray(raw)
+        ? raw
+        : Object.entries(raw).map(([id, cfg]) => normalizeProviderDef({ id, ...cfg })),
+    ),
   pinnedModelId: z.string().optional(),
 })
 

@@ -11,7 +11,7 @@ import {
   type CatalogModel,
   type Strength,
 } from '../../lib/modelCatalog'
-import { ADDABLE_PROVIDERS } from './ProviderCombobox'
+import { supportedProvider } from '../../lib/providerCatalog'
 
 type SortKey = 'apiModel' | 'label' | 'contextWindow' | 'costPer1kIn' | 'costPer1kOut'
 type SortDir = 'asc' | 'desc'
@@ -199,7 +199,7 @@ export function ModelPickerModal({
   onClose: () => void
   onPick: (model: CatalogModel) => void
 }) {
-  const providerLabel = ADDABLE_PROVIDERS.find((p) => p.id === provider)?.label ?? provider
+  const providerLabel = supportedProvider(provider)?.label ?? provider
 
   return (
     <Modal open={open} onClose={onClose} labelledBy="model-picker-title" className="nested-modal">

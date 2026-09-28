@@ -1,6 +1,6 @@
-import type { AttemptFailure, FailureClass, Handoff, ModelDef, Settings, StreamEvent, Usage } from '../types'
+import type { AttemptFailure, FailureClass, Handoff, ModelDef, ProviderDef, Settings, StreamEvent, Usage } from '../types'
 import { useChat, titleFromPrompt } from '../store/chat'
-import { useSettings, effectiveParams, providerKey } from '../store/settings'
+import { useSettings, effectiveParams } from '../store/settings'
 import { useHealth } from '../store/health'
 import { useUI } from '../store/ui'
 import { adapterFor } from '../providers/registry'
@@ -378,9 +378,13 @@ async function attemptModel(args: {
   attempt: ActiveRun
 }): Promise<{ truncated: boolean; maxTokensUsed: number }> {
   const { model, settings, controller, state, attempt } = args
-  const apiKey = providerKey(settings, model)
-  if (model.provider !== 'mock' && !apiKey) {
-    throw new ProviderError('auth', `No API key configured for ${model.provider}.`, false)
+  const provider = settings.providers.find((p) => p.id === model.provider)
+  if (!provider) {
+    throw new ProviderError('unknown', `Provider "${model.provider}" no longer exists — re-add it in Settings → Providers.`, false)
+  }
+  const apiKey = provider.apiKey
+  if (provider.kind !== 'mock' && !apiKey) {
+    throw new ProviderError('auth', `No API key configured for ${provider.label}.`, false)
   }
 
   const params = effectiveParams(settings, model.id)
@@ -392,7 +396,7 @@ async function attemptModel(args: {
     const observed: ObservedTurn = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
     const contentBefore = state.content.length
     try {
-      await attemptOnce({ ...args, maxTokens: budget, apiKey, observed })
+      await attemptOnce({ ...args, provider, maxTokens: budget, apiKey, observed })
       if (observed.usage) state.usage = mergeUsage(state.usage, observed.usage)
       useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
       announce(`Response from ${model.label}.`)
@@ -442,11 +446,12 @@ async function attemptOnce(args: {
   assistantMessageId: string
   attempt: ActiveRun
   maxTokens: number
+  provider: ProviderDef
   apiKey: string
   observed: ObservedTurn
 }): Promise<void> {
-  const { model, turns, settings, controller, state, assistantMessageId, maxTokens, apiKey, observed } = args
-  const adapter = adapterFor(model.provider)
+  const { model, turns, settings, controller, state, assistantMessageId, maxTokens, provider, apiKey, observed } = args
+  const adapter = adapterFor(provider.kind)
   const params = effectiveParams(settings, model.id)
   const attemptController = new AbortController()
   const onAbort = () => attemptController.abort()

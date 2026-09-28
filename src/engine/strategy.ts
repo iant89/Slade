@@ -14,9 +14,12 @@ export interface SkippedModel {
  * A model whose provider has no API key can only ever answer with an auth
  * failure. Filtering such models out of routing (and naming them in the
  * skipped list) beats burning a chain slot on a request guaranteed to fail.
+ * A model whose provider was deleted is skipped the same way.
  */
 export function modelHasKey(settings: Settings, m: ModelDef): boolean {
-  return m.provider === 'mock' || Boolean(settings.providers[m.provider]?.apiKey?.trim())
+  const provider = settings.providers.find((p) => p.id === m.provider)
+  if (!provider) return false
+  return provider.kind === 'mock' || Boolean(provider.apiKey.trim())
 }
 
 /**
@@ -106,7 +109,8 @@ export function skippedModels(settings: Settings, healthByModel: Record<string, 
     if (keyed && isRoutable(h, true)) continue
     let reason: string
     if (!keyed) {
-      reason = `no API key configured for ${m.provider} — add one in Settings`
+      const provider = settings.providers.find((p) => p.id === m.provider)
+      reason = `no API key configured for ${provider?.label ?? m.provider} — add one in Settings`
     } else if (h?.state === 'error') {
       reason = h.lastError
         ? `${FAILURE_LABEL[h.lastError.failure].toLowerCase()} — fix the key in Settings, then retry`

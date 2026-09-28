@@ -1,36 +1,30 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { AddableProvider } from '../../lib/modelCatalog'
+import { useSettings } from '../../store/settings'
+import { useUI } from '../../store/ui'
+import { supportedProvider } from '../../lib/providerCatalog'
 import { IconChevronDown, IconSearch } from '../icons'
 
 /** useLayoutEffect warns during SSR; fall back to useEffect on the server. */
 const useIsoLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect
 
-/** Providers offered by "Add a model" (the mock simulator is not addable). */
-export const ADDABLE_PROVIDERS: {
-  id: AddableProvider
-  label: string
-  hint: string
-}[] = [
-  { id: 'openai', label: 'OpenAI', hint: 'GPT-5.x flagships' },
-  { id: 'anthropic', label: 'Anthropic', hint: 'Claude Opus & Sonnet' },
-  { id: 'google', label: 'Google Gemini', hint: 'Gemini 3 family' },
-  { id: 'openrouter', label: 'OpenRouter', hint: 'One key, hundreds of models' },
-  { id: 'openai-compatible', label: 'OpenAI-compatible', hint: 'DeepSeek, Moonshot, Z.ai, Ollama… custom URL' },
-]
-
 /**
- * Filterable provider dropdown (combobox). Opens a fixed-position popover so
- * it is never clipped by the scrolling settings pane; type-to-filter, arrow
- * keys to move, Enter to pick, Esc to close.
+ * Filterable provider dropdown (combobox) for the "Add a model" form.
+ *
+ * Lists the *configured* provider instances (Settings → Providers) — a model
+ * can only be added onto a provider that exists — excluding the built-in
+ * simulator, whose models ship with the app. Opens a fixed-position popover
+ * so it is never clipped by the scrolling settings pane; type-to-filter,
+ * arrow keys to move, Enter to pick, Esc to close.
  */
 export function ProviderCombobox({
   value,
   onChange,
 }: {
-  value: AddableProvider | null
-  onChange: (p: AddableProvider) => void
+  value: string | null
+  onChange: (id: string) => void
 }) {
+  const providers = useSettings((s) => s.s.providers)
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [active, setActive] = useState(0)
@@ -39,15 +33,24 @@ export function ProviderCombobox({
   const filterRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
 
-  const selected = ADDABLE_PROVIDERS.find((p) => p.id === value) ?? null
+  const selected = providers.find((p) => p.id === value) ?? null
 
+  // Simulator models are not addable (they ship with the app), so the
+  // simulator provider is not offered here either.
   const options = useMemo(() => {
+    const addable = providers.filter((p) => p.kind !== 'mock')
     const q = filter.trim().toLowerCase()
-    if (!q) return ADDABLE_PROVIDERS
-    return ADDABLE_PROVIDERS.filter(
-      (p) => p.label.toLowerCase().includes(q) || p.hint.toLowerCase().includes(q) || p.id.includes(q),
-    )
-  }, [filter])
+    if (!q) return addable
+    return addable.filter((p) => {
+      const kindLabel = supportedProvider(p.kind)?.label ?? p.kind
+      return (
+        p.label.toLowerCase().includes(q) ||
+        kindLabel.toLowerCase().includes(q) ||
+        (supportedProvider(p.kind)?.hint.toLowerCase().includes(q) ?? false) ||
+        p.kind.includes(q)
+      )
+    })
+  }, [providers, filter])
 
   // Anchor the popover to the trigger in viewport coordinates.
   useIsoLayoutEffect(() => {
@@ -82,11 +85,11 @@ export function ProviderCombobox({
 
   const openPopover = () => {
     setFilter('')
-    setActive(value ? ADDABLE_PROVIDERS.findIndex((p) => p.id === value) : 0)
+    setActive(value ? providers.findIndex((p) => p.id === value) : 0)
     setOpen(true)
   }
 
-  const pick = (id: AddableProvider) => {
+  const pick = (id: string) => {
     onChange(id)
     setOpen(false)
     triggerRef.current?.focus()
@@ -117,6 +120,12 @@ export function ProviderCombobox({
     }
   }
 
+  const gotoProviders = () => {
+    setOpen(false)
+    // Hand the user to the Providers tab, where the "Add a provider" dialog lives.
+    useUI.getState().setSettingsTab('providers')
+  }
+
   return (
     <div className={`combobox${open ? ' open' : ''}`}>
       <button
@@ -132,7 +141,7 @@ export function ProviderCombobox({
           {selected ? (
             <>
               <strong>{selected.label}</strong>
-              <span className="combobox-value-hint">{selected.hint}</span>
+              <span className="combobox-value-hint">{supportedProvider(selected.kind)?.label ?? selected.kind}</span>
             </>
           ) : (
             <span className="combobox-placeholder">Select a provider…</span>
@@ -174,10 +183,23 @@ export function ProviderCombobox({
                     {p.label}
                     {value === p.id ? <span className="opt-check"> ✓</span> : null}
                   </span>
-                  <span className="opt-hint">{p.hint}</span>
+                  <span className="opt-hint">{supportedProvider(p.kind)?.label ?? p.kind}</span>
                 </li>
               ))}
-              {options.length === 0 && <li className="combobox-empty">No provider matches “{filter}”.</li>}
+              {options.length === 0 && (
+                <li className="combobox-empty">
+                  {providers.some((p) => p.kind !== 'mock') ? (
+                    `No provider matches “${filter}”.`
+                  ) : (
+                    <>
+                      No providers configured yet.{' '}
+                      <button className="link-btn" type="button" onClick={gotoProviders}>
+                        Add a provider first
+                      </button>
+                    </>
+                  )}
+                </li>
+              )}
             </ul>
           </div>,
           document.body,

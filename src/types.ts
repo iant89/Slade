@@ -46,7 +46,12 @@ export interface ModelDef {
   id: string
   /** Human label shown in the UI, e.g. "Claude Sonnet 4.5". */
   label: string
-  provider: ProviderId
+  /**
+   * Id of the provider *instance* (in `settings.providers`) this model runs
+   * on. The factory instances keep their kind as id — `'openai'`, `'mock'`… —
+   * so settings saved before providers became user-managed keep resolving.
+   */
+  provider: string
   /** Model identifier passed to the provider API. */
   apiModel: string
   /** Base URL override (openai-compatible endpoints: Groq, OpenRouter, Ollama…). */
@@ -373,8 +378,21 @@ export interface AppearanceSettings {
   enterToSend: boolean
 }
 
-export interface ProviderConfig {
+/**
+ * One configured provider connection. Slade ships with one instance per
+ * supported kind, and more can be added (Settings → Providers) — several
+ * OpenAI-compatible endpoints (Groq, DeepSeek, Ollama…) or a second account
+ * on the same provider each get their own entry, key and models.
+ */
+export interface ProviderDef {
+  /** Unique instance id. Factory instances reuse their kind as id. */
+  id: string
+  /** Which wire protocol/adapter this connection speaks. */
+  kind: ProviderId
+  /** Display name, e.g. "OpenAI" or "Groq". Editable. */
+  label: string
   apiKey: string
+  /** Default endpoint override for kinds that support it (openai-compatible). */
   baseURL?: string
 }
 
@@ -385,7 +403,7 @@ export interface Settings {
   artifacts: ArtifactSettings
   appearance: AppearanceSettings
   agent: AgentSettings
-  providers: Record<string, ProviderConfig>
+  providers: ProviderDef[]
   pinnedModelId?: string
 }
 
