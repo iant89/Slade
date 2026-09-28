@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ModelDef, ProviderId } from '../../types'
-import { useSettings, DEFAULT_SETTINGS } from '../../store/settings'
+import type { ModelDef, ProviderDef, ProviderId } from '../../types'
+import { useSettings, DEFAULT_SETTINGS, providerById } from '../../store/settings'
 import { useHealth } from '../../store/health'
 import { useChat } from '../../store/chat'
 import { useArtifacts } from '../../store/artifacts'
@@ -10,9 +10,11 @@ import { exportBundleSchema, settingsSchema } from '../../lib/schemas'
 import { downloadUrl } from '../../lib/clipboard'
 import { formatCount } from '../../lib/format'
 import { uid } from '../../lib/id'
+import { nextProviderLabel, supportedProvider } from '../../lib/providerCatalog'
 import type { AddableProvider, CatalogModel } from '../../lib/modelCatalog'
 import { ProviderCombobox } from './ProviderCombobox'
 import { ModelPickerModal } from './ModelPickerModal'
+import { AddProviderModal } from './AddProviderModal'
 import { useGitHub } from '../../store/github'
 import { SCOPES_HELP } from '../../lib/github-auth'
 import { ConnectCard } from '../github/ConnectCard'
@@ -98,7 +100,8 @@ export function SettingsModal() {
 /* ------------------------------------------------------------------ */
 
 function ModelsTab() {
-  const models = useSettings((s) => s.s.models)
+  const settings = useSettings((s) => s.s)
+  const models = settings.models
   const health = useHealth((s) => s.byModel)
   const { reorderModels, setModel, removeModel, addModel } = useSettings.getState()
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -126,6 +129,7 @@ function ModelsTab() {
       <div className="model-list">
         {models.map((m, i) => {
           const h = health[m.id]
+          const provider = providerById(settings, m.provider)
           const isOpen = expanded === m.id
           return (
             <div
@@ -151,7 +155,7 @@ function ModelsTab() {
                   checked={m.enabled}
                   onChange={(v) => setModel(m.id, { enabled: v })}
                   label={`${i + 1}. ${m.label}`}
-                  hint={`${adapterFor(m.provider).label} · ${m.apiModel}${h ? ` · ${formatCount(h.totalRequests)} req · ${formatCount(h.totalTokensOut)} tok out` : ''}`}
+                  hint={`${provider?.label ?? m.provider} · ${m.apiModel}${h ? ` · ${formatCount(h.totalRequests)} req · ${formatCount(h.totalTokensOut)} tok out` : ''}`}
                 />
                 <button
                   className="icon-btn"
@@ -172,8 +176,11 @@ function ModelsTab() {
                   <FieldRow label="Model ID (sent to provider)">
                     <input value={m.apiModel} onChange={(e) => setModel(m.id, { apiModel: e.target.value })} />
                   </FieldRow>
-                  {m.provider === 'openai-compatible' && (
-                    <FieldRow label="Base URL" hint="Any OpenAI-compatible endpoint (Groq, Together, Ollama…)">
+                  {provider?.kind === 'openai-compatible' && (
+                    <FieldRow
+                      label="Base URL"
+                      hint={provider.baseURL ? `Overrides ${provider.label}'s default endpoint` : 'Any OpenAI-compatible endpoint (Groq, Together, Ollama…)'}
+                    >
                       <input
                         value={m.baseURL ?? ''}
                         placeholder="https://api.groq.com/openai/v1"
@@ -219,7 +226,7 @@ function ModelsTab() {
                       }
                     />
                   </FieldRow>
-                  {m.provider === 'mock' && (
+                  {provider?.kind === 'mock' && (
                     <SelectRow
                       label="Simulated behavior"
                       value={m.simulate ?? 'ok'}
@@ -278,8 +285,10 @@ function ModelsTab() {
 
 /** Exported for the smoke test's SSR render checks. */
 export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onCancel: () => void }) {
+  const providers = useSettings((s) => s.s.providers)
   // Provider comes first: the Model ID field stays disabled until one is picked.
-  const [provider, setProvider] = useState<AddableProvider | null>(null)
+  // The value is a provider *instance* id from Settings → Providers.
+  const [providerId, setProviderId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
   const [apiModel, setApiModel] = useState('')
   const [baseURL, setBaseURL] = useState('')
@@ -290,9 +299,14 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
   const labelAuto = useRef(false)
   const urlAuto = useRef(false)
 
-  const changeProvider = (p: AddableProvider) => {
-    if (p === provider) return
-    setProvider(p)
+  const selected = providers.find((p) => p.id === providerId) ?? null
+  // The curated catalogue is keyed by wire-protocol kind; the combobox never
+  // offers the simulator, so a selected kind is always addable.
+  const kind = selected?.kind as AddableProvider | undefined
+
+  const changeProvider = (id: string) => {
+    if (id === providerId) return
+    setProviderId(id)
     // A model ID from the old provider is meaningless for the new one.
     setApiModel('')
     setCatalogInfo({})
@@ -339,20 +353,20 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
         label="Provider"
         hint="Pick this first — it unlocks the Model ID field"
       >
-        <ProviderCombobox value={provider} onChange={changeProvider} />
+        <ProviderCombobox value={providerId} onChange={changeProvider} />
       </FieldRow>
       <FieldRow
         label="Model ID"
         hint={
-          provider
+          selected
             ? 'Click the field to browse curated high-context coding models, or type any ID'
             : 'Enabled once a provider is selected'
         }
       >
         <input
           value={apiModel}
-          disabled={!provider}
-          placeholder={provider ? 'Click to browse models…' : 'Select a provider first'}
+          disabled={!selected}
+          placeholder={selected ? 'Click to browse models…' : 'Select a provider first'}
           className="model-id-input"
           spellCheck={false}
           onChange={(e) => {
@@ -361,7 +375,7 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
             setCatalogInfo({})
           }}
           onClick={() => {
-            if (provider) setPickerOpen(true)
+            if (selected) setPickerOpen(true)
           }}
         />
       </FieldRow>
@@ -375,8 +389,15 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
           placeholder="e.g. Claude Opus 4.8"
         />
       </FieldRow>
-      {provider === 'openai-compatible' && (
-        <FieldRow label="Base URL" hint="Any OpenAI-compatible endpoint (DeepSeek, Z.ai, Groq, Ollama…)">
+      {kind === 'openai-compatible' && (
+        <FieldRow
+          label="Base URL"
+          hint={
+            selected?.baseURL
+              ? `Leave empty to use ${selected.label}'s endpoint (${selected.baseURL})`
+              : 'Any OpenAI-compatible endpoint (DeepSeek, Z.ai, Groq, Ollama…)'
+          }
+        >
           <input
             value={baseURL}
             onChange={(e) => {
@@ -393,13 +414,13 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
         </button>
         <button
           className="btn primary"
-          disabled={!provider || !label.trim() || !apiModel.trim()}
+          disabled={!selected || !label.trim() || !apiModel.trim()}
           onClick={() => {
-            if (!provider) return
+            if (!selected) return
             onAdd({
               id: uid('model'),
               label: label.trim(),
-              provider,
+              provider: selected.id,
               apiModel: apiModel.trim(),
               baseURL: baseURL.trim() || undefined,
               enabled: true,
@@ -414,8 +435,8 @@ export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => vo
         </button>
       </div>
 
-      {provider && (
-        <ModelPickerModal open={pickerOpen} provider={provider} onClose={() => setPickerOpen(false)} onPick={pickModel} />
+      {kind && (
+        <ModelPickerModal open={pickerOpen} provider={kind} onClose={() => setPickerOpen(false)} onPick={pickModel} />
       )}
     </div>
   )
@@ -845,62 +866,116 @@ function GitHubTab() {
 /* Providers tab                                                       */
 /* ------------------------------------------------------------------ */
 
-const PROVIDER_LIST: { id: ProviderId; label: string; hint: string; keyUrl?: string }[] = [
-  { id: 'openai', label: 'OpenAI', hint: 'GPT-4o and friends', keyUrl: 'https://platform.openai.com/api-keys' },
-  { id: 'anthropic', label: 'Anthropic', hint: 'Claude models', keyUrl: 'https://console.anthropic.com/settings/keys' },
-  { id: 'google', label: 'Google Gemini', hint: 'Gemini models', keyUrl: 'https://aistudio.google.com/app/apikey' },
-  { id: 'openrouter', label: 'OpenRouter', hint: 'One key, hundreds of models', keyUrl: 'https://openrouter.ai/settings/keys' },
-  { id: 'openai-compatible', label: 'OpenAI-compatible', hint: 'Groq, Together, Ollama…' },
-  { id: 'mock', label: 'Built-in simulator', hint: 'No key needed — powers the demo models' },
-]
-
 type TestState = { ok: boolean; message: string } | 'testing' | null
 
 function ProvidersTab() {
   const providers = useSettings((s) => s.s.providers)
-  const setProvider = useSettings.getState().setProvider
+  const models = useSettings((s) => s.s.models)
+  const { setProvider, addProvider, removeProvider } = useSettings.getState()
   const [show, setShow] = useState<Record<string, boolean>>({})
   const [tests, setTests] = useState<Record<string, TestState>>({})
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
 
-  const test = async (pid: ProviderId) => {
-    setTests((t) => ({ ...t, [pid]: 'testing' }))
-    const adapter = adapterFor(pid)
-    const cfg = providers[pid] ?? { apiKey: '' }
+  const test = async (p: ProviderDef) => {
+    setTests((t) => ({ ...t, [p.id]: 'testing' }))
+    const adapter = adapterFor(p.kind)
     // Test against a model the user actually has configured, so the result
     // means "this chain can answer", not "this key can list a catalogue".
-    const models = useSettings.getState().s.models
-    const configured = models.find((m) => m.provider === pid && m.enabled) ?? models.find((m) => m.provider === pid)
-    const res = await adapter.testKey(cfg.apiKey, cfg.baseURL, configured)
-    setTests((t) => ({ ...t, [pid]: { ok: res.ok, message: res.message } }))
+    const configured =
+      models.find((m) => m.provider === p.id && m.enabled) ?? models.find((m) => m.provider === p.id)
+    const res = await adapter.testKey(p.apiKey, p.baseURL, configured)
+    setTests((t) => ({ ...t, [p.id]: { ok: res.ok, message: res.message } }))
     if (res.ok) {
       for (const m of models) {
-        if (m.provider === pid) useHealth.getState().markHealthy(m.id)
+        if (m.provider === p.id) useHealth.getState().markHealthy(m.id)
       }
     }
   }
 
+  const addByKind = (kind: ProviderId) => {
+    const def: ProviderDef = {
+      id: uid('prov'),
+      kind,
+      label: nextProviderLabel(kind, providers),
+      apiKey: '',
+    }
+    addProvider(def)
+    setAdding(false)
+    // Open the fresh connection's config so the key can be pasted right away.
+    setExpanded(def.id)
+  }
+
+  const remove = (p: ProviderDef) => {
+    const owned = models.filter((m) => m.provider === p.id)
+    if (
+      owned.length &&
+      !confirm(
+        `Delete ${p.label} and the ${owned.length} model${owned.length === 1 ? '' : 's'} on it? ` +
+          `This cannot be undone — add the provider again and re-create its models to recover.`,
+      )
+    ) {
+      return
+    }
+    const removedModelIds = removeProvider(p.id)
+    for (const id of removedModelIds) useHealth.getState().removeModel(id)
+    setTests((t) => {
+      const next = { ...t }
+      delete next[p.id]
+      return next
+    })
+    if (expanded === p.id) setExpanded(null)
+  }
+
   return (
     <div>
-      <SectionTitle>API keys</SectionTitle>
+      <SectionTitle>Provider connections</SectionTitle>
       <p className="settings-note">
-        Keys are stored locally in your browser only, are masked on screen, and are never logged or sent anywhere except
-        the provider you choose.
+        Each connection has its own key (and, for OpenAI-compatible endpoints, its own base URL) and holds its own
+        models. Add the same kind twice for two accounts, or several OpenAI-compatible endpoints — Groq, DeepSeek,
+        Ollama — side by side. Keys are stored locally in your browser only, are masked on screen, and are never logged
+        or sent anywhere except the provider they belong to.
       </p>
-      {PROVIDER_LIST.map((p) => {
-        const cfg = providers[p.id] ?? { apiKey: '' }
+      {providers.map((p) => {
+        const sup = supportedProvider(p.kind)
         const t = tests[p.id] ?? null
-        const isMock = p.id === 'mock'
+        const needsKey = !sup?.noKey
+        const modelCount = models.filter((m) => m.provider === p.id).length
+        const isOpen = expanded === p.id
         return (
           <div key={p.id} className="provider-row">
             <div className="provider-head">
               <strong>{p.label}</strong>
-              <span className="provider-hint">{p.hint}</span>
+              <span className="provider-hint">{sup?.hint ?? p.kind}</span>
+              <span className="provider-models" title="Models on this provider (Settings → Models)">
+                {modelCount} model{modelCount === 1 ? '' : 's'}
+              </span>
+              <span className="provider-head-actions">
+                <button
+                  className="icon-btn"
+                  aria-expanded={isOpen}
+                  aria-label={`Configure ${p.label}`}
+                  onClick={() => setExpanded(isOpen ? null : p.id)}
+                  type="button"
+                >
+                  <IconChevronDown size={14} className={isOpen ? 'flip-v' : ''} />
+                </button>
+                <button
+                  className="icon-btn"
+                  aria-label={`Delete ${p.label}`}
+                  title={`Delete ${p.label}${modelCount ? ` and its ${modelCount} model${modelCount === 1 ? '' : 's'}` : ''}`}
+                  onClick={() => remove(p)}
+                  type="button"
+                >
+                  <IconTrash size={14} />
+                </button>
+              </span>
             </div>
-            {!isMock && (
+            {needsKey && (
               <div className="provider-key-row">
                 <input
                   type={show[p.id] ? 'text' : 'password'}
-                  value={cfg.apiKey}
+                  value={p.apiKey}
                   placeholder="sk-…"
                   aria-label={`${p.label} API key`}
                   autoComplete="off"
@@ -910,33 +985,49 @@ function ProvidersTab() {
                 <button className="btn ghost" onClick={() => setShow((s) => ({ ...s, [p.id]: !s[p.id] }))} type="button">
                   {show[p.id] ? 'Hide' : 'Show'}
                 </button>
-                <button className="btn primary" onClick={() => void test(p.id)} disabled={t === 'testing'} type="button">
+                <button className="btn primary" onClick={() => void test(p)} disabled={t === 'testing'} type="button">
                   {t === 'testing' ? 'Testing…' : 'Test'}
                 </button>
               </div>
             )}
-            {p.id === 'openai-compatible' && (
-              <FieldRow label="Default base URL" hint="Used by openai-compatible models without their own URL">
-                <input
-                  value={cfg.baseURL ?? ''}
-                  placeholder="https://api.groq.com/openai/v1"
-                  onChange={(e) => setProvider(p.id, { baseURL: e.target.value })}
-                />
-              </FieldRow>
+            {isOpen && (
+              <div className="provider-config">
+                <FieldRow label="Display name" hint="Shown on models, the rail and failover reports">
+                  <input
+                    value={p.label}
+                    onChange={(e) => setProvider(p.id, { label: e.target.value })}
+                  />
+                </FieldRow>
+                {sup?.supportsBaseURL && (
+                  <FieldRow label="Default base URL" hint="Used by this provider's models that have no URL of their own">
+                    <input
+                      value={p.baseURL ?? ''}
+                      placeholder="https://api.groq.com/openai/v1"
+                      onChange={(e) => setProvider(p.id, { baseURL: e.target.value })}
+                    />
+                  </FieldRow>
+                )}
+                {sup?.keyUrl && (
+                  <a className="link-btn" href={sup.keyUrl} target="_blank" rel="noreferrer">
+                    Get a key ↗
+                  </a>
+                )}
+              </div>
             )}
             {t && t !== 'testing' && (
               <div className={`provider-test ${t.ok ? 'ok' : 'fail'}`} role="status">
                 {t.ok ? <IconCheck size={12} /> : <IconAlert size={12} />} {t.message}
               </div>
             )}
-            {p.keyUrl && (
-              <a className="link-btn" href={p.keyUrl} target="_blank" rel="noreferrer">
-                Get a key ↗
-              </a>
-            )}
           </div>
         )
       })}
+
+      <button className="btn ghost add-model" onClick={() => setAdding(true)} type="button">
+        <IconPlus size={14} /> Add a provider
+      </button>
+
+      <AddProviderModal open={adding} onClose={() => setAdding(false)} onPick={addByKind} />
     </div>
   )
 }

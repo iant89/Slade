@@ -1,9 +1,10 @@
-import type { ModelDef, ProviderId } from '../types'
+import type { ModelDef, ProviderDef, ProviderId } from '../types'
 import type { ProviderAdapter } from './base'
 import { mockAdapter } from './mock'
 import { openaiAdapter, openrouterAdapter } from './openai'
 import { anthropicAdapter } from './anthropic'
 import { googleAdapter } from './google'
+import { SUPPORTED_PROVIDERS } from '../lib/providerCatalog'
 
 const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
   mock: mockAdapter,
@@ -20,6 +21,23 @@ const ADAPTERS: Record<ProviderId, ProviderAdapter> = {
 export function adapterFor(provider: ProviderId): ProviderAdapter {
   return ADAPTERS[provider]
 }
+
+/* ------------------------------------------------------------------ */
+/* Default provider instances (first-run state)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One provider instance per supported kind. Instances keep their kind as id
+ * so settings saved before providers became user-managed — where
+ * `providers` was a record keyed by kind and models referenced those keys —
+ * upgrade in place without touching a single model.
+ */
+export const DEFAULT_PROVIDERS: ProviderDef[] = SUPPORTED_PROVIDERS.map((p) => ({
+  id: p.kind,
+  kind: p.kind,
+  label: p.label,
+  apiKey: '',
+}))
 
 /* ------------------------------------------------------------------ */
 /* Default model registry (first-run state)                            */

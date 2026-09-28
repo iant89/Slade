@@ -5,12 +5,12 @@ import type {
   ArtifactSettings,
   DefaultsSettings,
   ModelDef,
-  ProviderConfig,
-  ProviderId,
+  ProviderDef,
   Settings,
 } from '../types'
-import { DEFAULT_MODELS } from '../providers/registry'
+import { DEFAULT_MODELS, DEFAULT_PROVIDERS } from '../providers/registry'
 import { validateSettings } from '../lib/schemas'
+import { normalizeProviderDef } from '../lib/providerCatalog'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -52,15 +52,15 @@ export const DEFAULT_SETTINGS: Settings = {
     // small to finish one. A ceiling costs nothing unless the tokens are used.
     stepMaxTokens: 16_384,
   },
-  providers: {
-    mock: { apiKey: '' },
-    openai: { apiKey: '' },
-    anthropic: { apiKey: '' },
-    google: { apiKey: '' },
-    openrouter: { apiKey: '' },
-    'openai-compatible': { apiKey: '' },
-  },
+  providers: DEFAULT_PROVIDERS,
   pinnedModelId: undefined,
+}/* ------------------------------------------------------------------ */
+/* Provider lookups                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Resolve a model's provider instance, or undefined when it was deleted. */
+export function providerById(s: Settings, id: string): ProviderDef | undefined {
+  return s.providers.find((p) => p.id === id)
 }
 
 /** Merge stored settings over defaults so new fields appear after upgrades. */
@@ -76,9 +76,17 @@ function hydrate(): Settings {
   if (raw.appearance) merged.appearance = { ...merged.appearance, ...raw.appearance }
   if (raw.agent) merged.agent = { ...merged.agent, ...raw.agent }
   if (raw.providers) {
-    for (const [k, v] of Object.entries(raw.providers)) {
-      merged.providers[k] = { ...(merged.providers[k] ?? { apiKey: '' }), ...v }
-    }
+    // Handles both shapes: the new provider-instance list and the legacy
+    // record keyed by kind (migrated in place, ids = kinds, so existing
+    // models keep pointing at the right entry). Typed `unknown` because the
+    // raw blob predates validation — it may still be the old record shape.
+    const rawProviders: unknown = raw.providers
+    const migrated = Array.isArray(rawProviders)
+      ? rawProviders.map((p) => normalizeProviderDef(p as Partial<ProviderDef> & { id: string }))
+      : Object.entries(rawProviders as Record<string, Partial<ProviderDef>>).map(([id, cfg]) =>
+          normalizeProviderDef({ id, ...cfg }),
+        )
+    merged.providers = migrated
   }
   merged.pinnedModelId = raw.pinnedModelId
   return merged
@@ -94,7 +102,14 @@ export interface SettingsState {
   setArtifactsPrefs: (patch: Partial<ArtifactSettings>) => void
   setAgent: (patch: Partial<AgentSettings>) => void
   setAppearance: (patch: Partial<AppearanceSettings>) => void
-  setProvider: (pid: ProviderId | string, patch: Partial<ProviderConfig>) => void
+  /** Update an existing provider instance (key, base URL, label). */
+  setProvider: (pid: string, patch: Partial<Omit<ProviderDef, 'id' | 'kind'>>) => void
+  addProvider: (def: ProviderDef) => void
+  /**
+   * Delete a provider instance and cascade-delete every model on it.
+   * Returns the ids of the removed models (for health cleanup).
+   */
+  removeProvider: (pid: string) => string[]
   pin: (modelId: string | undefined) => void
   replaceAll: (s: Settings) => void
   resetSettings: () => void
@@ -161,12 +176,36 @@ export const useSettings = create<SettingsState>((set, get) => ({
   },
   setProvider: (pid, patch) => {
     const s = get().s
+    // Only existing instances can be patched — adding one is addProvider's job.
+    if (!s.providers.some((p) => p.id === pid)) return
+    const providers = s.providers.map((p) => (p.id === pid ? { ...p, ...patch } : p))
+    const next = { ...s, providers }
+    persist(next)
+    set({ s: next })
+  },
+  addProvider: (def) => {
+    const s = get().s
+    if (s.providers.some((p) => p.id === def.id)) return
+    const next = { ...s, providers: [...s.providers, def] }
+    persist(next)
+    set({ s: next })
+  },
+  removeProvider: (pid) => {
+    const s = get().s
+    const provider = s.providers.find((p) => p.id === pid)
+    if (!provider) return []
+    // Cascade: models on this provider are meaningless without it.
+    const removedModelIds = s.models.filter((m) => m.provider === pid).map((m) => m.id)
+    const removedModelSet = new Set(removedModelIds)
     const next = {
       ...s,
-      providers: { ...s.providers, [pid]: { ...(s.providers[pid] ?? { apiKey: '' }), ...patch } },
+      providers: s.providers.filter((p) => p.id !== pid),
+      models: s.models.filter((m) => !removedModelSet.has(m.id)),
+      pinnedModelId: s.pinnedModelId && removedModelSet.has(s.pinnedModelId) ? undefined : s.pinnedModelId,
     }
     persist(next)
     set({ s: next })
+    return removedModelIds
   },
   pin: (modelId) => {
     const next = { ...get().s, pinnedModelId: modelId }
@@ -206,5 +245,5 @@ export function effectiveParams(s: Settings, modelId?: string): EffectiveParams 
 }
 
 export function providerKey(s: Settings, model: ModelDef): string {
-  return s.providers[model.provider]?.apiKey ?? ''
+  return providerById(s, model.provider)?.apiKey ?? ''
 }

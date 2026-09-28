@@ -12,7 +12,7 @@
  * any particular message shape.
  */
 
-import type { AttemptFailure, ChatTurn, FailureClass, ModelDef, Settings, StreamEvent, Usage } from '../types'
+import type { AttemptFailure, ChatTurn, FailureClass, ModelDef, ProviderDef, Settings, StreamEvent, Usage } from '../types'
 import { useHealth } from '../store/health'
 import { useUI } from '../store/ui'
 import { adapterFor } from '../providers/registry'
@@ -292,9 +292,13 @@ async function driveAdapter(args: {
   onBudgetRetry?: (retry: BudgetRetry) => void
 }): Promise<{ truncated: boolean }> {
   const { model, settings, signal, onBudgetRetry } = args
-  const apiKey = settings.providers[model.provider]?.apiKey ?? ''
-  if (model.provider !== 'mock' && !apiKey.trim()) {
-    throw new ProviderError('auth', `No API key configured for ${model.provider}.`, false)
+  const provider = settings.providers.find((p) => p.id === model.provider)
+  if (!provider) {
+    throw new ProviderError('unknown', `Provider "${model.provider}" no longer exists — re-add it in Settings → Providers.`, false)
+  }
+  const apiKey = provider.apiKey
+  if (provider.kind !== 'mock' && !apiKey.trim()) {
+    throw new ProviderError('auth', `No API key configured for ${provider.label}.`, false)
   }
 
   let budget = args.maxTokens
@@ -304,7 +308,7 @@ async function driveAdapter(args: {
     const startedAt = performance.now()
     const observed: ObservedAttempt = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
     try {
-      await driveOnce({ ...args, maxTokens: budget, apiKey, observed })
+      await driveOnce({ ...args, provider, maxTokens: budget, apiKey, observed })
       if (observed.usage) args.onUsage(observed.usage)
       useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
       return { truncated: observed.truncated }
@@ -352,12 +356,13 @@ async function driveOnce(args: {
   settings: Settings
   signal: AbortSignal
   maxTokens: number
+  provider: ProviderDef
   apiKey: string
   observed: ObservedAttempt
   onDelta: (text: string) => void
 }): Promise<void> {
-  const { model, turns, systemPrompt, settings, signal, maxTokens, apiKey, observed, onDelta } = args
-  const adapter = adapterFor(model.provider)
+  const { model, turns, systemPrompt, settings, signal, maxTokens, provider, apiKey, observed, onDelta } = args
+  const adapter = adapterFor(provider.kind)
   const modelOverride = model.overrides
   const attemptController = new AbortController()
   const onAbort = () => attemptController.abort()

@@ -40,7 +40,10 @@ you can watch the failover engine work.
    file, Markdown doc, image or WAV — each renders as a rich, type-aware artifact card.
 6. Add real API keys in **Settings → Providers** (OpenAI, Anthropic, Google Gemini,
    **OpenRouter** — one key in front of hundreds of models — or any OpenAI-compatible
-   endpoint such as Groq/Ollama) to route to live models with the same engine.
+   endpoint such as Groq/Ollama) to route to live models with the same engine. Providers
+   are managed like models: **Add a provider** opens a dialog with every supported one,
+   and each connection has its own key, endpoint and models — so Groq and Ollama can
+   live side by side as two OpenAI-compatible connections.
 7. Hit the **GitHub** button in the header (or `Ctrl/Cmd + G`), sign in with the device
    flow, open a repo and attach a file — then ask about it. Or take any answer and
    **Publish to GitHub** as a gist, a commit or an issue. See
@@ -219,10 +222,16 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 - **GitHub** — device-flow sign-in, OAuth app client ID, sign-in relay URL, requested
   scopes, and publishing defaults (target, repository, branch, path prefix, secret
   gists, new-branch commits)
-- **Providers** — masked API keys (stored locally, never logged), connection tests with
-  instant pass/fail and real generation, and first-class OpenRouter support
-  (`openrouter/auto` ships in the default registry; any `vendor/model` id works, with
-  Slade's attribution headers and streamed token usage)
+- **Providers** — user-managed like models: **Add a provider** opens a modal with every
+  supported kind (OpenAI, Anthropic, Google Gemini, OpenRouter, OpenAI-compatible, the
+  built-in simulator), each connection carries its own masked key, optional base URL and
+  display name, and deleting one removes the models attached to it (with a confirm).
+  Multiple connections to the same kind are welcome — a personal and a work OpenAI
+  account, or Groq *and* DeepSeek *and* Ollama as separate OpenAI-compatible endpoints.
+  Connection tests use real generation, and first-class OpenRouter support ships in the
+  box (`openrouter/auto` in the default registry; any `vendor/model` id works, with
+  Slade's attribution headers and streamed token usage). Settings saved by older builds
+  upgrade in place: the old key record becomes one provider instance per kind.
 - **Appearance** — light/dark/system theme, font size, message density, code theme,
   reduced motion, Enter-to-send
 - **Data** — export/import everything as JSON, clear history, reset to defaults
