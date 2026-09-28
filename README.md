@@ -45,6 +45,49 @@ you can watch the failover engine work.
    flow, open a repo and attach a file — then ask about it. Or take any answer and
    **Publish to GitHub** as a gist, a commit or an issue. See
    [GitHub (repo context & publishing)](#github-repo-context--publishing).
+8. Flip the **Agent** chip in the composer and describe a whole *task* — the orchestrator
+   model plans it, delegates the steps to your other models, and assembles the answer.
+   See [The orchestrator (agent mode)](#the-orchestrator-agent-mode).
+
+## The orchestrator (agent mode)
+
+Flip the **Agent** chip next to the model picker (or type `/agent`) and the conversation
+changes shape: you stop picking models entirely. Every message goes to an
+**orchestrator model** — by default the top of your chain, configurable in
+**Settings → Agent** — and *it* does the rest:
+
+1. **Plans** — the orchestrator decides whether your message even needs delegation.
+   Greetings and quick questions get a direct answer. Real tasks become a short plan of
+   self-contained subtasks.
+2. **Delegates** — each subtask is dispatched straight to a worker model from your
+   roster (the orchestrator picks them by label; unresolvable hints fall back down the
+   chain). Subtasks run in parallel (configurable) and **each carries its own failover
+   walk** — a worker that rate-limits is silently replaced mid-step, and the step
+   records who it fell back from and why.
+3. **Synthesizes** — the orchestrator receives every worker's output, reconciles
+   conflicts, and streams one final answer. Files workers produced (CSV, code…) land as
+   artifact cards inside their step, and again in the final answer.
+
+You watch all of it live on a **plan card** in the thread: each step shows its title,
+which model ran it, a spinner/check/cross, elapsed time, and an expandable worker
+output. Stop works mid-run (partial plans are kept), retry re-runs the whole
+orchestration, and everything is persisted with the message.
+
+- You only ever talk to the orchestrator; it talks to the models.
+- Workers are real chain members: cooldowns, health tracking and usage counters apply.
+- A step that fails on every candidate doesn't sink the run — the orchestrator is told
+  and works around it (if *every* step dies, the run fails loudly, with reasons).
+- If the orchestrator's plan comes back malformed, it gets one repair pass; failing
+  that, Slade falls back to a single execution step and says so on the card.
+- Simulators play along: with no API keys, agent mode is fully demoable — the
+  built-in models produce plans, worker deliverables, and synthesis.
+
+### Configuring it (Settings → Agent)
+
+- **Orchestrator model** — chain top by default, or pin any enabled model.
+- **Max subtasks per run** (1–8) and **parallel workers** (1–4, 1 = sequential).
+- **Expand worker output** — completed steps show their full result by default.
+
 
 ## The failover engine
 
@@ -150,7 +193,8 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
   (with a "jump to latest" affordance)
 - Message actions: copy, regenerate, **edit-and-resend**, delete, **branch-from-here**
 - Composer: auto-grow input, Enter/Shift-Enter (configurable), char/token counter,
-  drag-and-drop & paste-to-attach, slash shortcuts (`/system`, `/model`, `/sample`, `/new`)
+  drag-and-drop & paste-to-attach, slash shortcuts (`/system`, `/model`, `/agent`,
+  `/sample`, `/new`)
 - Stop generation at any time — partial answers are kept
 
 ## Settings (Ctrl/Cmd + ,)
@@ -160,6 +204,8 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 - **Defaults** — temperature, top-p, max tokens, system prompt, streaming, typing
   indicator, auto-scroll, failover strategy, first-token timeout, stream timeout,
   artifact preferences
+- **Agent** — orchestrator model, max subtasks per run, parallel workers, plan-card
+  expansion (see [The orchestrator (agent mode)](#the-orchestrator-agent-mode))
 - **GitHub** — device-flow sign-in, OAuth app client ID, sign-in relay URL, requested
   scopes, and publishing defaults (target, repository, branch, path prefix, secret
   gists, new-branch commits)

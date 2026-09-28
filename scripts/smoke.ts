@@ -89,6 +89,9 @@ import { executePublish, PublishPreflightError, publishErrorMessage } from '../s
 import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
 import { buildTurns } from '../src/engine/turns'
+import { parsePlannerReply, resolveWorkerModel } from '../src/engine/agent'
+import { z } from 'zod'
+import { conversationSchema } from '../src/lib/schemas'
 import type { Artifact } from '../src/types'
 // The browser build of react-dom/server avoids the `stream` require that the
 // node build does, which esbuild cannot bundled for ESM.
@@ -362,6 +365,173 @@ async function testStop() {
       assistant.status,
     )
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* The orchestrator (agent mode)                                       */
+/* ------------------------------------------------------------------ */
+
+async function waitFor(cond: () => boolean, timeoutMs = 20_000): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (cond()) return true
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  return cond()
+}
+
+function freshAgentConversation(): string {
+  const convId = useChat.getState().newConversation()
+  useChat.getState().setConversationAgent(convId, true)
+  return convId
+}
+
+function testPlannerParsing() {
+  console.log('planner reply parsing:')
+  const plan = parsePlannerReply(
+    'Sure — here is my plan:\n```json\n{"mode":"plan","reply":"split it","subtasks":[{"title":"a","prompt":"p"}]}\n```',
+  )
+  check('fenced, prose-wrapped JSON parses', plan?.mode === 'plan')
+  check('plan keeps its subtask', plan?.mode === 'plan' && plan.subtasks.length === 1)
+
+  const answer = parsePlannerReply('{"mode":"answer","answer":"Howdy — you are talking to Slade."}')
+  check('answer mode parses', answer?.mode === 'answer')
+
+  const braceInString = parsePlannerReply(
+    'prefix {"mode":"plan","reply":"has } and { inside","subtasks":[{"title":"t","prompt":"p"}]} suffix',
+  )
+  check('braces inside strings survive the balanced scan', braceInString?.mode === 'plan')
+
+  check('prose without JSON → undefined', parsePlannerReply('I would start by researching the topic.') === undefined)
+  check('wrong shape → undefined', parsePlannerReply('{"mode":"surprise"}') === undefined)
+  check('empty subtasks → undefined', parsePlannerReply('{"mode":"plan","subtasks":[]}') === undefined)
+}
+
+function testWorkerResolution() {
+  console.log('worker model resolution:')
+  const settings = useSettings.getState().s
+  const byLabel = resolveWorkerModel('simulacron lite', settings, new Set(['mock-pro']))
+  check('label hint resolves case-insensitively', byLabel?.id === 'mock-lite', String(byLabel?.id))
+  const noHint = resolveWorkerModel(undefined, settings, new Set(['mock-pro']))
+  check('no hint → chain order minus the orchestrator', noHint?.id === 'mock-lite', String(noHint?.id))
+  const disabled = resolveWorkerModel('GPT-4o', settings, new Set())
+  check('unroutable hint falls back to the chain', disabled?.provider === 'mock', String(disabled?.id))
+}
+
+async function testAgentMode() {
+  console.log('agent mode (orchestrator):')
+
+  // Clean slate: both simulators healthy and honest.
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+
+  /* --- full delegated run ------------------------------------------ */
+
+  freshAgentConversation()
+  await sendUserMessage('prepare a Q3 sales report with a CSV dataset', [])
+  const run = lastAssistant()
+  check('run completed', run.status === 'complete', `${run.status}: ${run.error ?? ''}`)
+  check('agent run recorded on the message', Boolean(run.agent))
+  check('phase is complete', run.agent?.phase === 'complete', String(run.agent?.phase))
+  check('planned multiple steps', (run.agent?.steps.length ?? 0) >= 2, String(run.agent?.steps.length))
+  check(
+    'every step completed',
+    (run.agent?.steps ?? []).every((s) => s.status === 'complete'),
+    JSON.stringify(run.agent?.steps.map((s) => s.status)),
+  )
+  check(
+    'steps carry worker output',
+    (run.agent?.steps ?? []).every((s) => (s.result ?? '').length > 20),
+    JSON.stringify(run.agent?.steps.map((s) => s.result?.length)),
+  )
+  check(
+    'step results are the workers\', not the plan JSON',
+    (run.agent?.steps ?? []).every((s) => !(s.result ?? '').includes('"mode":"plan"')),
+  )
+  check('final answer synthesized on top of the steps', run.content.length > 50)
+  check('message chain names the orchestrator first', run.chain?.[0] === 'mock-pro', JSON.stringify(run.chain))
+  check('usage aggregated across all calls', (run.usage?.completionTokens ?? 0) > 0)
+  check('no error left behind', !run.error, run.error)
+
+  // Render the finished run like the app does: the plan card must render,
+  // and the worker CSV inside the expanded step becomes an artifact card.
+  const html = renderToString(createElement(MessageBubble, { message: run }))
+  check('plan card renders into the message', html.includes('agent-plan'), 'no .agent-plan markup')
+  const csvArtifact = Object.values(useArtifacts.getState().byId).find((a) => a.mime === 'text/csv')
+  check('worker CSV became an artifact card', Boolean(csvArtifact), 'no text/csv artifact found')
+
+  /* --- worker-level failover --------------------------------------- */
+
+  // Lite fails before streaming → each step falls back to Pro, and the step
+  // records who it fell back from (the same contract as the plain chain).
+  useSettings.getState().setModel('mock-lite', { simulate: 'hard_quota' })
+  useHealth.getState().markHealthy('mock-lite')
+  useHealth.getState().markHealthy('mock-pro')
+  freshAgentConversation()
+  await sendUserMessage('write a haiku about failover and review it', [])
+  const fo = lastAssistant()
+  check('run with failing worker completed', fo.status === 'complete', `${fo.status}: ${fo.error ?? ''}`)
+  check(
+    'failed-over steps ran on Simulacron Pro',
+    (fo.agent?.steps ?? []).every((s) => s.modelId === 'mock-pro'),
+    JSON.stringify(fo.agent?.steps.map((s) => s.modelId)),
+  )
+  check(
+    'step recorded the fallback',
+    (fo.agent?.steps ?? []).some((s) => s.failedChain.includes('mock-lite')),
+    JSON.stringify(fo.agent?.steps.map((s) => s.failedChain)),
+  )
+  check(
+    'fallback step kept the failure reason',
+    (fo.agent?.steps ?? []).some((s) => s.attempts.some((a) => a.modelId === 'mock-lite' && a.message.includes('quota'))),
+    JSON.stringify(fo.agent?.steps.flatMap((s) => s.attempts)),
+  )
+
+  /* --- direct-answer path (no delegation needed) ------------------- */
+
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+  useHealth.getState().markHealthy('mock-lite')
+  useHealth.getState().markHealthy('mock-pro')
+  freshAgentConversation()
+  await sendUserMessage('hello', [])
+  const greet = lastAssistant()
+  check('greeting run completed', greet.status === 'complete', `${greet.status}: ${greet.error ?? ''}`)
+  check('greeting did not spawn steps', (greet.agent?.steps.length ?? 1) === 0, String(greet.agent?.steps.length))
+  check('greeting still answered', greet.content.includes('Slade'), greet.content.slice(0, 80))
+
+  /* --- stopping mid-run -------------------------------------------- */
+
+  const stopConv = freshAgentConversation()
+  const stopPromise = sendUserMessage('prepare a long Q3 sales report with a CSV dataset', [])
+  const appeared = await waitFor(() => {
+    const conv = useChat.getState().conversations[stopConv]
+    return Boolean(conv?.messages.some((m) => m.agent && m.agent.steps.length > 0))
+  })
+  check('plan card appeared before stop', appeared)
+  stopGeneration(stopConv)
+  await stopPromise
+  const stopped = useChat.getState().conversations[stopConv]!.messages.find((m) => m.role === 'assistant')
+  check('stopped run is not left streaming', stopped?.status !== 'streaming' && stopped?.status !== 'pending', String(stopped?.status))
+  check(
+    'stopped run kept its partial plan',
+    Boolean(stopped?.agent) && ['cancelled', 'complete', 'error'].includes(stopped!.status),
+    `${stopped?.status} / phase ${stopped?.agent?.phase}`,
+  )
+
+  /* --- persistence --------------------------------------------------- */
+
+  // The 350ms persist debounce should have flushed by now; the stored JSON
+  // must still validate, agent runs and all.
+  await new Promise((r) => setTimeout(r, 600))
+  const raw = JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]') as unknown
+  const parsed = z.array(conversationSchema).safeParse(raw)
+  check('persisted conversations still validate with agent runs', parsed.success, JSON.stringify(parsed.error?.issues.slice(0, 3)))
+
+  // Restore the plain-chain defaults for later tests.
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
 }
 
 /* ------------------------------------------------------------------ */
@@ -1633,6 +1803,9 @@ async function main() {
   await testChainVisibility()
   await testOpenRouterFailover()
   await testStop()
+  testPlannerParsing()
+  testWorkerResolution()
+  await testAgentMode()
   testRepoIdentifiers()
   await testGitHubClient()
   await testGitHubErrors()

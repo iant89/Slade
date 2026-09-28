@@ -9,7 +9,7 @@ export type PublishSource =
 
 export interface UIState {
   settingsOpen: boolean
-  settingsTab: 'models' | 'defaults' | 'providers' | 'github' | 'appearance' | 'data'
+  settingsTab: 'models' | 'defaults' | 'agent' | 'providers' | 'github' | 'appearance' | 'data'
   sidebarOpen: boolean
   railOpen: boolean
   /** GitHub context workspace drawer. */

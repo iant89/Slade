@@ -96,7 +96,11 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId }: 
       pre: ({ children }: { children?: ReactNode }) => <>{children}</>,
       code: ({ className, children }: { className?: string; children?: ReactNode }) => {
         const raw = nodeText(children)
-        const langMatch = /language-([\w+#-]+)/.exec(className ?? '')
+        // The info string carries the filename after a colon (```csv:sales_q3.csv),
+        // so the capture must include ':' — and '.'/'/' for path-like names —
+        // or the artifact never registers and the fence renders as a plain
+        // code block.
+        const langMatch = /language-([\w+#.:/-]+)/.exec(className ?? '')
         const token = langMatch?.[1] ?? ''
         const colon = token.indexOf(':')
         const fileName = colon >= 0 ? token.slice(colon + 1) : ''

@@ -9,7 +9,8 @@ import { formatCount, formatTime } from '../../lib/format'
 import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { Markdown } from './Markdown'
-import { IconBranch, IconCheck, IconCopy, IconGithub, IconPencil, IconRefresh, IconTrash, IconAlert, IconSparkles } from '../icons'
+import { AgentPlanCard } from './AgentPlanCard'
+import { IconBranch, IconCheck, IconCopy, IconGithub, IconPencil, IconRefresh, IconTrash, IconAlert, IconBot, IconSparkles } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Typing indicator                                                    */
@@ -85,8 +86,8 @@ export function MessageBubble({ message }: { message: Message }) {
       aria-label={isUser ? 'Your message' : 'Assistant message'}
     >
       {!isUser && (
-        <div className="msg-avatar" aria-hidden="true">
-          <IconSparkles size={14} />
+        <div className={`msg-avatar${message.agent ? ' agent' : ''}`} aria-hidden="true">
+          {message.agent ? <IconBot size={14} /> : <IconSparkles size={14} />}
         </div>
       )}
       <div className="msg-main">
@@ -128,6 +129,20 @@ function ModelAttribution({
   message: Message
   labelOf: (id: string | undefined) => string
 }) {
+  // Orchestrated replies get their own attribution; the plan card below the
+  // message carries the per-step detail.
+  if (message.agent) {
+    return (
+      <span className="msg-model agent-attribution">
+        <span className="msg-model-name">Orchestrator · {labelOf(message.agent.orchestratorModelId) || 'agent'}</span>
+        {message.agent.steps.length > 0 && (
+          <span className="msg-agent-steps">
+            {message.agent.steps.filter((s) => s.status === 'complete').length}/{message.agent.steps.length} steps delegated
+          </span>
+        )}
+      </span>
+    )
+  }
   const final = labelOf(message.modelId ?? message.chain?.[message.chain.length - 1])
   const fellBackFrom = message.failedChain && message.failedChain.length > 0
   // Pair each failed model with the provider's own reason, when we kept one.
@@ -266,6 +281,10 @@ function AssistantBody({
   return (
     <div className="msg-bubble assistant-bubble">
       {pending && <TypingIndicator label={typingOn ? undefined : ''} />}
+      {message.agent && <AgentPlanCard run={message.agent} labelOf={labelOf} />}
+      {message.agent && !message.content.trim() && (pending || streaming) && message.agent.steps.length === 0 && (
+        <TypingIndicator label={typingOn ? 'The orchestrator is working…' : ''} />
+      )}
       {segments.map((seg, i) => (
         <div key={i}>
           {seg.handoffTo ? (

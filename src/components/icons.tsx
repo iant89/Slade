@@ -108,6 +108,18 @@ export const IconAlert = (p: P) => (
 export const IconSparkles = (p: P) => (
   <I {...p}><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z" /></I>
 )
+export const IconBot = (p: P) => (
+  <I {...p}>
+    <path d="M12 8V4" /><rect x="4" y="8" width="16" height="12" rx="2" />
+    <path d="M2 14h2M20 14h2" /><path d="M9 13v2M15 13v2" />
+  </I>
+)
+export const IconRoute = (p: P) => (
+  <I {...p}>
+    <circle cx="6" cy="19" r="3" /><circle cx="18" cy="5" r="3" />
+    <path d="M12 19h4.5a3.5 3.5 0 0 0 0-7h-9a3.5 3.5 0 0 1 0-7H12" />
+  </I>
+)
 export const IconZap = (p: P) => (
   <I {...p}><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /></I>
 )

@@ -140,6 +140,52 @@ export interface Artifact {
 }
 
 /* ------------------------------------------------------------------ */
+/* Orchestrator agent (agent mode)                                     */
+/* ------------------------------------------------------------------ */
+
+export type AgentPhase = 'planning' | 'executing' | 'synthesizing' | 'complete' | 'error'
+
+export type AgentStepStatus = 'pending' | 'running' | 'complete' | 'error' | 'skipped'
+
+/**
+ * One subtask the orchestrator delegated to a worker model. Persisted with
+ * the message so the whole run stays inspectable after a reload.
+ */
+export interface AgentStep {
+  id: string
+  title: string
+  /** Full self-contained prompt the worker received. */
+  prompt: string
+  modelId: string
+  /** Resolved at plan time; kept separately so a renamed model still renders. */
+  modelLabel: string
+  status: AgentStepStatus
+  /** The worker's full output. */
+  result?: string
+  error?: string
+  /** Failures inside this step's own failover walk, tried order. */
+  attempts: AttemptFailure[]
+  /** Worker model ids that failed before this step produced output. */
+  failedChain: string[]
+  elapsedMs?: number
+}
+
+export interface AgentRun {
+  phase: AgentPhase
+  /** The user's goal this run is executing. */
+  goal: string
+  orchestratorModelId: string
+  steps: AgentStep[]
+  /** Orchestrator's one-line strategy note from the planning call. */
+  strategy?: string
+  /** Set when planning had to fall back (unparseable plan → single step). */
+  note?: string
+  error?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+/* ------------------------------------------------------------------ */
 /* Messages & conversations                                            */
 /* ------------------------------------------------------------------ */
 
@@ -203,6 +249,8 @@ export interface Message {
   editedAt?: number
   /** Latency to first token, ms. */
   ttftMs?: number
+  /** Present when this reply was produced by the orchestrator agent. */
+  agent?: AgentRun
 }
 
 export interface Conversation {
@@ -213,6 +261,8 @@ export interface Conversation {
   messages: Message[]
   /** Per-conversation primary model override. */
   modelId?: string
+  /** When true, sends go through the orchestrator agent instead of the plain chain. */
+  agentEnabled?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -264,6 +314,18 @@ export interface ArtifactSettings {
   maxPreviewHeight: number
 }
 
+/** Orchestrator agent configuration (Settings → Agent). */
+export interface AgentSettings {
+  /** Model that plans, delegates and synthesizes. Undefined = top of the chain. */
+  orchestratorModelId?: string
+  /** Upper bound on subtasks per run. */
+  maxSteps: number
+  /** How many workers may run at once (1 = strictly sequential). */
+  maxParallel: number
+  /** When false the plan card collapses worker outputs to one line each. */
+  expandStepResults: boolean
+}
+
 export interface AppearanceSettings {
   theme: ThemePref
   fontSize: number
@@ -284,6 +346,7 @@ export interface Settings {
   defaults: DefaultsSettings
   artifacts: ArtifactSettings
   appearance: AppearanceSettings
+  agent: AgentSettings
   providers: Record<string, ProviderConfig>
   pinnedModelId?: string
 }

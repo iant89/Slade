@@ -23,6 +23,7 @@ import {
   IconDatabase,
   IconGithub,
   IconGrip,
+  IconBot,
   IconKey,
   IconLayers,
   IconPalette,
@@ -35,11 +36,12 @@ import {
   IconAlert,
 } from '../icons'
 
-type Tab = 'models' | 'defaults' | 'providers' | 'github' | 'appearance' | 'data'
+type Tab = 'models' | 'defaults' | 'agent' | 'providers' | 'github' | 'appearance' | 'data'
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'models', label: 'Models', icon: <IconLayers size={15} /> },
   { id: 'defaults', label: 'Defaults', icon: <IconSliders size={15} /> },
+  { id: 'agent', label: 'Agent', icon: <IconBot size={15} /> },
   { id: 'providers', label: 'Providers', icon: <IconKey size={15} /> },
   { id: 'github', label: 'GitHub', icon: <IconGithub size={15} /> },
   { id: 'appearance', label: 'Appearance', icon: <IconPalette size={15} /> },
@@ -76,6 +78,7 @@ export function SettingsModal() {
         <div className="settings-content" role="tabpanel" aria-label={`${tab} settings`}>
           {tab === 'models' && <ModelsTab />}
           {tab === 'defaults' && <DefaultsTab />}
+          {tab === 'agent' && <AgentTab />}
           {tab === 'providers' && <ProvidersTab />}
           {tab === 'github' && <GitHubTab />}
           {tab === 'appearance' && <AppearanceTab />}
@@ -497,6 +500,72 @@ function ArtifactPrefs() {
       <Toggle checked={prefs.autoExpandImages} onChange={(v) => set({ autoExpandImages: v })} label="Auto-expand images" />
       <SliderRow label="Max preview height" value={prefs.maxPreviewHeight} min={160} max={800} step={20} onChange={(v) => set({ maxPreviewHeight: v })} format={(v) => `${v}px`} />
     </>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Agent tab (orchestrator)                                            */
+/* ------------------------------------------------------------------ */
+
+function AgentTab() {
+  const agent = useSettings((s) => s.s.agent)
+  const models = useSettings((s) => s.s.models)
+  const set = useSettings.getState().setAgent
+
+  const enabled = models.filter((m) => m.enabled)
+  const orchestratorValue = agent.orchestratorModelId ?? ''
+
+  return (
+    <div>
+      <div className="settings-intro">
+        <p>
+          <strong>Agent mode</strong> hands the conversation to an <strong>orchestrator model</strong>. You describe a
+          task; it breaks the work into subtasks, dispatches each one straight to your other models (with the same
+          failover engine), and assembles the final answer. You only ever talk to the orchestrator.
+        </p>
+        <p className="settings-intro-hint">
+          Toggle it per conversation with the <strong>Agent</strong> chip in the composer (or <code>/agent</code>).
+        </p>
+      </div>
+
+      <SectionTitle>Orchestrator</SectionTitle>
+      <SelectRow
+        label="Orchestrator model"
+        value={orchestratorValue}
+        options={[
+          { value: '', label: 'Chain top (first enabled model)' },
+          ...enabled.map((m) => ({ value: m.id, label: m.label })),
+        ]}
+        onChange={(v) => set({ orchestratorModelId: v || undefined })}
+        hint="Plans the task, delegates subtasks, and writes the final answer."
+      />
+
+      <SectionTitle>Delegation</SectionTitle>
+      <SliderRow
+        label="Max subtasks per run"
+        value={agent.maxSteps}
+        min={1}
+        max={8}
+        step={1}
+        onChange={(v) => set({ maxSteps: v })}
+        hint="Upper bound on how many workers the orchestrator may spawn."
+      />
+      <SliderRow
+        label="Parallel workers"
+        value={agent.maxParallel}
+        min={1}
+        max={4}
+        step={1}
+        onChange={(v) => set({ maxParallel: v })}
+        hint="How many subtasks run at once. 1 = strictly sequential."
+      />
+      <Toggle
+        checked={agent.expandStepResults}
+        onChange={(v) => set({ expandStepResults: v })}
+        label="Expand worker output in the plan card"
+        hint="Completed steps show their full result; turn off to keep the card compact"
+      />
+    </div>
   )
 }
 

@@ -58,8 +58,65 @@ export const settingsSchema = z.object({
     reduceMotion: z.boolean(),
     enterToSend: z.boolean(),
   }),
+  // Added after the first release: defaults keep older saved settings valid
+  // and upgrade in place.
+  agent: z
+    .object({
+      orchestratorModelId: z.string().optional(),
+      maxSteps: z.number().int().min(1).max(8).default(4),
+      maxParallel: z.number().int().min(1).max(4).default(2),
+      expandStepResults: z.boolean().default(true),
+    })
+    .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true }),
   providers: z.record(z.string(), z.object({ apiKey: z.string(), baseURL: z.string().optional() })),
   pinnedModelId: z.string().optional(),
+})
+
+export const attemptFailureSchema = z.object({
+  modelId: z.string(),
+  label: z.string(),
+  failure: z.enum([
+    'success',
+    'soft_rate_limit',
+    'hard_quota',
+    'auth',
+    'timeout',
+    'network',
+    'overloaded',
+    'aborted',
+    'bad_request',
+    'unknown',
+  ]),
+  message: z.string(),
+  status: z.number().int().optional(),
+  elapsedMs: z.number().int().nonnegative(),
+  midStream: z.boolean(),
+})
+
+export const agentStepSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  prompt: z.string(),
+  modelId: z.string(),
+  modelLabel: z.string(),
+  status: z.enum(['pending', 'running', 'complete', 'error', 'skipped']),
+  result: z.string().optional(),
+  error: z.string().optional(),
+  attempts: z.array(attemptFailureSchema),
+  failedChain: z.array(z.string()),
+  elapsedMs: z.number().optional(),
+})
+
+export const agentRunSchema = z.object({
+  phase: z.enum(['planning', 'executing', 'synthesizing', 'complete', 'error']),
+  goal: z.string(),
+  orchestratorModelId: z.string(),
+  steps: z.array(agentStepSchema),
+  strategy: z.string().optional(),
+  note: z.string().optional(),
+  error: z.string().optional(),
+  startedAt: z.number(),
+  finishedAt: z.number().optional(),
 })
 
 export const messageSchema = z.object({
@@ -102,31 +159,10 @@ export const messageSchema = z.object({
       'unknown',
     ])
     .optional(),
-  attempts: z
-    .array(
-      z.object({
-        modelId: z.string(),
-        label: z.string(),
-        failure: z.enum([
-          'success',
-          'soft_rate_limit',
-          'hard_quota',
-          'auth',
-          'timeout',
-          'network',
-          'overloaded',
-          'aborted',
-          'unknown',
-        ]),
-        message: z.string(),
-        status: z.number().int().optional(),
-        elapsedMs: z.number().int().nonnegative(),
-        midStream: z.boolean(),
-      }),
-    )
-    .optional(),
+  attempts: z.array(attemptFailureSchema).optional(),
   editedAt: z.number().optional(),
   ttftMs: z.number().optional(),
+  agent: agentRunSchema.optional(),
 })
 
 export const artifactSchema = z.object({
@@ -164,6 +200,7 @@ export const conversationSchema = z.object({
   createdAt: z.number(),
   updatedAt: z.number(),
   modelId: z.string().optional(),
+  agentEnabled: z.boolean().optional(),
   messages: z.array(messageSchema),
 })
 
