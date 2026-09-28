@@ -559,6 +559,15 @@ function AgentTab() {
         onChange={(v) => set({ maxParallel: v })}
         hint="How many subtasks run at once. 1 = strictly sequential."
       />
+      <SliderRow
+        label="Max tokens per step"
+        value={agent.stepMaxTokens}
+        min={2048}
+        max={64000}
+        step={1024}
+        onChange={(v) => set({ stepMaxTokens: v })}
+        hint="Output ceiling for the plan, each worker step and the synthesis. Keep it roomy: a step is a whole deliverable, and reasoning models bill their thinking against the same cap — too small and the step comes back empty."
+      />
       <Toggle
         checked={agent.expandStepResults}
         onChange={(v) => set({ expandStepResults: v })}

@@ -395,6 +395,15 @@ kbd {
 .msg-cancelled {
   margin-top: 8px; font-size: 0.78em; color: var(--text-faint); font-style: italic;
 }
+/* The answer arrived but the token cap ended it — a config problem, not a
+   provider failure, so it reads as a quiet note rather than an error. */
+.msg-truncated {
+  margin-top: 8px; padding: 7px 10px; font-size: 0.8em;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-radius: var(--radius-s);
+}
 .msg-error {
   display: flex; align-items: flex-start; gap: 8px;
   margin-top: 10px; padding: 9px 11px;
@@ -436,7 +445,7 @@ kbd {
   white-space: nowrap;
 }
 .err-soft_rate_limit, .err-overloaded { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
-.err-bad_request { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.err-bad_request, .err-token_budget { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
 .err-timeout, .err-network, .err-unknown { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
 .err-model { font-weight: 600; color: var(--text); }
 .err-meta { color: var(--text-dim); font-size: 0.9em; }
@@ -2006,6 +2015,12 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 .agent-step.status-running .agent-step-model { border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
 .agent-step-fallback { color: var(--cooldown); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
 .agent-step-time { font-variant-numeric: tabular-nums; }
+.agent-step-truncated {
+  padding: 0 7px; border-radius: 999px; white-space: nowrap; cursor: help;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+}
 
 .agent-step-body { border-top: 1px solid var(--border); padding: 8px 11px; font-size: 0.86em; max-height: 340px; overflow-y: auto; }
 .agent-step-body > .md > *:first-child { margin-top: 0; }

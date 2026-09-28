@@ -47,6 +47,10 @@ export const DEFAULT_SETTINGS: Settings = {
     maxSteps: 4,
     maxParallel: 2,
     expandStepResults: true,
+    // A step is a whole deliverable ("build the app"), and reasoning models
+    // bill their thinking against the same cap — the chat default is too
+    // small to finish one. A ceiling costs nothing unless the tokens are used.
+    stepMaxTokens: 16_384,
   },
   providers: {
     mock: { apiKey: '' },

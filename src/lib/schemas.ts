@@ -66,8 +66,12 @@ export const settingsSchema = z.object({
       maxSteps: z.number().int().min(1).max(8).default(4),
       maxParallel: z.number().int().min(1).max(4).default(2),
       expandStepResults: z.boolean().default(true),
+      // Added after the first release: a step is a whole deliverable, so its
+      // output cap sits well above the chat default. Defaulted so settings
+      // saved by older builds keep validating and upgrade in place.
+      stepMaxTokens: z.number().int().min(1024).max(200_000).default(16_384),
     })
-    .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true }),
+    .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true, stepMaxTokens: 16_384 }),
   providers: z.record(z.string(), z.object({ apiKey: z.string(), baseURL: z.string().optional() })),
   pinnedModelId: z.string().optional(),
 })
@@ -85,6 +89,7 @@ export const attemptFailureSchema = z.object({
     'overloaded',
     'aborted',
     'bad_request',
+    'token_budget',
     'unknown',
   ]),
   message: z.string(),
@@ -105,6 +110,7 @@ export const agentStepSchema = z.object({
   attempts: z.array(attemptFailureSchema),
   failedChain: z.array(z.string()),
   elapsedMs: z.number().optional(),
+  truncated: z.boolean().optional(),
 })
 
 export const agentRunSchema = z.object({
@@ -142,7 +148,11 @@ export const messageSchema = z.object({
     .optional(),
   attachmentIds: z.array(z.string()).optional(),
   usage: z
-    .object({ promptTokens: z.number().optional(), completionTokens: z.number().optional() })
+    .object({
+      promptTokens: z.number().optional(),
+      completionTokens: z.number().optional(),
+      reasoningTokens: z.number().optional(),
+    })
     .optional(),
   error: z.string().optional(),
   errorClass: z
@@ -156,12 +166,14 @@ export const messageSchema = z.object({
       'overloaded',
       'aborted',
       'bad_request',
+      'token_budget',
       'unknown',
     ])
     .optional(),
   attempts: z.array(attemptFailureSchema).optional(),
   editedAt: z.number().optional(),
   ttftMs: z.number().optional(),
+  truncated: z.boolean().optional(),
   agent: agentRunSchema.optional(),
 })
 

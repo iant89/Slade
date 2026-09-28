@@ -300,6 +300,11 @@ function AssistantBody({
       {pending ? <span className="sr-only">Assistant is thinking…</span> : null}
       {error ? <ErrorBanner message={message} /> : null}
       {cancelled ? <div className="msg-cancelled">Generation stopped — the partial answer above is kept.</div> : null}
+      {message.truncated && !error && !cancelled ? (
+        <div className="msg-truncated">
+          Cut off at the output token cap — raise <strong>Max output tokens</strong> in Settings → Defaults and retry for the rest.
+        </div>
+      ) : null}
     </div>
   )
 }
