@@ -22,8 +22,21 @@ export interface UIState {
   /** Artifact ids queued in the composer for the next send. */
   pendingAttachmentIds: string[]
   dragActive: boolean
+  /**
+   * Counter bumped whenever any "Configure" affordance next to "Sign in with
+   * GitHub" is clicked. Settings → GitHub watches it so it can do something
+   * *useful* when the settings modal is already open on the GitHub tab (previously
+   * the click would silently do nothing — the modal didn't re-open or move).
+   */
+  githubConfigRequest: number
 
   openSettings: (tab?: UIState['settingsTab']) => void
+  /**
+   * Like `openSettings('github')` but also closes the GitHub drawer, focuses
+   * Settings → GitHub on its OAuth app block and highlights it. Use from any
+   * "Configure" affordance sitting next to a "Sign in with GitHub" button.
+   */
+  configureGithub: () => void
   closeSettings: () => void
   setSettingsTab: (tab: UIState['settingsTab']) => void
   toggleSidebar: () => void
@@ -58,8 +71,25 @@ export const useUI = create<UIState>((set) => ({
   lightbox: null,
   pendingAttachmentIds: [],
   dragActive: false,
+  githubConfigRequest: 0,
 
   openSettings: (tab) => set((st) => ({ settingsOpen: true, settingsTab: tab ?? st.settingsTab })),
+  configureGithub: () =>
+    set((st) => ({
+      settingsOpen: true,
+      settingsTab: 'github',
+      // When the user asks to configure GitHub sign-in from inside the
+      // drawer, close the drawer so the settings modal is the only thing on
+      // screen — otherwise you end up with both panels overlapping and the
+      // click can feel like it "disappeared" behind the drawer.
+      githubOpen: false,
+      // Bump the counter so Settings → GitHub scrolls/highlights its OAuth
+      // block. We do this unconditionally (not only when the modal is
+      // already open) because it's harmless on first open — the modal just
+      // mounts scrolled and focused, which is exactly what the user meant by
+      // "configure".
+      githubConfigRequest: st.githubConfigRequest + 1,
+    })),
   closeSettings: () => set({ settingsOpen: false }),
   setSettingsTab: (tab) => set({ settingsTab: tab }),
   toggleSidebar: () => set((st) => ({ sidebarOpen: !st.sidebarOpen })),
