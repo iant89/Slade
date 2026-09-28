@@ -97,6 +97,9 @@ import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
+import { AddModelForm } from '../src/components/settings/SettingsModal'
+import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
+import { MODEL_CATALOG, catalogFor, formatCtx, formatPrice } from '../src/lib/modelCatalog'
 import { useUI } from '../src/store/ui'
 import { googleAdapter } from '../src/providers/google'
 import { openrouterAdapter } from '../src/providers/openai'
@@ -1545,6 +1548,80 @@ function testGitHubUiRenders() {
   }
 }
 
+/**
+ * The "Add model" flow: a curated catalogue limited to long-context models
+ * that excel at programming / problem solving, a provider-first form whose
+ * Model ID field unlocks only after a provider is picked, and a picker table
+ * that is filterable + sortable and copies the chosen ID into the field.
+ */
+function testModelPicker() {
+  console.log('add-model catalog & picker:')
+
+  // Catalog invariants: this is the "limited to" half of the feature. A model
+  // only belongs in the catalogue with a high context window AND a
+  // programming / problem-solving strength.
+  check('catalogue is non-empty', MODEL_CATALOG.length >= 15, String(MODEL_CATALOG.length))
+  check(
+    'every catalogue entry has a high context window (≥ 200K)',
+    MODEL_CATALOG.every((m) => m.contextWindow >= 200_000),
+    JSON.stringify(MODEL_CATALOG.filter((m) => m.contextWindow < 200_000).map((m) => m.apiModel)),
+  )
+  check(
+    'every entry is coding/problem-solving focused',
+    MODEL_CATALOG.every((m) => m.strengths.includes('coding') || m.strengths.includes('reasoning')),
+    JSON.stringify(MODEL_CATALOG.filter((m) => !m.strengths.includes('coding') && !m.strengths.includes('reasoning')).map((m) => m.apiModel)),
+  )
+  check(
+    'model IDs are unique per provider',
+    new Set(MODEL_CATALOG.map((m) => `${m.provider}:${m.apiModel}`)).size === MODEL_CATALOG.length,
+  )
+  check(
+    'every provider has catalogue entries',
+    (['openai', 'anthropic', 'google', 'openrouter', 'openai-compatible'] as const).every((p) => catalogFor(p).length > 0),
+  )
+  check(
+    'openai-compatible entries suggest a base URL',
+    catalogFor('openai-compatible').every((m) => typeof m.baseURL === 'string' && m.baseURL.startsWith('https://')),
+  )
+  check(
+    'mock provider is not in the catalogue (it is not addable)',
+    !MODEL_CATALOG.some((m) => (m.provider as string) === 'mock'),
+  )
+  check('formatCtx renders millions compactly', formatCtx(1_048_576) === '1M' && formatCtx(1_000_000) === '1M', `${formatCtx(1_048_576)}/${formatCtx(1_000_000)}`)
+  check('formatCtx renders kilos compactly', formatCtx(262_144) === '262K' && formatCtx(400_000) === '400K', `${formatCtx(262_144)}/${formatCtx(400_000)}`)
+  check('formatPrice hides unknowns and trims zeros', formatPrice(undefined) === '—' && formatPrice(0.03) === '$0.03' && formatPrice(0.0005) === '$0.0005', `${formatPrice(undefined)}/${formatPrice(0.03)}/${formatPrice(0.0005)}`)
+
+  // SSR: the picker table for OpenAI. Default sort is context, descending,
+  // so the 1M-context GPTs lead and the 400K mini trails.
+  const openai = renderToString(createElement(ModelPickerTable, { provider: 'openai', onPick: () => {} })).replace(/<!-- -->/g, '')
+  check('picker table renders a filter input', openai.includes('aria-label="Filter models"'))
+  check('picker table shows the filtered/total count', openai.includes('3 of 3'), openai.match(/\d+ of \d+/)?.[0])
+  check('sortable headers exist', openai.includes('th-sort'), openai.slice(0, 200))
+  check('default sort is context descending (aria-sort)', openai.includes('aria-sort="descending"'))
+  check(
+    'rows are ordered by context descending',
+    openai.indexOf('gpt-5.5') !== -1 && openai.indexOf('gpt-5.5') < openai.indexOf('gpt-5.4-mini'),
+  )
+  check('rows carry the model ID cells', openai.includes('gpt-5.4-mini') && openai.includes('ctx-chip'))
+  check('rows are selectable', openai.includes('pick-row'), openai.slice(0, 300))
+  check('strengths render as tags', openai.includes('Coding') && openai.includes('Problem solving'))
+
+  // SSR: the add-model form before a provider is chosen. The Model ID field
+  // must start disabled; its hint points at the provider step, and only once a
+  // provider is picked does the hint promise the browse dialog.
+  const form = renderToString(createElement(AddModelForm, { onAdd: () => {}, onCancel: () => {} }))
+  check('form starts on the provider step ("Select a provider…")', form.includes('Select a provider'), form.slice(0, 200))
+  check('model id field is disabled until a provider is picked', /placeholder="Select a provider first"/.test(form) && /disabled=""/.test(form), form.slice(0, 400))
+  check('disabled model id explains what unlocks it', form.includes('Enabled once a provider is selected'), form)
+  check('picker modal only mounts after a provider exists', !form.includes('model-picker') && !form.includes('Browse models'), form)
+
+  // SSR: a filtered table renders its empty state (openrouter + impossible filter is
+  // not reachable without state, so exercise the provider swap instead).
+  const orTable = renderToString(createElement(ModelPickerTable, { provider: 'openrouter', onPick: () => {} }))
+  check('provider swap re-scopes the table to OpenRouter slugs', orTable.includes('deepseek/deepseek-v4-pro') && !orTable.includes('gpt-5.5'), orTable.match(/\d+ of \d+/)?.[0])
+  check('openrouter rows keep vendor-prefixed IDs', orTable.includes('z-ai/glm-5.2') && orTable.includes('moonshotai/kimi-k2.7-code'))
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -1567,6 +1644,7 @@ async function main() {
   await testGitHubStoreAgainstFakeApi()
   testGitHubStore()
   testGitHubUiRenders()
+  testModelPicker()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

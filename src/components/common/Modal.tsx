@@ -12,19 +12,29 @@ export interface ModalProps {
   labelledBy?: string
   children: ReactNode
   variant?: 'sheet' | 'lightbox'
+  /** Extra class on the backdrop, e.g. to layer a modal above another modal. */
+  className?: string
 }
+
+/**
+ * Open modals, outermost first. Escape only closes the topmost one, so a
+ * dialog opened from inside another dialog doesn't dismiss both at once.
+ */
+const modalStack: symbol[] = []
 
 /**
  * Accessible modal shell: portal, focus trap, Esc to close, spring motion.
  * Centered dialog on desktop, full-screen sheet on small screens (CSS).
  */
-export function Modal({ open, onClose, labelledBy, children, variant = 'sheet' }: ModalProps) {
+export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', className }: ModalProps) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) return
     const node = ref.current
     const previouslyFocused = document.activeElement as HTMLElement | null
+    const token = Symbol('modal')
+    modalStack.push(token)
 
     // Focus the first focusable element inside the dialog.
     requestAnimationFrame(() => {
@@ -34,6 +44,7 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet' }
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (modalStack[modalStack.length - 1] !== token) return
         e.stopPropagation()
         onClose()
         return
@@ -59,6 +70,8 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet' }
     return () => {
       document.removeEventListener('keydown', onKey, true)
       document.body.style.overflow = prevOverflow
+      const i = modalStack.indexOf(token)
+      if (i !== -1) modalStack.splice(i, 1)
       previouslyFocused?.focus?.()
     }
   }, [open, onClose])
@@ -67,7 +80,7 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet' }
     <AnimatePresence>
       {open && (
         <motion.div
-          className={`modal-backdrop modal-${variant}`}
+          className={`modal-backdrop modal-${variant}${className ? ` ${className}` : ''}`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
