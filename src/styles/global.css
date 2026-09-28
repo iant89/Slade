@@ -1867,3 +1867,163 @@ input[type='range']::-moz-range-thumb {
   .pick-note, .tag-row { max-width: none; }
   .model-picker-table-wrap { max-height: 40vh; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Orchestrator agent                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Composer chip ---------------------------------------------------- */
+
+.agent-chip-wrap { display: inline-flex; align-items: center; position: relative; }
+.agent-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 0.8em; font-weight: 600;
+  color: var(--text-muted);
+  max-width: 260px;
+}
+.agent-chip:hover { border-color: var(--accent-dim); color: var(--text); }
+.agent-chip.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-raised));
+  color: var(--accent);
+}
+.agent-chip-orchestrator {
+  font-weight: 500;
+  color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent-chip.active .agent-chip-orchestrator { color: color-mix(in srgb, var(--accent) 80%, var(--text)); }
+.agent-chip-config {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; margin-left: 3px;
+  border-radius: 999px;
+  color: var(--text-faint);
+}
+.agent-chip-config:hover { color: var(--accent); background: var(--bg-raised); }
+
+/* Message attribution ---------------------------------------------- */
+
+.msg-avatar.agent {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 38%, var(--bg-raised)), color-mix(in srgb, var(--accent) 8%, var(--bg-raised)));
+}
+.agent-attribution { display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.msg-agent-steps { color: var(--text-faint); font-weight: 500; }
+
+/* Plan card --------------------------------------------------------- */
+
+.agent-plan {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-raised) 65%, transparent);
+  padding: 10px 12px;
+  margin: 2px 0 10px;
+}
+.agent-plan-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 4px;
+}
+.agent-plan-title {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.76em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.agent-phase {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.74em; font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.agent-phase.phase-planning, .agent-phase.phase-executing, .agent-phase.phase-synthesizing {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.agent-phase.phase-complete { border-color: color-mix(in srgb, var(--ok) 45%, transparent); color: var(--ok); }
+.agent-phase.phase-error { border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); }
+
+.agent-plan-strategy { font-size: 0.86em; color: var(--text-muted); font-style: italic; margin: 2px 0 6px; }
+.agent-plan-note {
+  font-size: 0.8em; color: var(--warn);
+  border-left: 2px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  padding-left: 8px; margin: 2px 0 8px;
+}
+.agent-plan-error {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.84em; color: var(--danger); margin-top: 8px;
+}
+
+/* Steps -------------------------------------------------------------- */
+
+.agent-steps { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-step {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.agent-step-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 0.86em;
+  text-align: left;
+}
+button.agent-step-head { cursor: pointer; }
+button.agent-step-head:disabled { cursor: default; }
+button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var(--bg-raised) 60%, transparent); }
+
+.step-icon {
+  width: 18px; height: 18px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  font-size: 0.8em;
+  border: 1px solid var(--border-strong);
+  color: var(--text-faint);
+}
+.step-icon.complete { border-color: color-mix(in srgb, var(--ok) 55%, transparent); color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.step-icon.error { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.step-icon.running { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
+.step-icon.pending { opacity: 0.5; }
+
+.agent-step-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.agent-step.status-pending .agent-step-title { color: var(--text-faint); }
+.agent-step-meta { display: inline-flex; align-items: center; gap: 8px; flex: none; font-size: 0.88em; color: var(--text-faint); }
+.agent-step-model {
+  padding: 1px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  white-space: nowrap;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+}
+.agent-step.status-running .agent-step-model { border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent); }
+.agent-step-fallback { color: var(--cooldown); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+.agent-step-time { font-variant-numeric: tabular-nums; }
+
+.agent-step-body { border-top: 1px solid var(--border); padding: 8px 11px; font-size: 0.86em; max-height: 340px; overflow-y: auto; }
+.agent-step-body > .md > *:first-child { margin-top: 0; }
+.agent-step-body > .md > *:last-child { margin-bottom: 0; }
+.agent-step-error { color: var(--danger); font-size: 0.95em; }
+
+.spin { animation: agent-spin 0.9s linear infinite; }
+@keyframes agent-spin { to { transform: rotate(360deg); } }
+
+/* Settings intro ------------------------------------------------------ */
+
+.settings-intro {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  padding: 10px 13px;
+  margin-bottom: 14px;
+}
+.settings-intro p { margin: 0 0 6px; font-size: 0.86em; line-height: 1.55; color: var(--text-muted); }
+.settings-intro p:last-child { margin-bottom: 0; }
+.settings-intro-hint { color: var(--text-faint) !important; }

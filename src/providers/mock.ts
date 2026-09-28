@@ -7,8 +7,107 @@ import { kindLabel } from '../lib/mime'
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 /* ------------------------------------------------------------------ */
+/* Orchestrator markers                                                */
+/*                                                                     */
+/* The orchestrator agent (src/engine/agent.ts) marks its planning and */
+/* synthesis requests with these system-prompt sentinels. The real     */
+/* providers just follow the JSON instructions in the prompt; the      */
+/* simulator recognises the sentinels and plays along, so agent mode   */
+/* is fully demoable with zero API keys.                               */
+/* ------------------------------------------------------------------ */
+
+export const ORCHESTRATOR_PLAN_MARKER = '[SLADE:ORCHESTRATOR:PLAN]'
+export const ORCHESTRATOR_SYNTH_MARKER = '[SLADE:ORCHESTRATOR:SYNTH]'
+
+interface MockPlan {
+  mode: 'plan'
+  reply: string
+  subtasks: { title: string; model: string; prompt: string }[]
+}
+
+/** Decompose the goal the way the planner prompt asks real models to. */
+function mockPlan(goal: string): MockPlan {
+  const g = goal.trim().replace(/\s+/g, ' ')
+  const wantsData = /csv|data(set)?|spreadsheet|table|report|metrics|numbers|sales|revenue|q[1-4]\b/i.test(g)
+  const wantsCode = /code|app|script|function|component|api|build|implement|program|react|python|typescript/i.test(g)
+  const wantsWriting = /write|draft|article|post|email|essay|story|copy|doc(ument)?|guide|plan/i.test(g)
+
+  const subtasks: MockPlan['subtasks'] = []
+  if (wantsData) {
+    subtasks.push({
+      title: 'Generate the dataset',
+      model: '',
+      prompt: `generate a CSV of ${g.replace(/^.*?(?:a |an |the )?/i, '')} — include realistic sample rows and a header`,
+    })
+    subtasks.push({
+      title: 'Analyze the numbers',
+      model: '',
+      prompt: `Looking at the goal "${g}", what should the analysis section measure, and what trends would matter? Answer with the key points only.`,
+    })
+  }
+  if (wantsCode) {
+    subtasks.push({
+      title: 'Draft the implementation',
+      model: '',
+      prompt: `show me some code for: ${g} — a clean, minimal, working implementation`,
+    })
+  }
+  if (wantsWriting || (!wantsData && !wantsCode)) {
+    subtasks.push({
+      title: 'Research & outline',
+      model: '',
+      prompt: `For the task "${g}", produce the research notes and a tight outline: what matters, what to include, what to skip.`,
+    })
+    subtasks.push({
+      title: 'Draft the deliverable',
+      model: '',
+      prompt: `Draft the deliverable for this task: "${g}". Make it complete and ready to hand over.`,
+    })
+  }
+  subtasks.push({
+    title: 'Review & polish',
+    model: '',
+    prompt: `Critique a draft for the task "${g}": list the top improvements a reviewer would demand before it ships.`,
+  })
+
+  return {
+    mode: 'plan',
+    reply: `On it — I'll break this into ${subtasks.length} steps and route each to the best available model, then assemble the final result.`,
+    subtasks,
+  }
+}
+
+/** Turn the synthesis request's step results into a final answer. */
+function mockSynthesis(requestText: string, model: ModelDef): string {
+  const goalMatch = /^Goal: (.+)$/m.exec(requestText)
+  const goal = goalMatch?.[1]?.trim() ?? 'your task'
+  const steps = [...requestText.matchAll(/^## \[(\d+)\] (.+?) —/gm)].map((m) => m[2]!)
+  const hasCsv = /```csv:/i.test(requestText)
+
+  const recap = steps.length
+    ? steps.map((t, i) => `| ${i + 1} | ${t} | done |`).join('\n')
+    : '| 1 | Execute the task | done |'
+
+  return `Done — **${goal}** is complete. I delegated ${steps.length || 1} step${steps.length === 1 ? '' : 's'} across the model chain, and every worker reported back.
+
+### What the team produced
+
+| # | Step | Status |
+| --- | --- | --- |
+${recap}
+${hasCsv ? '\nThe generated dataset landed as a spreadsheet artifact inside the step that produced it — expand that step above to sort or download it.\n' : ''}
+### The result
+
+${model.label.includes('Lite') ? 'All checks passed — the combined output is ready to use as-is.' : 'I reviewed each worker\'s output as it came back: the pieces are consistent with each other, nothing contradicts the original goal, and the deliverable is assembled above and in the step cards.'}
+
+Want me to iterate — e.g. regenerate a step with a different model, add a follow-up step, or export the combined result?`
+}
+
+/* ------------------------------------------------------------------ */
 /* Mock reply generation                                               */
 /* ------------------------------------------------------------------ */
+
+const GREETING_RE = /^(hi|hello|hey|yo|howdy|good (morning|evening|afternoon))\b/i
 
 function persona(model: ModelDef): 'rich' | 'terse' {
   return model.apiModel.includes('pro') ? 'rich' : 'terse'
@@ -93,7 +192,7 @@ function mockReply(prompt: string, artifacts: Artifact[], model: ModelDef): stri
     ? `\n\nI can see ${artifacts.length === 1 ? `the file you attached — **${artifacts[0]!.name}** (${kindLabel(artifacts[0]!.kind)})` : `${artifacts.length} attached files: ${artifacts.map((a) => `\`${a.name}\``).join(', ')}`} — noted for context.\n`
     : ''
 
-  if (/^(hi|hello|hey|yo|howdy|good (morning|evening|afternoon))\b/i.test(p)) {
+  if (GREETING_RE.test(p)) {
     return `Howdy — you're talking to **${model.label}**, routed through Slade.${att}
 
 Here's what I can do from this window:
@@ -211,7 +310,20 @@ export class MockAdapter implements ProviderAdapter {
 
     const lastUser = [...turns].reverse().find((t) => t.role === 'user')
     const attachments: Artifact[] = [] // attachments are described in text by the orchestrator
-    const reply = mockReply(lastUser?.text ?? '', attachments, model)
+    const lastText = lastUser?.text ?? ''
+
+    // Orchestrator roles: the planner returns strict JSON (the agent parses
+    // it), and the synthesizer assembles the final answer from step results.
+    let reply: string
+    if (cfg.systemPrompt.includes(ORCHESTRATOR_PLAN_MARKER)) {
+      reply = GREETING_RE.test(lastText.trim())
+        ? JSON.stringify({ mode: 'answer', answer: mockReply(lastText, attachments, model) })
+        : JSON.stringify(mockPlan(lastText))
+    } else if (cfg.systemPrompt.includes(ORCHESTRATOR_SYNTH_MARKER)) {
+      reply = mockSynthesis(lastText, model)
+    } else {
+      reply = mockReply(lastText, attachments, model)
+    }
 
     if (simulate === 'timeout') {
       // Emit a couple of tokens, then stall past the idle timeout so the

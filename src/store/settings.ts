@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  AgentSettings,
   AppearanceSettings,
   ArtifactSettings,
   DefaultsSettings,
@@ -41,6 +42,12 @@ export const DEFAULT_SETTINGS: Settings = {
     reduceMotion: false,
     enterToSend: true,
   },
+  agent: {
+    orchestratorModelId: undefined,
+    maxSteps: 4,
+    maxParallel: 2,
+    expandStepResults: true,
+  },
   providers: {
     mock: { apiKey: '' },
     openai: { apiKey: '' },
@@ -63,6 +70,7 @@ function hydrate(): Settings {
   if (raw.defaults) merged.defaults = { ...merged.defaults, ...raw.defaults }
   if (raw.artifacts) merged.artifacts = { ...merged.artifacts, ...raw.artifacts }
   if (raw.appearance) merged.appearance = { ...merged.appearance, ...raw.appearance }
+  if (raw.agent) merged.agent = { ...merged.agent, ...raw.agent }
   if (raw.providers) {
     for (const [k, v] of Object.entries(raw.providers)) {
       merged.providers[k] = { ...(merged.providers[k] ?? { apiKey: '' }), ...v }
@@ -80,6 +88,7 @@ export interface SettingsState {
   removeModel: (id: string) => void
   setDefaults: (patch: Partial<DefaultsSettings>) => void
   setArtifactsPrefs: (patch: Partial<ArtifactSettings>) => void
+  setAgent: (patch: Partial<AgentSettings>) => void
   setAppearance: (patch: Partial<AppearanceSettings>) => void
   setProvider: (pid: ProviderId | string, patch: Partial<ProviderConfig>) => void
   pin: (modelId: string | undefined) => void
@@ -133,6 +142,11 @@ export const useSettings = create<SettingsState>((set, get) => ({
   },
   setArtifactsPrefs: (patch) => {
     const next = { ...get().s, artifacts: { ...get().s.artifacts, ...patch } }
+    persist(next)
+    set({ s: next })
+  },
+  setAgent: (patch) => {
+    const next = { ...get().s, agent: { ...get().s.agent, ...patch } }
     persist(next)
     set({ s: next })
   },

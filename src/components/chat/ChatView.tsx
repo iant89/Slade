@@ -6,7 +6,7 @@ import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { currentAnnouncement, setAnnouncer } from '../../engine/send'
 import { MessageBubble, TypingIndicator } from './MessageBubble'
-import { IconArrowDown, IconSparkles, IconWifiOff } from '../icons'
+import { IconArrowDown, IconBot, IconSparkles, IconWifiOff } from '../icons'
 
 export function ChatView() {
   const conv = useCurrentConversation()
@@ -89,6 +89,8 @@ function PendingFooter() {
 export function EmptyState() {
   const openSettings = useUI((s) => s.openSettings)
   const newChat = useChat((s) => s.newConversation)
+  const conv = useCurrentConversation()
+  const agentEnabled = Boolean(conv?.agentEnabled)
   return (
     <div className="empty-state">
       <div className="empty-mark" aria-hidden="true">
@@ -100,6 +102,19 @@ export function EmptyState() {
           <IconSparkles size={16} />
           <strong>Start a chat</strong>
           <span>Send a prompt — it streams in token by token.</span>
+        </button>
+        <button
+          className="empty-card"
+          type="button"
+          onClick={() => conv && useChat.getState().setConversationAgent(conv.id, !agentEnabled)}
+        >
+          <IconBot size={16} />
+          <strong>{agentEnabled ? 'Agent mode is on' : 'Meet the orchestrator'}</strong>
+          <span>
+            {agentEnabled
+              ? 'Describe a task below — the orchestrator will plan it and delegate the steps to your other models.'
+              : 'Flip on Agent mode: describe a task and an orchestrator model delegates the steps to your other models, then assembles the answer.'}
+          </span>
         </button>
         <button className="empty-card" type="button" onClick={() => openSettings('models')}>
           <strong>Wire up failover</strong>

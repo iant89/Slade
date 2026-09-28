@@ -7,9 +7,10 @@ import { useHealth, isRoutable } from '../../store/health'
 import { useArtifacts, artifactFromFile } from '../../store/artifacts'
 import { useUI } from '../../store/ui'
 import { sendUserMessage, stopGeneration, regenerateFromUserMessage } from '../../engine/send'
+import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
+import { IconBot, IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Model chip + quick switch                                           */
@@ -121,12 +122,59 @@ function ModelChip() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Agent chip — orchestrator mode toggle                               */
+/* ------------------------------------------------------------------ */
+
+function AgentChip() {
+  const conv = useCurrentConversation()
+  const settings = useSettings((s) => s.s)
+  const setAgentMode = useChat((s) => s.setConversationAgent)
+  const openSettings = useUI((s) => s.openSettings)
+
+  const active = Boolean(conv?.agentEnabled)
+  const orchestrator = orchestratorFor(settings, conv?.modelId)
+
+  return (
+    <div className="agent-chip-wrap">
+      <button
+        className={`agent-chip${active ? ' active' : ''}`}
+        onClick={() => conv && setAgentMode(conv.id, !active)}
+        role="switch"
+        aria-checked={active}
+        title={
+          active
+            ? 'Agent mode is on — the orchestrator plans, delegates to your other models, and answers. Click to turn off.'
+            : 'Agent mode — hand tasks to an orchestrator model that delegates the work to your other models. Click to turn on.'
+        }
+        type="button"
+      >
+        <IconBot size={13} />
+        <span className="agent-chip-label">Agent</span>
+        {active && orchestrator && <span className="agent-chip-orchestrator">{orchestrator.label}</span>}
+      </button>
+      {active && (
+        <button
+          className="agent-chip-config"
+          onClick={() => openSettings('agent')}
+          aria-label="Configure the orchestrator"
+          title="Configure the orchestrator (Settings → Agent)"
+          type="button"
+        >
+          <IconGear size={12} />
+        </button>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Slash command menu                                                  */
 /* ------------------------------------------------------------------ */
 
 const COMMANDS = [
   { cmd: '/system', label: '/system', hint: 'Edit the default system prompt', icon: <IconSliders size={13} /> },
   { cmd: '/model', label: '/model', hint: 'Quick-switch the primary model', icon: <IconLayers size={13} /> },
+  { cmd: '/agent', label: '/agent', hint: 'Toggle the orchestrator agent', icon: <IconBot size={13} /> },
   { cmd: '/github', label: '/github', hint: 'Browse a repo and attach files as context', icon: <IconGithub size={13} /> },
   { cmd: '/sample', label: '/sample', hint: 'Attach sample files (CSV, code, image…)', icon: <IconFile size={13} /> },
   { cmd: '/new', label: '/new', hint: 'Start a new conversation', icon: <IconPlus size={13} /> },
@@ -314,6 +362,16 @@ export function Composer() {
     taRef.current?.focus()
     if (cmd === '/system') openSettings('defaults')
     if (cmd === '/model') document.querySelector<HTMLButtonElement>('.model-chip')?.click()
+    if (cmd === '/agent') {
+      const chat = useChat.getState()
+      const c = conv ?? chat.conversations[chat.currentId]
+      if (c) {
+        chat.setConversationAgent(c.id, !c.agentEnabled)
+        useUI
+          .getState()
+          .toast({ kind: 'info', title: !c.agentEnabled ? 'Agent mode on' : 'Agent mode off', detail: !c.agentEnabled ? 'The orchestrator now plans and delegates tasks to your other models.' : 'Back to direct model chat.' })
+      }
+    }
     if (cmd === '/new') useChat.getState().newConversation()
     if (cmd === '/github') useUI.getState().openGithub('files')
     if (cmd === '/sample') {
@@ -388,7 +446,13 @@ export function Composer() {
           className="composer-input"
           value={text}
           rows={1}
-          placeholder={conv ? 'Message Slade…  ( / for shortcuts )' : 'New chat…'}
+          placeholder={
+            conv?.agentEnabled
+              ? 'Describe a task — the orchestrator will plan and delegate it…'
+              : conv
+                ? 'Message Slade…  ( / for shortcuts )'
+                : 'New chat…'
+          }
           aria-label="Message composer"
           onChange={(e) => onTextChange(e.target.value)}
           onKeyDown={onKeyDown}
@@ -417,6 +481,7 @@ export function Composer() {
               }}
             />
             <ModelChip />
+            <AgentChip />
           </div>
 
           <div className="composer-right">

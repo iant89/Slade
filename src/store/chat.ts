@@ -65,6 +65,7 @@ export interface ChatState {
   deleteConversation: (id: string) => void
   renameConversation: (id: string, title: string) => void
   setConversationModel: (id: string, modelId: string | undefined) => void
+  setConversationAgent: (id: string, enabled: boolean) => void
 
   appendMessage: (msg: Message) => void
   updateMessage: (id: string, patch: Partial<Message>) => void
@@ -131,6 +132,8 @@ export const useChat = create<ChatState>((set, get) => {
     renameConversation: (id, title) => updateConv(id, (c) => ({ ...c, title })),
 
     setConversationModel: (id, modelId) => updateConv(id, (c) => ({ ...c, modelId })),
+
+    setConversationAgent: (id, enabled) => updateConv(id, (c) => ({ ...c, agentEnabled: enabled })),
 
     appendMessage: (msg) =>
       updateConv(msg.conversationId, (c) => ({ ...c, messages: [...c.messages, msg] })),

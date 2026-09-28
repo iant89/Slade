@@ -7,49 +7,12 @@ import { adapterFor } from '../providers/registry'
 import { ProviderError } from '../providers/base'
 import { buildTurns } from './turns'
 import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates, skippedModels } from './strategy'
+import { finishRun, getRun, registerRun, stopGeneration, isGenerating, type ActiveRun } from './active'
+import { runAgentTurn } from './agent'
 import { uid } from '../lib/id'
+import { announceResponse, currentAnnouncement, setAnnouncer } from './announce'
 
-/* ------------------------------------------------------------------ */
-/* In-flight generation registry (one per conversation)                */
-/* ------------------------------------------------------------------ */
-
-interface ActiveAttempt {
-  controller: AbortController
-  userAborted: boolean
-}
-const active = new Map<string, ActiveAttempt>()
-
-export function stopGeneration(conversationId: string): void {
-  const a = active.get(conversationId)
-  if (a) {
-    a.userAborted = true
-    a.controller.abort()
-  }
-}
-
-export function isGenerating(conversationId: string): boolean {
-  return active.has(conversationId)
-}
-
-/* ------------------------------------------------------------------ */
-/* Chain state                                                         */
-/* ------------------------------------------------------------------ */
-
-interface ChainState {
-  content: string
-  chain: string[]
-  failedChain: string[]
-  handoffs: Handoff[]
-  usage?: Usage
-}
-
-class ChainExhausted extends Error {
-  summary: string
-  constructor(summary: string) {
-    super(summary)
-    this.summary = summary
-  }
-}
+export { stopGeneration, isGenerating, setAnnouncer, announceResponse, currentAnnouncement }
 
 /* ------------------------------------------------------------------ */
 /* Public entry points                                                 */
@@ -80,18 +43,18 @@ export async function sendUserMessage(text: string, attachmentIds: string[]): Pr
   const assistant = newAssistantPlaceholder(convId)
   useChat.getState().appendMessage(assistant)
 
-  await runChain(convId, userMessage.id, assistant.id)
+  await dispatchTurn(convId, userMessage.id, assistant.id)
 }
 
 /** Re-run the chain for the user message that precedes an assistant message. */
 export async function retryAssistant(assistantMessageId: string): Promise<void> {
   const chat = useChat.getState()
-  let target: { convId: string; userId: string } | null = null
+  let target: { convId: string; userId: string; agent: boolean } | null = null
   for (const conv of Object.values(chat.conversations)) {
     const idx = conv.messages.findIndex((m) => m.id === assistantMessageId)
     if (idx > 0) {
       const prev = conv.messages[idx - 1]
-      if (prev && prev.role === 'user') target = { convId: conv.id, userId: prev.id }
+      if (prev && prev.role === 'user') target = { convId: conv.id, userId: prev.id, agent: Boolean(conv.agentEnabled) }
       break
     }
   }
@@ -99,7 +62,7 @@ export async function retryAssistant(assistantMessageId: string): Promise<void> 
   useChat.getState().deleteMessage(assistantMessageId)
   const assistant = newAssistantPlaceholder(target.convId)
   useChat.getState().appendMessage(assistant)
-  await runChain(target.convId, target.userId, assistant.id)
+  await dispatchTurn(target.convId, target.userId, assistant.id)
 }
 
 /** (Re)generate an assistant reply for an existing user message. */
@@ -109,7 +72,34 @@ export async function regenerateFromUserMessage(
 ): Promise<void> {
   const assistant = newAssistantPlaceholder(conversationId)
   useChat.getState().appendMessage(assistant)
-  await runChain(conversationId, userMessageId, assistant.id)
+  await dispatchTurn(conversationId, userMessageId, assistant.id)
+}
+
+/** Agent mode talks to the orchestrator; everything else walks the plain chain. */
+function dispatchTurn(
+  conversationId: string,
+  userMessageId: string,
+  assistantMessageId: string,
+): Promise<void> {
+  const conv = useChat.getState().conversations[conversationId]
+  if (conv?.agentEnabled) return runAgentTurn(conversationId, userMessageId, assistantMessageId)
+  return runChain(conversationId, userMessageId, assistantMessageId)
+}
+
+interface ChainState {
+  content: string
+  chain: string[]
+  failedChain: string[]
+  handoffs: Handoff[]
+  usage?: Usage
+}
+
+class ChainExhausted extends Error {
+  summary: string
+  constructor(summary: string) {
+    super(summary)
+    this.summary = summary
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,7 +111,7 @@ async function runChain(
   userMessageId: string,
   assistantMessageId: string,
 ): Promise<void> {
-  if (active.has(conversationId)) {
+  if (getRun(conversationId)) {
     // A completion is already running here; refuse to double-charge.
     useUI.getState().toast({ kind: 'warn', title: 'A response is already streaming in this chat.' })
     return
@@ -141,8 +131,7 @@ async function runChain(
   const turns = await buildTurns(conv, { upToMessageId: userMessageId })
 
   const controller = new AbortController()
-  const attempt: ActiveAttempt = { controller, userAborted: false }
-  active.set(conversationId, attempt)
+  const attempt = registerRun(conversationId, controller)
 
   const state: ChainState = {
     content: '',
@@ -269,7 +258,7 @@ async function runChain(
       useUI.getState().toast({ kind: 'error', title: 'Unexpected failure', detail: message })
     }
   } finally {
-    active.delete(conversationId)
+    finishRun(conversationId)
   }
 }
 
@@ -356,7 +345,7 @@ async function attemptModel(args: {
   controller: AbortController
   state: ChainState
   assistantMessageId: string
-  attempt: ActiveAttempt
+  attempt: ActiveRun
 }): Promise<void> {
   const { model, turns, settings, controller, state, assistantMessageId, attempt } = args
   const adapter = adapterFor(model.provider)
@@ -471,21 +460,9 @@ async function attemptModel(args: {
 }
 
 /* ------------------------------------------------------------------ */
-/* ARIA live announcements                                             */
+/* ARIA live announcements (see ./announce.ts)                         */
 /* ------------------------------------------------------------------ */
 
-let announceHandler: (() => void) | null = null
-let announcement = ''
-export function setAnnouncer(fn: () => void): void {
-  announceHandler = fn
-}
-export function announceResponse(text: string): void {
-  announcement = text
-  announceHandler?.()
-}
 function announce(text: string): void {
   announceResponse(text)
-}
-export function currentAnnouncement(): string {
-  return announcement
 }
