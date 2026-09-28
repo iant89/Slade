@@ -1,0 +1,11 @@
+name = "slade-github-oauth"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# No secrets, no bindings, no storage: this worker only forwards two OAuth
+# calls to github.com and returns what GitHub said.
+#
+#   cd workers/github-oauth-relay
+#   npx wrangler deploy
+#
+# Then paste the printed URL into Slade → Settings → GitHub → Sign-in relay.

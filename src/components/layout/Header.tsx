@@ -2,8 +2,32 @@ import { useState } from 'react'
 import { useCurrentConversation, useChat } from '../../store/chat'
 import { useSettings } from '../../store/settings'
 import { useHealth } from '../../store/health'
+import { useGitHub } from '../../store/github'
 import { useUI } from '../../store/ui'
-import { IconGear, IconPanelLeft, IconPanelRight } from '../icons'
+import { IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
+
+/** GitHub workspace toggle — the dot means "connected". */
+function GitHubButton() {
+  const open = useUI((s) => s.githubOpen)
+  const toggleGithub = useUI((s) => s.toggleGithub)
+  const authStatus = useGitHub((s) => s.authStatus)
+  const repos = useGitHub((s) => s.repos.length)
+  const connected = authStatus === 'authorized'
+
+  return (
+    <button
+      className={`icon-btn gh-toggle${open ? ' active' : ''}`}
+      onClick={toggleGithub}
+      aria-pressed={open}
+      aria-label={open ? 'Close the GitHub workspace' : 'Open the GitHub workspace (Ctrl+G)'}
+      title={connected ? `GitHub workspace (Ctrl+G) — ${repos} repos` : 'GitHub workspace (Ctrl+G)'}
+      type="button"
+    >
+      <IconGithub size={16} />
+      {connected ? <span className="gh-toggle-dot" aria-hidden="true" /> : null}
+    </button>
+  )
+}
 
 /** Tiny per-model health dots shown in the header. */
 function HealthStrip() {
@@ -62,6 +86,7 @@ export function Header() {
       </div>
       <div className="header-right">
         <HealthStrip />
+        <GitHubButton />
         <button className="icon-btn only-mobile" onClick={toggleRail} aria-label="Toggle model chain panel" type="button">
           <IconPanelRight size={17} />
         </button>

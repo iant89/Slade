@@ -24,6 +24,9 @@ export function redactSecrets(text: string): string {
   return text
     .replace(/([?&](?:key|api[_-]?key|access[_-]?token|token)=)[^&\s"'<>]+/gi, '$1<redacted>')
     .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{10,})/g, '<redacted>')
+    // GitHub credentials: classic PATs (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained PATs.
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{10,}\b/g, '<redacted>')
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '<redacted>')
 }
 
 /**

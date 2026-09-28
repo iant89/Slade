@@ -9,7 +9,7 @@ import { formatCount, formatTime } from '../../lib/format'
 import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { Markdown } from './Markdown'
-import { IconBranch, IconCheck, IconCopy, IconPencil, IconRefresh, IconTrash, IconAlert, IconSparkles } from '../icons'
+import { IconBranch, IconCheck, IconCopy, IconGithub, IconPencil, IconRefresh, IconTrash, IconAlert, IconSparkles } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Typing indicator                                                    */
@@ -436,6 +436,15 @@ function MessageActions({ message, onEdit }: { message: Message; onEdit: () => v
       >
         <IconBranch size={13} />
       </ActionButton>
+
+      {message.content.trim() ? (
+        <ActionButton
+          label="Publish to GitHub"
+          onClick={() => useUI.getState().openPublish({ kind: 'message', messageId: message.id })}
+        >
+          <IconGithub size={13} />
+        </ActionButton>
+      ) : null}
 
       <ActionButton label="Delete message" onClick={() => useChat.getState().deleteMessage(message.id)}>
         <IconTrash size={13} />

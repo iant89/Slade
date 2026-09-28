@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Artifact } from '../types'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 import { PERSIST_LIMIT_BYTES, classifyArtifact, mimeFromName } from '../lib/mime'
+import { base64ToBytes } from '../lib/github'
 
 /* ------------------------------------------------------------------ */
 /* Artifacts: binary lives as object URLs at runtime; small ones also  */
@@ -135,6 +136,69 @@ export async function artifactFromFile(file: File): Promise<Artifact> {
   if (base.kind === 'audio') base.durationSec = await probeAudioDuration(base.blobUrl ?? base.dataURL)
   return base
 }
+
+/* ------------------------------------------------------------------ */
+/* Ingestion: remote file (GitHub repo) → Artifact                     */
+/* ------------------------------------------------------------------ */
+
+export interface RemoteArtifactInput {
+  name: string
+  mime: string
+  remote: Artifact['remote']
+  /** Decoded text, when the file is textual. */
+  text?: string
+  /** Raw base64, when the file is binary. */
+  base64?: string
+}
+
+/**
+ * Build an artifact for a file that lives in a repository. Text files keep their
+ * content inline (so they fold into the next prompt like an upload); small
+ * binaries — images especially — keep a data URL so previews survive a reload.
+ */
+export async function artifactFromRemote(input: RemoteArtifactInput): Promise<Artifact> {
+  const id = `art_${Math.random().toString(36).slice(2, 14)}`
+  const artifact: Artifact = {
+    id,
+    name: input.name,
+    mime: input.mime,
+    size: input.text != null ? input.text.length : 0,
+    kind: classifyArtifact(input.name, input.mime),
+    createdAt: Date.now(),
+    provenance: { origin: 'user' },
+    remote: input.remote,
+    text: input.text,
+    ephemeral: true,
+  }
+
+  if (input.base64 != null) {
+    const bytes = base64ToBytes(input.base64)
+    artifact.size = bytes.byteLength
+    const blob = new Blob([bytes], { type: input.mime })
+    artifact.blobUrl = URL.createObjectURL(blob)
+    if (bytes.byteLength <= PERSIST_LIMIT_BYTES) {
+      try {
+        artifact.dataURL = await fileToDataURL(blob)
+        artifact.ephemeral = false
+      } catch {
+        /* keep ephemeral */
+      }
+    }
+  } else if (input.text != null) {
+    artifact.size = new TextEncoder().encode(input.text).byteLength
+    if (artifact.size <= PERSIST_LIMIT_BYTES) artifact.ephemeral = false
+  }
+
+  if (artifact.kind === 'sheet' && artifact.text != null) {
+    const { parseCSV } = await import('../lib/csv')
+    const { rows } = parseCSV(artifact.text)
+    artifact.columns = rows[0] ?? []
+    artifact.rows = rows.slice(1)
+  }
+  if (artifact.kind === 'audio') artifact.durationSec = await probeAudioDuration(artifact.blobUrl ?? artifact.dataURL)
+  return artifact
+}
+
 
 async function probeAudioDuration(url?: string): Promise<number | undefined> {
   if (!url) return undefined

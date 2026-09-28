@@ -5,6 +5,8 @@ export const KEYS = {
   conversations: 'slade.conversations.v1',
   health: 'slade.health.v1',
   artifacts: 'slade.artifacts.v1',
+  /** GitHub connection + workspace state (never part of the export bundle). */
+  github: 'slade.github.v1',
 } as const
 
 /** Load and zod-validate a JSON value from localStorage; fall back on any error. */
