@@ -41,6 +41,10 @@ you can watch the failover engine work.
 6. Add real API keys in **Settings → Providers** (OpenAI, Anthropic, Google Gemini,
    **OpenRouter** — one key in front of hundreds of models — or any OpenAI-compatible
    endpoint such as Groq/Ollama) to route to live models with the same engine.
+7. Hit the **GitHub** button in the header (or `Ctrl/Cmd + G`), sign in with the device
+   flow, open a repo and attach a file — then ask about it. Or take any answer and
+   **Publish to GitHub** as a gist, a commit or an issue. See
+   [GitHub (repo context & publishing)](#github-repo-context--publishing).
 
 ## The failover engine
 
@@ -75,6 +79,69 @@ as context**):
 | Video | inline player with full-screen |
 | Archives / unknown | neutral card with MIME, size, download |
 
+Files pulled in from a GitHub repository are the same cards, with their origin
+kept on the card (`repo @ ref`, path, "open on GitHub") and a **Publish to
+GitHub** action in the footer.
+
+## GitHub (repo context & publishing)
+
+Open the workspace with the GitHub button in the header or `Ctrl/Cmd + G`. Two
+halves, both wired into the thread:
+
+- **Repo context** — browse your repositories (or open any public one by URL),
+  read files, search code with GitHub's own index, and attach whatever you find
+  straight into the composer. Attached repo files become artifact cards and fold
+  into the prompt exactly like an upload, with the source recorded.
+- **Publishing** — every artifact card and every message has *Publish to
+  GitHub*: create a **gist** (secret by default), **commit a file** into a repo
+  (binary files too; existing paths update in place, or commit onto a fresh
+  branch with one toggle), or open an **issue** with the content in the body and
+  a provenance block underneath.
+
+### Signing in: device flow, no secrets
+
+Slade never asks for your password and holds no client secret. Sign-in uses
+GitHub's **device flow**: Slade shows a short code, you approve it on
+github.com, and the token comes back to the browser.
+
+One honesty note about the plumbing: **github.com's OAuth endpoints are not
+CORS-enabled** (deliberately — see
+[community discussion #40077](https://github.com/orgs/community/discussions/40077)),
+so a static page cannot call them itself. Slade sends exactly two calls —
+`/login/device/code` and `/login/oauth/access_token` — through a relay that does
+nothing else: it accepts only the parameters the device flow defines, forwards no
+client secret (the flow has none) and logs nothing. Everything afterwards goes
+straight to `api.github.com`, which *is* CORS-enabled.
+
+| Setup | What to do |
+| --- | --- |
+| Local dev / preview | Nothing — `npm run dev` serves those two endpoints from Vite middleware (`scripts/github-oauth-relay.ts`) |
+| Static hosting (e.g. Pages) | Deploy `workers/github-oauth-relay` (`cd workers/github-oauth-relay && npx wrangler deploy`) and paste its URL into **Settings → GitHub → Sign-in relay**, or build with `VITE_GITHUB_RELAY=…` |
+| Rather not run a relay | The same connect card accepts a personal access token with `repo` + `gist` + `read:user` |
+
+Create the OAuth app once — GitHub → Settings → Developer settings → OAuth apps
+→ **New OAuth App** (the callback URL is unused) → tick **Enable Device Flow** →
+copy the **Client ID** into **Settings → GitHub**. A deployment can ship that ID
+as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
+
+### What the token is used for
+
+| Scope | Used for |
+| --- | --- |
+| `repo` | listing repositories, reading trees/blobs, committing published artifacts, opening issues |
+| `gist` | publishing an artifact or an answer as a gist |
+| `read:user` | showing which account is connected |
+
+- The token lives in **local storage under its own key** (`slade.github.v1`),
+  is masked in the UI, never logged, and is **excluded from Data → Export** so a
+  backup file can never carry a live credential.
+- Slade shows the live API budget in the workspace footer (`x-ratelimit-*`), and
+  a `403` with no budget left is reported as *rate limited — resets at HH:MM*
+  rather than as a generic failure.
+- Every GitHub failure is classified (`auth`, `forbidden`, `not_found`,
+  `rate_limit`, `conflict`, `validation`, `network`, `server`) and keeps GitHub's
+  own sentence, the same way model failures do.
+
 ## Chat experience
 
 - Token-by-token streaming with typing indicator, progressive Markdown, and blinking cursor
@@ -93,6 +160,9 @@ as context**):
 - **Defaults** — temperature, top-p, max tokens, system prompt, streaming, typing
   indicator, auto-scroll, failover strategy, first-token timeout, stream timeout,
   artifact preferences
+- **GitHub** — device-flow sign-in, OAuth app client ID, sign-in relay URL, requested
+  scopes, and publishing defaults (target, repository, branch, path prefix, secret
+  gists, new-branch commits)
 - **Providers** — masked API keys (stored locally, never logged), connection tests with
   instant pass/fail and real generation, and first-class OpenRouter support
   (`openrouter/auto` ships in the default registry; any `vendor/model` id works, with
@@ -153,11 +223,26 @@ VITE_PUBLIC_BASE=/Slade/ npm run build   # adjust if the repo is renamed
 npx vite preview                         # serves the production build
 ```
 
+The Pages build is static, so the OAuth relay is **not** part of it: the deployed
+app needs either a relay URL or a pasted token (see the GitHub section above).
+Bake in both values when building so users configure nothing:
+
+```bash
+VITE_GITHUB_RELAY=https://slade-github-oauth.<you>.workers.dev \
+VITE_GITHUB_CLIENT_ID=Iv1.xxxxxxxx \
+VITE_PUBLIC_BASE=/Slade/ npm run build
+```
+
 ## Privacy & security
 
-API keys stay in your browser's local storage and are sent **only** to the provider you
-configured, for the messages you send. There is no telemetry, no backend, no analytics.
-Prompts and attachments go nowhere else.
+API keys and the GitHub token stay in your browser's local storage and are sent **only**
+to the provider (or GitHub) you configured, for the actions you take. There is no
+telemetry, no backend, no analytics. Prompts and attachments go nowhere else.
+
+GitHub specifics: the sign-in relay sees exactly two OAuth calls — a device code and the
+token GitHub returns for it — and nothing else, and it holds no secret of its own. Repo
+files are only fetched when you open or attach them, publishing only happens when you
+press the button, and the token is left out of exported backups.
 
 ## Stack & quality bar
 
@@ -174,9 +259,17 @@ Prompts and attachments go nowhere else.
 
 ```bash
 npm run build      # type-checks then produces dist/
-npm run preview    # serve the production build
-npm run test:smoke # headless engine + provider tests (no browser, no API keys)
+npm run preview    # serve the production build (relay included)
+npm run test:smoke # headless engine, provider and GitHub tests (no browser, no keys)
 ```
+
+`test:smoke` covers the GitHub integration end to end against a fake
+`api.github.com` and a fake relay: repo/tree/blob reads, the >1 MB blob
+fallback, base64 for binaries, every error classification (including
+rate-limit reset times and token redaction), the device-flow state machine
+(pending, slow-down, expired, denied, aborted), the new-branch commit path,
+gist/issue payloads, and the loop that matters most — *attach a repo file →
+its contents appear in the next prompt*.
 
 ## Layout
 
@@ -185,6 +278,12 @@ src/
   engine/       failover chain walk, routing strategies, turn builder
   providers/    openai · anthropic · google · openrouter · openai-compatible · built-in mock
   store/        zustand stores + persistence + cooldown policy
-  components/   chat, artifacts, settings, layout, common
-  lib/          mime classification, csv, clipboard, schemas, storage
+  components/   chat, artifacts, settings, layout, github, common
+  lib/          mime classification, csv, clipboard, schemas, storage,
+                github (REST client, device flow, publish payloads)
+scripts/
+  smoke.ts                  headless test suite
+  github-oauth-relay.ts     the two OAuth calls, proxied for dev/preview
+workers/
+  github-oauth-relay/       the same relay as a deployable Cloudflare Worker
 ```

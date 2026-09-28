@@ -8,6 +8,8 @@ import { ModelRail } from './components/layout/ModelRail'
 import { ChatView } from './components/chat/ChatView'
 import { Composer } from './components/chat/Composer'
 import { SettingsModal } from './components/settings/SettingsModal'
+import { GitHubPanel } from './components/github/GitHubPanel'
+import { PublishDialog } from './components/github/PublishDialog'
 import { Lightbox } from './components/artifacts/Lightbox'
 import { Toasts } from './components/common/Toasts'
 import { IconPaperclip, IconWifiOff } from './components/icons'
@@ -69,6 +71,15 @@ function useHotkeys() {
         e.preventDefault()
         useUI.getState().toggleSidebar()
       }
+      if (meta && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        useUI.getState().toggleGithub()
+      }
+      // Esc closes the GitHub drawer unless something modal has focus.
+      if (e.key === 'Escape' && useUI.getState().githubOpen && !useUI.getState().publishSource) {
+        const tag = (e.target as HTMLElement | null)?.tagName
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') useUI.getState().closeGithub()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -114,7 +125,9 @@ export default function App() {
         <Composer />
       </main>
       <ModelRail />
+      <GitHubPanel />
       <SettingsModal />
+      <PublishDialog />
       <Lightbox />
       <Toasts />
       <DragDropOverlay />

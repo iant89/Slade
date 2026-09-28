@@ -14,8 +14,10 @@ import {
   IconCode,
   IconDownload,
   IconExpand,
+  IconExternal,
   IconFile,
   IconFileText,
+  IconGithub,
   IconImage,
   IconPin,
   IconTable,
@@ -85,6 +87,15 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
           </span>
           <span className="artifact-sub">
             {kindLabel(kind)} · {formatBytes(artifact.size)} · {provenance}
+            {artifact.remote ? (
+              <>
+                {' '}
+                ·{' '}
+                <span className="artifact-remote" title={`${artifact.remote.path} @ ${artifact.remote.ref}`}>
+                  {artifact.remote.repo}@{artifact.remote.ref}
+                </span>
+              </>
+            ) : null}
           </span>
         </span>
         <div className="artifact-head-actions">
@@ -133,6 +144,25 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
         >
           <IconPin size={12} /> Send back to model
         </button>
+        <button
+          className="artifact-action"
+          onClick={() => useUI.getState().openPublish({ kind: 'artifact', artifactId: artifact.id })}
+          title="Publish this artifact to GitHub as a gist, a commit or an issue"
+          type="button"
+        >
+          <IconGithub size={12} /> Publish to GitHub
+        </button>
+        {artifact.remote ? (
+          <a
+            className="artifact-action"
+            href={artifact.remote.url}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open ${artifact.remote.path} on GitHub`}
+          >
+            <IconExternal size={12} /> GitHub
+          </a>
+        ) : null}
         {src && (
           <button className="artifact-action" onClick={() => downloadUrl(src, artifact.name)} type="button">
             <IconDownload size={12} /> Download

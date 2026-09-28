@@ -101,6 +101,19 @@ export type ArtifactKind =
 
 export type ArtifactSource = { origin: 'user' } | { origin: 'model'; modelId: string; modelLabel: string }
 
+/** Where a file came from when it was not uploaded from disk (GitHub repos). */
+export interface RemoteSource {
+  kind: 'github'
+  /** `owner/name`. */
+  repo: string
+  /** Branch, tag or commit sha the file was read at. */
+  ref: string
+  path: string
+  /** Canonical permalink on github.com. */
+  url: string
+  sha?: string
+}
+
 export interface Artifact {
   id: string
   name: string
@@ -109,6 +122,8 @@ export interface Artifact {
   kind: ArtifactKind
   createdAt: number
   provenance: ArtifactSource
+  /** Set when the artifact was pulled from a repository rather than uploaded. */
+  remote?: RemoteSource
   /** Small artifacts are persisted as data URLs; larger ones live in memory. */
   dataURL?: string
   /** Runtime object URL (never persisted; recreated from dataURL on load). */

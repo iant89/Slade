@@ -10,10 +10,15 @@ import { exportBundleSchema, settingsSchema } from '../../lib/schemas'
 import { downloadUrl } from '../../lib/clipboard'
 import { formatCount } from '../../lib/format'
 import { uid } from '../../lib/id'
+import { useGitHub } from '../../store/github'
+import { SCOPES_HELP } from '../../lib/github-auth'
+import { ConnectCard } from '../github/ConnectCard'
+import { ScopeChip } from '../github/bits'
 import { Modal } from '../common/Modal'
 import { FieldRow, SegmentedControl, SelectRow, SectionTitle, SliderRow, Toggle } from '../common/controls'
 import {
   IconDatabase,
+  IconGithub,
   IconGrip,
   IconKey,
   IconLayers,
@@ -27,12 +32,13 @@ import {
   IconAlert,
 } from '../icons'
 
-type Tab = 'models' | 'defaults' | 'providers' | 'appearance' | 'data'
+type Tab = 'models' | 'defaults' | 'providers' | 'github' | 'appearance' | 'data'
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'models', label: 'Models', icon: <IconLayers size={15} /> },
   { id: 'defaults', label: 'Defaults', icon: <IconSliders size={15} /> },
   { id: 'providers', label: 'Providers', icon: <IconKey size={15} /> },
+  { id: 'github', label: 'GitHub', icon: <IconGithub size={15} /> },
   { id: 'appearance', label: 'Appearance', icon: <IconPalette size={15} /> },
   { id: 'data', label: 'Data', icon: <IconDatabase size={15} /> },
 ]
@@ -68,6 +74,7 @@ export function SettingsModal() {
           {tab === 'models' && <ModelsTab />}
           {tab === 'defaults' && <DefaultsTab />}
           {tab === 'providers' && <ProvidersTab />}
+          {tab === 'github' && <GitHubTab />}
           {tab === 'appearance' && <AppearanceTab />}
           {tab === 'data' && <DataTab />}
         </div>
@@ -404,6 +411,217 @@ function ArtifactPrefs() {
 }
 
 /* ------------------------------------------------------------------ */
+/* GitHub tab                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * GitHub configuration. The connection UI itself lives in the workspace drawer
+ * (where you actually use it) — this tab owns the knobs: OAuth app client ID,
+ * the relay that performs the two OAuth calls, requested scopes, and what
+ * publishing defaults to.
+ */
+function GitHubTab() {
+  const { clientId, relayUrl, scope, login, scopes, authError, authStatus, recentRepos, publishDefaults } = useGitHub()
+  const setClientId = useGitHub((s) => s.setClientId)
+  const setRelayUrl = useGitHub((s) => s.setRelayUrl)
+  const setScope = useGitHub((s) => s.setScope)
+  const setPublishDefaults = useGitHub((s) => s.setPublishDefaults)
+  const signOut = useGitHub((s) => s.signOut)
+  const loadRepos = useGitHub((s) => s.loadRepos)
+  const toast = useUI((s) => s.toast)
+  const [cid, setCid] = useState(clientId)
+  const [relay, setRelay] = useState(relayUrl)
+  const [scopeDraft, setScopeDraft] = useState(scope)
+
+  return (
+    <div>
+      <SectionTitle>Connection</SectionTitle>
+      <div className="gh-settings-card">
+        <ConnectCard />
+      </div>
+      {authError ? <div className="provider-test fail" role="status"><IconAlert size={12} /> {authError}</div> : null}
+
+      <SectionTitle>OAuth app</SectionTitle>
+      <p className="settings-note">
+        Slade uses GitHub&rsquo;s <strong>device flow</strong>: you get a short code, approve it on github.com, and the
+        token comes back to this browser. No client secret is used or stored, and there is no redirect URI to register.
+      </p>
+      <FieldRow label="Client ID" hint="OAuth app → Enable Device Flow → copy the Client ID (the public one)">
+        <div className="gh-row">
+          <input
+            className="gh-input"
+            value={cid}
+            placeholder="Iv1.… or Ov23li…"
+            spellCheck={false}
+            onChange={(e) => setCid(e.target.value)}
+          />
+          <button
+            className="btn ghost small"
+            disabled={cid.trim() === clientId}
+            onClick={() => {
+              setClientId(cid)
+              toast({ kind: 'success', title: 'Client ID saved' })
+            }}
+            type="button"
+          >
+            Save
+          </button>
+        </div>
+      </FieldRow>
+      <p className="settings-note">
+        <a className="link-btn" href="https://github.com/settings/applications/new" target="_blank" rel="noreferrer">
+          Create an OAuth app ↗
+        </a>{' '}
+        · needs <strong>Enable Device Flow</strong> ticked. The callback URL is unused.
+      </p>
+
+      <SectionTitle>Sign-in relay</SectionTitle>
+      <p className="settings-note">
+        github.com does not allow browsers to call its two OAuth endpoints cross-origin, so those calls go through a
+        relay that only knows <code>/device_code</code> and <code>/access_token</code> — no secrets, no logging. Leave
+        this empty to use the bundled one (<code>/github-oauth</code>, served by the dev server and the optional
+        worker in <code>workers/github-oauth-relay</code>).
+      </p>
+      <FieldRow label="Relay URL" hint="e.g. https://slade-github-oauth.<you>.workers.dev">
+        <div className="gh-row">
+          <input
+            className="gh-input"
+            value={relay}
+            placeholder="(bundled: /github-oauth)"
+            spellCheck={false}
+            onChange={(e) => setRelay(e.target.value)}
+          />
+          <button
+            className="btn ghost small"
+            disabled={relay.trim() === relayUrl}
+            onClick={() => {
+              setRelayUrl(relay)
+              toast({ kind: 'success', title: 'Relay URL saved' })
+            }}
+            type="button"
+          >
+            Save
+          </button>
+        </div>
+      </FieldRow>
+
+      <SectionTitle>Scopes</SectionTitle>
+      <FieldRow label="Requested scopes" hint="Space separated. repo + gist + read:user covers everything below.">
+        <div className="gh-row">
+          <input
+            className="gh-input mono"
+            value={scopeDraft}
+            spellCheck={false}
+            onChange={(e) => setScopeDraft(e.target.value)}
+          />
+          <button
+            className="btn ghost small"
+            disabled={scopeDraft.trim() === scope}
+            onClick={() => {
+              setScope(scopeDraft)
+              toast({ kind: 'success', title: 'Scopes saved', detail: 'Sign in again for them to take effect.' })
+            }}
+            type="button"
+          >
+            Save
+          </button>
+        </div>
+      </FieldRow>
+      <ul className="gh-scope-list">
+        {SCOPES_HELP.map((s) => (
+          <li key={s.scope}>
+            <code>{s.scope}</code>
+            <span>{s.why}</span>
+            {scopes.length ? (
+              <ScopeChip scope={scopes.includes(s.scope) ? 'granted' : 'not granted'} missing={!scopes.includes(s.scope)} />
+            ) : null}
+          </li>
+        ))}
+      </ul>
+
+      <SectionTitle>Publishing defaults</SectionTitle>
+      <SelectRow
+        label="Default target"
+        value={publishDefaults.target}
+        options={[
+          { value: 'gist', label: 'Gist' },
+          { value: 'file', label: 'Repository file' },
+          { value: 'issue', label: 'Issue' },
+        ]}
+        hint="What the publish dialog opens on"
+        onChange={(v) => setPublishDefaults({ target: v })}
+      />
+      <FieldRow label="Default repository" hint="Used for commits and issues">
+        <input
+          className="gh-input"
+          list="gh-settings-repos"
+          value={publishDefaults.repo ?? ''}
+          placeholder="owner/repo"
+          onChange={(e) => setPublishDefaults({ repo: e.target.value })}
+        />
+      </FieldRow>
+      <datalist id="gh-settings-repos">
+        {recentRepos.map((r) => (
+          <option key={r} value={r} />
+        ))}
+      </datalist>
+      <FieldRow label="Default branch" hint="Leave empty for the repository's default branch">
+        <input
+          className="gh-input"
+          value={publishDefaults.branch ?? ''}
+          placeholder="main"
+          onChange={(e) => setPublishDefaults({ branch: e.target.value })}
+        />
+      </FieldRow>
+      <FieldRow label="Path prefix" hint="Folder committed files land in">
+        <input
+          className="gh-input"
+          value={publishDefaults.prefix}
+          placeholder="artifacts"
+          onChange={(e) => setPublishDefaults({ prefix: e.target.value })}
+        />
+      </FieldRow>
+      <Toggle
+        checked={publishDefaults.gistPublic}
+        onChange={(v) => setPublishDefaults({ gistPublic: v })}
+        label="Public gists"
+        hint="Off: gists are secret (only people with the link can see them)"
+      />
+      <Toggle
+        checked={publishDefaults.useNewBranch}
+        onChange={(v) => setPublishDefaults({ useNewBranch: v })}
+        label="Commit onto a new branch by default"
+        hint="Safer for shared repositories — the change lands as a reviewable branch"
+      />
+
+      {login ? (
+        <div className="data-actions">
+          <button
+            className="btn ghost"
+            onClick={() => {
+              void loadRepos({ force: true })
+              toast({ kind: 'info', title: 'Repository list refreshed' })
+            }}
+            type="button"
+          >
+            Refresh repositories
+          </button>
+          <button className="btn danger" onClick={() => signOut()} type="button">
+            <IconTrash size={14} /> Disconnect @{login}
+          </button>
+        </div>
+      ) : null}
+
+      <p className="settings-note">
+        {authStatus === 'connecting'
+          ? 'Waiting for you to approve the code on github.com…'
+          : 'The GitHub token is kept in this browser (local storage, own key) and is deliberately left out of Data → Export, so a backup file never carries a live credential.'}
+      </p>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Providers tab                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -649,6 +867,10 @@ function DataTab() {
       <p className="settings-note">
         Everything lives in your browser's local storage. Nothing is sent anywhere except to the providers you configure,
         and only for the messages you send.
+      </p>
+      <p className="settings-note">
+        The GitHub token is stored under its own key and is <strong>left out of exports</strong>, so a backup file never
+        carries a live credential — reconnect after importing one.
       </p>
       <p className="settings-note">
         Factory models: {DEFAULT_SETTINGS.models.length} · {DEFAULT_SETTINGS.models.filter((m) => m.enabled).length}{' '}

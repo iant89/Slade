@@ -2,11 +2,20 @@ import { create } from 'zustand'
 import type { Toast } from '../types'
 import { uid } from '../lib/id'
 
+/** What the publish dialog is publishing. */
+export type PublishSource =
+  | { kind: 'artifact'; artifactId: string }
+  | { kind: 'message'; messageId: string }
+
 export interface UIState {
   settingsOpen: boolean
-  settingsTab: 'models' | 'defaults' | 'providers' | 'appearance' | 'data'
+  settingsTab: 'models' | 'defaults' | 'providers' | 'github' | 'appearance' | 'data'
   sidebarOpen: boolean
   railOpen: boolean
+  /** GitHub context workspace drawer. */
+  githubOpen: boolean
+  githubTab: 'repos' | 'files' | 'search'
+  publishSource: PublishSource | null
   online: boolean
   toasts: Toast[]
   lightbox: { artifactId: string } | null
@@ -19,6 +28,12 @@ export interface UIState {
   setSettingsTab: (tab: UIState['settingsTab']) => void
   toggleSidebar: () => void
   toggleRail: () => void
+  openGithub: (tab?: UIState['githubTab']) => void
+  closeGithub: () => void
+  toggleGithub: () => void
+  setGithubTab: (tab: UIState['githubTab']) => void
+  openPublish: (source: PublishSource) => void
+  closePublish: () => void
   setOnline: (v: boolean) => void
   toast: (t: Omit<Toast, 'id'>) => void
   dismissToast: (id: string) => void
@@ -35,6 +50,9 @@ export const useUI = create<UIState>((set) => ({
   settingsTab: 'models',
   sidebarOpen: false,
   railOpen: false,
+  githubOpen: false,
+  githubTab: 'repos',
+  publishSource: null,
   online: typeof navigator !== 'undefined' ? navigator.onLine : true,
   toasts: [],
   lightbox: null,
@@ -46,6 +64,12 @@ export const useUI = create<UIState>((set) => ({
   setSettingsTab: (tab) => set({ settingsTab: tab }),
   toggleSidebar: () => set((st) => ({ sidebarOpen: !st.sidebarOpen })),
   toggleRail: () => set((st) => ({ railOpen: !st.railOpen })),
+  openGithub: (tab) => set((st) => ({ githubOpen: true, githubTab: tab ?? st.githubTab })),
+  closeGithub: () => set({ githubOpen: false }),
+  toggleGithub: () => set((st) => ({ githubOpen: !st.githubOpen })),
+  setGithubTab: (tab) => set({ githubTab: tab }),
+  openPublish: (source) => set({ publishSource: source }),
+  closePublish: () => set({ publishSource: null }),
   setOnline: (v) => set({ online: v }),
   toast: (t) =>
     set((st) => {

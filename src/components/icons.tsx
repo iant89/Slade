@@ -159,3 +159,38 @@ export const IconPause = (p: P) => (
 export const IconMic = (p: P) => (
   <I {...p}><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v1a7 7 0 0 0 14 0v-1" /><path d="M12 18v4" /></I>
 )
+
+/* ---------- GitHub ---------- */
+
+/** The GitHub mark: solid, so it keeps its shape at 12px. */
+export const IconGithub = ({ size = 16, ...rest }: P) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" {...rest}>
+    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+  </svg>
+)
+export const IconGitCommit = (p: P) => (
+  <I {...p}><circle cx="12" cy="12" r="3.2" /><path d="M2.5 12h6.3M15.2 12h6.3" /></I>
+)
+export const IconRepo = (p: P) => (
+  <I {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></I>
+)
+export const IconSearch = (p: P) => (
+  <I {...p}><circle cx="11" cy="11" r="7" /><path d="m21 21-4.35-4.35" /></I>
+)
+export const IconExternal = (p: P) => (
+  <I {...p}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6" /><path d="M10 14 21 3" /></I>
+)
+export const IconUpload = (p: P) => (
+  <I {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 8 5-5 5 5" /><path d="M12 3v12" /></I>
+)
+export const IconLock = (p: P) => (
+  <I {...p}><rect x="3.5" y="11" width="17" height="10" rx="2" /><path d="M7.5 11V7a4.5 4.5 0 0 1 9 0v4" /></I>
+)
+export const IconStar = (p: P) => (
+  <I {...p}><path d="m12 3 2.9 5.9 6.5.95-4.7 4.6 1.1 6.45L12 17.85 6.2 20.9l1.1-6.45-4.7-4.6 6.5-.95L12 3z" /></I>
+)
+export const IconLoader = (p: P) => (
+  <I {...p} className={`spin${p.className ? ` ${p.className}` : ''}`}>
+    <path d="M12 3v3.5M12 17.5V21M5.6 5.6l2.5 2.5M15.9 15.9l2.5 2.5M3 12h3.5M17.5 12H21M5.6 18.4l2.5-2.5M15.9 8.1l2.5-2.5" />
+  </I>
+)

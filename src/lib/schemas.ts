@@ -140,6 +140,16 @@ export const artifactSchema = z.object({
     z.object({ origin: z.literal('user') }),
     z.object({ origin: z.literal('model'), modelId: z.string(), modelLabel: z.string() }),
   ]),
+  remote: z
+    .object({
+      kind: z.literal('github'),
+      repo: z.string(),
+      ref: z.string(),
+      path: z.string(),
+      url: z.string(),
+      sha: z.string().optional(),
+    })
+    .optional(),
   dataURL: z.string().optional(),
   text: z.string().optional(),
   columns: z.array(z.string()).optional(),
@@ -155,6 +165,31 @@ export const conversationSchema = z.object({
   updatedAt: z.number(),
   modelId: z.string().optional(),
   messages: z.array(messageSchema),
+})
+
+/* ------------------------------------------------------------------ */
+/* GitHub connection (own storage key; the token never enters a backup) */
+/* ------------------------------------------------------------------ */
+
+export const githubPersistedSchema = z.object({
+  token: z.string(),
+  clientId: z.string(),
+  relayUrl: z.string(),
+  scope: z.string(),
+  login: z.string().optional(),
+  avatarUrl: z.string().optional(),
+  scopes: z.array(z.string()),
+  recentRepos: z.array(z.string()),
+  activeRepo: z.string().optional(),
+  activeBranch: z.string().optional(),
+  publish: z.object({
+    target: z.enum(['gist', 'file', 'issue']),
+    repo: z.string().optional(),
+    branch: z.string().optional(),
+    prefix: z.string(),
+    gistPublic: z.boolean(),
+    useNewBranch: z.boolean(),
+  }),
 })
 
 export const exportBundleSchema = z.object({

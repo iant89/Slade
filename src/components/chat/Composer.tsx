@@ -9,7 +9,7 @@ import { useUI } from '../../store/ui'
 import { sendUserMessage, stopGeneration, regenerateFromUserMessage } from '../../engine/send'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { IconGear, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
+import { IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Model chip + quick switch                                           */
@@ -127,6 +127,7 @@ function ModelChip() {
 const COMMANDS = [
   { cmd: '/system', label: '/system', hint: 'Edit the default system prompt', icon: <IconSliders size={13} /> },
   { cmd: '/model', label: '/model', hint: 'Quick-switch the primary model', icon: <IconLayers size={13} /> },
+  { cmd: '/github', label: '/github', hint: 'Browse a repo and attach files as context', icon: <IconGithub size={13} /> },
   { cmd: '/sample', label: '/sample', hint: 'Attach sample files (CSV, code, image…)', icon: <IconFile size={13} /> },
   { cmd: '/new', label: '/new', hint: 'Start a new conversation', icon: <IconPlus size={13} /> },
 ] as const
@@ -314,6 +315,7 @@ export function Composer() {
     if (cmd === '/system') openSettings('defaults')
     if (cmd === '/model') document.querySelector<HTMLButtonElement>('.model-chip')?.click()
     if (cmd === '/new') useChat.getState().newConversation()
+    if (cmd === '/github') useUI.getState().openGithub('files')
     if (cmd === '/sample') {
       void attachSample(SAMPLES[0]!.file)
       toast({ kind: 'info', title: 'Sample attached', detail: `Added ${SAMPLES[0]!.label} to the composer.` })

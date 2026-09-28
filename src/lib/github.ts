@@ -1,0 +1,699 @@
+/**
+ * GitHub REST client.
+ *
+ * A thin, typed wrapper over `api.github.com` (which *is* CORS-enabled, so the
+ * browser can call it directly with a user token). Every failure is turned into
+ * a `GitHubError` that carries a stable `kind` for the UI to branch on and the
+ * provider's own sentence as the message — the same contract the model
+ * providers use, so an error shown to the user always says *why*.
+ *
+ * OAuth itself cannot happen here: github.com's token endpoints send no CORS
+ * headers, so the device flow goes through the bundled relay
+ * (see `github-auth.ts`).
+ */
+
+import { redactSecrets } from '../providers/base'
+
+export const GITHUB_API = 'https://api.github.com'
+export const GITHUB_API_VERSION = '2022-11-28'
+
+/* ------------------------------------------------------------------ */
+/* Shapes (only the fields Slade actually reads)                       */
+/* ------------------------------------------------------------------ */
+
+export interface GitHubUser {
+  id: number
+  login: string
+  name: string | null
+  avatar_url: string
+  html_url: string
+}
+
+export interface GitHubRepo {
+  id: number
+  name: string
+  full_name: string
+  owner: { login: string; avatar_url: string }
+  private: boolean
+  fork: boolean
+  archived: boolean
+  disabled?: boolean
+  description: string | null
+  default_branch: string
+  html_url: string
+  pushed_at: string | null
+  updated_at: string | null
+  language: string | null
+  stargazers_count: number
+  permissions?: { admin: boolean; push: boolean; pull: boolean }
+}
+
+export interface GitHubTreeEntry {
+  path: string
+  mode: string
+  type: 'blob' | 'tree' | 'commit'
+  sha: string
+  size?: number
+}
+
+export interface GitHubBranch {
+  name: string
+  commit: { sha: string }
+  protected?: boolean
+}
+
+export interface GitHubSearchHit {
+  path: string
+  name: string
+  sha: string
+  html_url: string
+  repository?: { full_name: string }
+  text_matches?: { fragment: string; matches?: { text: string }[] }[]
+}
+
+export interface GitHubRate {
+  limit: number
+  remaining: number
+  resetAt: number
+}
+
+export type GitHubErrorKind =
+  | 'auth'
+  | 'forbidden'
+  | 'not_found'
+  | 'rate_limit'
+  | 'conflict'
+  | 'validation'
+  | 'network'
+  | 'server'
+  | 'unknown'
+
+export class GitHubError extends Error {
+  kind: GitHubErrorKind
+  status?: number
+  /** Epoch ms at which a rate-limited window resets. */
+  resetAt?: number
+  constructor(kind: GitHubErrorKind, message: string, status?: number, resetAt?: number) {
+    super(redactSecrets(message))
+    this.name = 'GitHubError'
+    this.kind = kind
+    this.status = status
+    this.resetAt = resetAt
+  }
+}
+
+export function isGitHubError(err: unknown): err is GitHubError {
+  return err instanceof GitHubError
+}
+
+/** Human-friendly one-liner for any thrown value. */
+export function githubErrorMessage(err: unknown): string {
+  if (isGitHubError(err)) return err.message
+  if (err instanceof Error) return redactSecrets(err.message)
+  return String(err)
+}
+
+/* ------------------------------------------------------------------ */
+/* Header / response plumbing                                          */
+/* ------------------------------------------------------------------ */
+
+export interface GitHubRateInfo {
+  rate?: GitHubRate
+  /** Scopes the token was granted, from `x-oauth-scopes`. */
+  scopes?: string[]
+}
+
+let lastRate: GitHubRateInfo = {}
+const rateListeners = new Set<(r: GitHubRateInfo) => void>()
+
+export function onRateInfo(fn: (r: GitHubRateInfo) => void): () => void {
+  rateListeners.add(fn)
+  return () => rateListeners.delete(fn)
+}
+
+export function lastRateInfo(): GitHubRateInfo {
+  return lastRate
+}
+
+function publishRate(headers: Headers): void {
+  const limit = Number(headers.get('x-ratelimit-limit') ?? NaN)
+  const remaining = Number(headers.get('x-ratelimit-remaining') ?? NaN)
+  const reset = Number(headers.get('x-ratelimit-reset') ?? NaN)
+  const scopes = headers.get('x-oauth-scopes')
+  const next: GitHubRateInfo = { ...lastRate }
+  if (Number.isFinite(limit) && Number.isFinite(remaining)) {
+    next.rate = { limit, remaining, resetAt: Number.isFinite(reset) ? reset * 1000 : Date.now() }
+  }
+  if (scopes != null) {
+    next.scopes = scopes
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }
+  lastRate = next
+  for (const fn of rateListeners) fn(next)
+}
+
+export interface GhRequest {
+  token?: string
+  /** Overrides the API host — used by tests against a local fake. */
+  baseUrl?: string
+  signal?: AbortSignal
+}
+
+interface CallOptions extends GhRequest {
+  method?: string
+  body?: unknown
+  /** Query string params; undefined/empty values are dropped. */
+  query?: Record<string, string | number | boolean | undefined>
+  /** Extra headers (media types etc). */
+  headers?: Record<string, string>
+}
+
+function buildUrl(baseUrl: string, path: string, query?: CallOptions['query']): string {
+  const url = new URL(baseUrl.replace(/\/+$/, '') + (path.startsWith('/') ? path : `/${path}`))
+  for (const [k, v] of Object.entries(query ?? {})) {
+    if (v === undefined || v === '') continue
+    url.searchParams.set(k, String(v))
+  }
+  return url.toString()
+}
+
+/** Render a GitHub validation error (`errors: [{resource, field, code}]`). */
+function validationDetail(json: unknown): string | undefined {
+  const errors = (json as { errors?: unknown } | null)?.errors
+  if (!Array.isArray(errors) || errors.length === 0) return undefined
+  return errors
+    .map((e) => {
+      if (typeof e === 'string') return e
+      const o = e as { field?: string; code?: string; message?: string; resource?: string }
+      const bits = [o.resource, o.field, o.code ?? o.message].filter(Boolean)
+      return bits.join(': ') || JSON.stringify(e)
+    })
+    .slice(0, 3)
+    .join('; ')
+}
+
+function classify(res: Response, body: string): GitHubError {
+  let json: { message?: string; documentation_url?: string } | null = null
+  try {
+    json = JSON.parse(body) as { message?: string }
+  } catch {
+    /* non-JSON body (proxy, HTML error page) */
+  }
+  const apiMessage = typeof json?.message === 'string' ? json.message.trim() : ''
+  const remaining = res.headers.get('x-ratelimit-remaining')
+  const resetSec = Number(res.headers.get('x-ratelimit-reset') ?? NaN)
+  const resetAt = Number.isFinite(resetSec) ? resetSec * 1000 : undefined
+  const detail = validationDetail(json)
+  const status = res.status
+  // GitHub repeats itself a lot ("Not Found", "Bad credentials"); Slade's own
+  // sentence already says it, so only add a message that carries new facts.
+  const GENERIC = /^(not found|bad credentials|validation failed|requires authentication|server error|forbidden)$/i
+
+  const withDetail = (head: string) => {
+    const parts = [
+      apiMessage && !GENERIC.test(apiMessage) && !head.includes(apiMessage) ? apiMessage : '',
+      detail ?? '',
+    ].filter(Boolean)
+    return parts.length ? `${head} — ${parts.join(' · ')}` : head
+  }
+
+  if (status === 401) {
+    return new GitHubError('auth', withDetail('GitHub rejected the token (bad credentials) — sign in again.'), status)
+  }
+  if (status === 404) {
+    return new GitHubError(
+      'not_found',
+      withDetail('Not found on GitHub — the repo, branch or path may not exist, or this token cannot see it.'),
+      status,
+    )
+  }
+  if (status === 403 && remaining === '0') {
+    return new GitHubError(
+      'rate_limit',
+      `GitHub API rate limit reached${resetAt ? ` — resets ${new Date(resetAt).toLocaleTimeString()}` : ''}.`,
+      status,
+      resetAt,
+    )
+  }
+  if (status === 403) {
+    const scopeish = /scope|permission|forbidden|not accessible|resource not accessible/i.test(apiMessage)
+    return new GitHubError(
+      'forbidden',
+      withDetail(
+        scopeish
+          ? 'GitHub refused the token — it is missing a scope this action needs (repo / gist / read:user).'
+          : 'GitHub refused the request.',
+      ),
+      status,
+    )
+  }
+  if (status === 409) return new GitHubError('conflict', withDetail('Conflict — the file changed on GitHub.'), status)
+  if (status === 422) return new GitHubError('validation', withDetail('GitHub rejected the request.'), status)
+  if (status >= 500) return new GitHubError('server', withDetail(`GitHub had a server error (${status}).`), status)
+  return new GitHubError('unknown', withDetail(`GitHub request failed (${status}).`), status)
+}
+
+async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
+  const base = opts.baseUrl ?? GITHUB_API
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    ...opts.headers,
+  }
+  if (opts.token) headers.Authorization = `Bearer ${opts.token}`
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+
+  let res: Response
+  try {
+    res = await fetch(buildUrl(base, path, opts.query), {
+      method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: opts.signal,
+    })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err
+    throw new GitHubError(
+      'network',
+      'Could not reach api.github.com — check your connection, an ad blocker, or a proxy blocking the request.',
+    )
+  }
+
+  publishRate(res.headers)
+
+  if (res.status === 204) return undefined as T
+
+  const text = await res.text()
+  if (!res.ok) throw classify(res, text)
+  if (!text) return undefined as T
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new GitHubError('unknown', 'GitHub returned a response Slade could not parse.')
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* base64 helpers (browser-safe, no Node Buffer)                       */
+/* ------------------------------------------------------------------ */
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let out = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    out += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(out)
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+  const clean = b64.replace(/\s+/g, '')
+  const bin = atob(clean)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+export function utf8ToBase64(text: string): string {
+  return bytesToBase64(new TextEncoder().encode(text))
+}
+
+export function base64ToUtf8(b64: string): string {
+  return new TextDecoder().decode(base64ToBytes(b64))
+}
+
+/* ------------------------------------------------------------------ */
+/* Repo identifiers                                                    */
+/* ------------------------------------------------------------------ */
+
+export interface RepoRef {
+  owner: string
+  name: string
+  fullName: string
+}
+
+/**
+ * Accepts `owner/repo`, `https://github.com/owner/repo`, `git@github.com:owner/repo.git`
+ * or a bare `repo` when an owner is supplied.
+ */
+export function parseRepoInput(input: string, fallbackOwner?: string): RepoRef | null {
+  let s = input.trim()
+  if (!s) return null
+  s = s.replace(/^git@github\.com:/i, '').replace(/^ssh:\/\/git@github\.com\//i, '')
+  s = s.replace(/^https?:\/\/(?:www\.)?github\.com\//i, '')
+  s = s.split(/[?#]/)[0]!
+  // `.../demo.git/` and `.../demo.git` are the same repo.
+  s = s.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '')
+  const parts = s.split('/').filter(Boolean)
+  if (parts.length === 1 && fallbackOwner) parts.unshift(fallbackOwner)
+  if (parts.length < 2) return null
+  const [owner, name] = parts as [string, string]
+  if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(name)) return null
+  return { owner, name, fullName: `${owner}/${name}` }
+}
+
+/* ------------------------------------------------------------------ */
+/* Endpoints                                                           */
+/* ------------------------------------------------------------------ */
+
+export function getUser(o: GhRequest = {}): Promise<GitHubUser> {
+  return ghFetch<GitHubUser>('/user', o)
+}
+
+export interface ListReposOptions extends GhRequest {
+  page?: number
+  perPage?: number
+  sort?: 'updated' | 'pushed' | 'full_name' | 'created'
+  visibility?: 'all' | 'public' | 'private'
+}
+
+export function listRepos(o: ListReposOptions = {}): Promise<GitHubRepo[]> {
+  return ghFetch<GitHubRepo[]>('/user/repos', {
+    ...o,
+    query: {
+      page: o.page ?? 1,
+      per_page: o.perPage ?? 50,
+      sort: o.sort ?? 'updated',
+      direction: 'desc',
+      visibility: o.visibility ?? 'all',
+      affiliation: 'owner,collaborator,organization_member',
+    },
+  })
+}
+
+export function getRepo(fullName: string, o: GhRequest = {}): Promise<GitHubRepo> {
+  return ghFetch<GitHubRepo>(`/repos/${fullName}`, o)
+}
+
+export function listBranches(fullName: string, o: GhRequest = {}): Promise<GitHubBranch[]> {
+  return ghFetch<GitHubBranch[]>(`/repos/${fullName}/branches`, { ...o, query: { per_page: 100 } })
+}
+
+export function getBranchSha(fullName: string, branch: string, o: GhRequest = {}): Promise<string> {
+  return ghFetch<{ object: { sha: string } }>(`/repos/${fullName}/git/ref/heads/${encodeURIComponent(branch)}`, o).then(
+    (r) => r.object.sha,
+  )
+}
+
+export function createBranch(fullName: string, branch: string, fromSha: string, o: GhRequest = {}): Promise<void> {
+  return ghFetch<void>(`/repos/${fullName}/git/refs`, {
+    ...o,
+    body: { ref: `refs/heads/${branch}`, sha: fromSha },
+  })
+}
+
+export interface TreeResult {
+  entries: GitHubTreeEntry[]
+  truncated: boolean
+  ref: string
+}
+
+export async function getTree(fullName: string, ref: string, o: GhRequest = {}): Promise<TreeResult> {
+  const res = await ghFetch<{ tree: GitHubTreeEntry[]; truncated: boolean; sha: string }>(
+    `/repos/${fullName}/git/trees/${encodeURIComponent(ref)}`,
+    { ...o, query: { recursive: 1 } },
+  )
+  return {
+    // `commit` entries are submodules — nothing to read, so drop them.
+    entries: (res.tree ?? []).filter((e) => e.type === 'blob' || e.type === 'tree'),
+    truncated: Boolean(res.truncated),
+    ref,
+  }
+}
+
+/** Refuse to pull anything larger than this into the browser. */
+export const MAX_FILE_BYTES = 4_000_000
+
+export interface RemoteFile {
+  path: string
+  sha: string
+  size: number
+  mime: string
+  /** Present for text files we decoded. */
+  text?: string
+  /** Present for binary files (raw base64, no data-URL prefix). */
+  base64?: string
+}
+
+interface ContentsResponse {
+  type: string
+  name: string
+  path: string
+  sha: string
+  size: number
+  encoding?: string
+  content?: string
+}
+
+/**
+ * Read one file. Uses the contents API (base64) and falls back to the blobs
+ * API, which is the only route that works for files over ~1 MB — the contents
+ * endpoint returns `encoding: "none"` for those.
+ */
+export async function readFile(
+  fullName: string,
+  path: string,
+  ref: string,
+  o: GhRequest = {},
+): Promise<RemoteFile> {
+  const res = await ghFetch<ContentsResponse | ContentsResponse[]>(`/repos/${fullName}/contents/${encodePath(path)}`, {
+    ...o,
+    query: { ref },
+  })
+  if (Array.isArray(res)) {
+    throw new GitHubError('validation', `${path} is a directory on GitHub, not a file.`)
+  }
+  if (res.type !== 'file') {
+    throw new GitHubError('validation', `${path} is not a regular file on GitHub.`)
+  }
+  if (res.size > MAX_FILE_BYTES) {
+    throw new GitHubError(
+      'validation',
+      `${path} is ${(res.size / 1_000_000).toFixed(1)} MB — too large to attach (limit ${MAX_FILE_BYTES / 1_000_000} MB).`,
+    )
+  }
+
+  let base64: string | undefined
+  let sha = res.sha
+  let size = res.size
+  if (res.encoding === 'base64' && res.content) {
+    base64 = res.content.replace(/\s+/g, '')
+  } else {
+    const blob = await ghFetch<{ content: string; size: number; sha: string; encoding: string }>(
+      `/repos/${fullName}/git/blobs/${res.sha}`,
+      o,
+    )
+    base64 = (blob.content ?? '').replace(/\s+/g, '')
+    size = blob.size ?? size
+    sha = blob.sha ?? sha
+  }
+
+  const name = path.split('/').pop() ?? path
+  const mime = mimeForPath(name)
+  const text = isTextualPath(name, mime) ? base64ToUtf8(base64 ?? '') : undefined
+  return { path, sha, size, mime, text, base64: text == null ? base64 : undefined }
+}
+
+export function encodePath(path: string): string {
+  return path
+    .split('/')
+    .filter(Boolean)
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+}
+
+export interface WriteFileOptions extends GhRequest {
+  message: string
+  /** Raw base64 of the new file contents. */
+  contentBase64: string
+  branch?: string
+  /** Required when updating an existing file; omit to create. */
+  sha?: string
+}
+
+export interface WriteResult {
+  path: string
+  sha: string
+  htmlUrl?: string
+  commitSha?: string
+  commitUrl?: string
+  created: boolean
+}
+
+export async function writeFile(fullName: string, path: string, o: WriteFileOptions): Promise<WriteResult> {
+  const res = await ghFetch<{
+    content: { path: string; sha: string; html_url: string } | null
+    commit: { sha: string; html_url: string } | null
+  }>(`/repos/${fullName}/contents/${encodePath(path)}`, {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'PUT',
+    body: {
+      message: o.message,
+      content: o.contentBase64,
+      branch: o.branch,
+      sha: o.sha,
+    },
+  })
+  return {
+    path: res?.content?.path ?? path,
+    sha: res?.content?.sha ?? '',
+    htmlUrl: res?.content?.html_url,
+    commitSha: res?.commit?.sha,
+    commitUrl: res?.commit?.html_url,
+    created: !o.sha,
+  }
+}
+
+/** The blob sha of a path on a branch, or undefined when the file does not exist. */
+export async function fileSha(fullName: string, path: string, ref: string, o: GhRequest = {}): Promise<string | undefined> {
+  try {
+    const res = await ghFetch<ContentsResponse>(`/repos/${fullName}/contents/${encodePath(path)}`, {
+      ...o,
+      query: { ref },
+    })
+    return Array.isArray(res) ? undefined : res.sha
+  } catch (err) {
+    if (isGitHubError(err) && err.kind === 'not_found') return undefined
+    throw err
+  }
+}
+
+export interface GistFile {
+  name: string
+  content: string
+}
+
+export interface GistResult {
+  id: string
+  htmlUrl: string
+  public: boolean
+}
+
+export async function createGist(
+  o: GhRequest & { files: GistFile[]; description?: string; public: boolean },
+): Promise<GistResult> {
+  const files: Record<string, { content: string }> = {}
+  for (const f of o.files) files[f.name] = { content: f.content }
+  const res = await ghFetch<{ id: string; html_url: string; public: boolean }>('/gists', {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'POST',
+    body: { description: o.description, public: o.public, files },
+  })
+  return { id: res.id, htmlUrl: res.html_url, public: res.public }
+}
+
+export interface IssueResult {
+  number: number
+  htmlUrl: string
+}
+
+export async function createIssue(
+  fullName: string,
+  o: GhRequest & { title: string; body: string; labels?: string[] },
+): Promise<IssueResult> {
+  const res = await ghFetch<{ number: number; html_url: string }>(`/repos/${fullName}/issues`, {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'POST',
+    body: { title: o.title, body: o.body, labels: o.labels?.length ? o.labels : undefined },
+  })
+  return { number: res.number, htmlUrl: res.html_url }
+}
+
+export interface SearchOptions extends GhRequest {
+  page?: number
+  perPage?: number
+  signal?: AbortSignal
+}
+
+export async function searchCode(fullName: string, query: string, o: SearchOptions = {}): Promise<GitHubSearchHit[]> {
+  const q = `${query.trim()} repo:${fullName}`
+  const res = await ghFetch<{ items: GitHubSearchHit[] }>('/search/code', {
+    ...o,
+    query: { q, per_page: o.perPage ?? 25, page: o.page ?? 1 },
+    headers: { Accept: 'application/vnd.github.text-match+json' },
+  })
+  return res.items ?? []
+}
+
+export function getRateLimit(o: GhRequest = {}): Promise<{ resources: { core: { limit: number; remaining: number; reset: number } } }> {
+  return ghFetch('/rate_limit', o)
+}
+
+/* ------------------------------------------------------------------ */
+/* Path helpers                                                        */
+/* ------------------------------------------------------------------ */
+
+const EXT_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  svg: 'image/svg+xml', avif: 'image/avif', ico: 'image/x-icon',
+  ts: 'text/typescript', tsx: 'text/typescript', js: 'text/javascript', jsx: 'text/javascript',
+  mjs: 'text/javascript', cjs: 'text/javascript', json: 'application/json', html: 'text/html',
+  css: 'text/css', scss: 'text/css', less: 'text/css',
+  py: 'text/x-python', rs: 'text/x-rust', go: 'text/x-go', java: 'text/x-java', kt: 'text/x-kotlin',
+  rb: 'text/x-ruby', php: 'text/x-php', cs: 'text/x-csharp', swift: 'text/x-swift',
+  c: 'text/x-c', h: 'text/x-c', cpp: 'text/x-cpp', hpp: 'text/x-cpp',
+  sh: 'text/x-sh', bash: 'text/x-sh', zsh: 'text/x-sh', ps1: 'text/x-powershell',
+  sql: 'text/x-sql', yml: 'application/x-yaml', yaml: 'application/x-yaml',
+  toml: 'application/toml', ini: 'application/toml', xml: 'text/xml', csv: 'text/csv', tsv: 'text/csv',
+  md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain', log: 'text/plain', rst: 'text/plain',
+  pdf: 'application/pdf', zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+  lock: 'text/plain', env: 'text/plain', gitignore: 'text/plain',
+}
+
+export function extOf(path: string): string {
+  const name = path.split('/').pop() ?? path
+  const i = name.lastIndexOf('.')
+  return i > 0 ? name.slice(i + 1).toLowerCase() : ''
+}
+
+export function mimeForPath(path: string): string {
+  return EXT_MIME[extOf(path)] ?? 'application/octet-stream'
+}
+
+/** Files we are willing to decode as UTF-8 text. */
+export function isTextualPath(path: string, mime = mimeForPath(path)): boolean {
+  if (mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/')) return false
+  if (mime === 'application/octet-stream') return false
+  if (mime.startsWith('text/')) return true
+  return ['application/json', 'application/xml', 'application/x-yaml', 'application/toml'].includes(mime)
+}
+
+/** `src/lib/foo.ts` → `foo.ts` (what a download is named). */
+export function baseName(path: string): string {
+  return path.split('/').pop() || path
+}
+
+/** Directory portion of a repo path, '' at the root. */
+export function dirName(path: string): string {
+  const i = path.lastIndexOf('/')
+  return i < 0 ? '' : path.slice(0, i)
+}
+
+/** Join a user-typed path prefix with a file name, collapsing stray slashes. */
+export function joinPath(prefix: string, name: string): string {
+  const left = prefix.replace(/^\/+|\/+$/g, '')
+  const right = name.replace(/^\/+/g, '')
+  return left ? `${left}/${right}` : right
+}
+
+export function guessLanguage(path: string): string {
+  const ext = extOf(path)
+  const map: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', mjs: 'javascript',
+    py: 'python', rb: 'ruby', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin', cs: 'csharp',
+    c: 'c', h: 'c', cpp: 'cpp', sh: 'bash', bash: 'bash', yml: 'yaml', yaml: 'yaml',
+    md: 'markdown', json: 'json', html: 'xml', svg: 'xml', css: 'css', sql: 'sql', toml: 'ini',
+    php: 'php', swift: 'swift',
+  }
+  return map[ext] ?? ''
+}
