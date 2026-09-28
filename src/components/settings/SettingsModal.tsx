@@ -10,6 +10,9 @@ import { exportBundleSchema, settingsSchema } from '../../lib/schemas'
 import { downloadUrl } from '../../lib/clipboard'
 import { formatCount } from '../../lib/format'
 import { uid } from '../../lib/id'
+import type { AddableProvider, CatalogModel } from '../../lib/modelCatalog'
+import { ProviderCombobox } from './ProviderCombobox'
+import { ModelPickerModal } from './ModelPickerModal'
 import { useGitHub } from '../../store/github'
 import { SCOPES_HELP } from '../../lib/github-auth'
 import { ConnectCard } from '../github/ConnectCard'
@@ -270,36 +273,115 @@ function ModelsTab() {
   )
 }
 
-function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onCancel: () => void }) {
+/** Exported for the smoke test's SSR render checks. */
+export function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onCancel: () => void }) {
+  // Provider comes first: the Model ID field stays disabled until one is picked.
+  const [provider, setProvider] = useState<AddableProvider | null>(null)
   const [label, setLabel] = useState('')
-  const [provider, setProvider] = useState<Exclude<ProviderId, 'mock'>>('openai')
   const [apiModel, setApiModel] = useState('')
   const [baseURL, setBaseURL] = useState('')
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [catalogInfo, setCatalogInfo] = useState<{ in?: number; out?: number; ctx?: number }>({})
+  // Track which fields the picker filled so provider switches only clear
+  // auto-filled values, never something the user typed by hand.
+  const labelAuto = useRef(false)
+  const urlAuto = useRef(false)
+
+  const changeProvider = (p: AddableProvider) => {
+    if (p === provider) return
+    setProvider(p)
+    // A model ID from the old provider is meaningless for the new one.
+    setApiModel('')
+    setCatalogInfo({})
+    setLabel((l) => {
+      if (labelAuto.current || !l.trim()) {
+        labelAuto.current = false
+        return ''
+      }
+      return l
+    })
+    setBaseURL((u) => {
+      if (urlAuto.current || !u.trim()) {
+        urlAuto.current = false
+        return ''
+      }
+      return u
+    })
+  }
+
+  const pickModel = (m: CatalogModel) => {
+    setApiModel(m.apiModel)
+    setCatalogInfo({ in: m.costPer1kIn, out: m.costPer1kOut, ctx: m.contextWindow })
+    setLabel((l) => {
+      if (labelAuto.current || !l.trim()) {
+        labelAuto.current = true
+        return m.label
+      }
+      return l
+    })
+    setBaseURL((u) => {
+      if (urlAuto.current) return m.baseURL ?? ''
+      if (!u.trim() && m.baseURL) {
+        urlAuto.current = true
+        return m.baseURL
+      }
+      return u
+    })
+    setPickerOpen(false)
+  }
 
   return (
     <div className="add-model-form">
-      <FieldRow label="Display name">
-        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="GPT-4o mini" />
+      <FieldRow
+        label="Provider"
+        hint="Pick this first — it unlocks the Model ID field"
+      >
+        <ProviderCombobox value={provider} onChange={changeProvider} />
       </FieldRow>
-      <FieldRow label="Provider">
-        <select value={provider} onChange={(e) => setProvider(e.target.value as typeof provider)}>
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="google">Google Gemini</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="openai-compatible">OpenAI-compatible (custom URL)</option>
-        </select>
-      </FieldRow>
-      <FieldRow label="Model ID">
+      <FieldRow
+        label="Model ID"
+        hint={
+          provider
+            ? 'Click the field to browse curated high-context coding models, or type any ID'
+            : 'Enabled once a provider is selected'
+        }
+      >
         <input
           value={apiModel}
-          onChange={(e) => setApiModel(e.target.value)}
-          placeholder={provider === 'openrouter' ? 'openrouter/auto or vendor/model' : 'gpt-4o-mini'}
+          disabled={!provider}
+          placeholder={provider ? 'Click to browse models…' : 'Select a provider first'}
+          className="model-id-input"
+          spellCheck={false}
+          onChange={(e) => {
+            setApiModel(e.target.value)
+            labelAuto.current = false
+            setCatalogInfo({})
+          }}
+          onClick={() => {
+            if (provider) setPickerOpen(true)
+          }}
+        />
+      </FieldRow>
+      <FieldRow label="Display name">
+        <input
+          value={label}
+          onChange={(e) => {
+            setLabel(e.target.value)
+            labelAuto.current = false
+          }}
+          placeholder="e.g. Claude Opus 4.8"
         />
       </FieldRow>
       {provider === 'openai-compatible' && (
-        <FieldRow label="Base URL">
-          <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://…/v1" />
+        <FieldRow label="Base URL" hint="Any OpenAI-compatible endpoint (DeepSeek, Z.ai, Groq, Ollama…)">
+          <input
+            value={baseURL}
+            onChange={(e) => {
+              setBaseURL(e.target.value)
+              urlAuto.current = false
+            }}
+            placeholder="https://…/v1"
+          />
         </FieldRow>
       )}
       <div className="msg-edit-actions">
@@ -308,8 +390,9 @@ function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onC
         </button>
         <button
           className="btn primary"
-          disabled={!label.trim() || !apiModel.trim()}
-          onClick={() =>
+          disabled={!provider || !label.trim() || !apiModel.trim()}
+          onClick={() => {
+            if (!provider) return
             onAdd({
               id: uid('model'),
               label: label.trim(),
@@ -317,13 +400,20 @@ function AddModelForm({ onAdd, onCancel }: { onAdd: (def: ModelDef) => void; onC
               apiModel: apiModel.trim(),
               baseURL: baseURL.trim() || undefined,
               enabled: true,
+              costPer1kIn: catalogInfo.in,
+              costPer1kOut: catalogInfo.out,
+              contextWindow: catalogInfo.ctx,
             })
-          }
+          }}
           type="button"
         >
           Add model
         </button>
       </div>
+
+      {provider && (
+        <ModelPickerModal open={pickerOpen} provider={provider} onClose={() => setPickerOpen(false)} onPick={pickModel} />
+      )}
     </div>
   )
 }
