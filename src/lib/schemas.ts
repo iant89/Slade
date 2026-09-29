@@ -311,6 +311,9 @@ export const conversationSchema = z.object({
   updatedAt: z.number(),
   modelId: z.string().optional(),
   agentEnabled: z.boolean().optional(),
+  // Tolerant on purpose: the loader drops the WHOLE conversation list when any
+  // one entry fails validation, so a mangled flag must degrade to "active".
+  archived: z.boolean().optional().catch(undefined),
   messages: z.array(messageSchema),
 })
 

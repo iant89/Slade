@@ -114,9 +114,11 @@ export const useUI = create<UIState>((set) => ({
     set((st) => {
       const toast: Toast = { ...t, id: uid('toast') }
       const toasts = [...st.toasts, toast].slice(-4)
+      // An error needs reading time; a toast with a button needs pressing time.
+      const lifetime = t.kind === 'error' || t.action ? 7000 : 4200
       setTimeout(() => {
         useUI.setState((s) => ({ toasts: s.toasts.filter((x) => x.id !== toast.id) }))
-      }, t.kind === 'error' ? 7000 : 4200)
+      }, lifetime)
       return { toasts }
     }),
   dismissToast: (id) => set((st) => ({ toasts: st.toasts.filter((t) => t.id !== id) })),

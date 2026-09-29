@@ -322,6 +322,13 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
   drag-and-drop & paste-to-attach, slash shortcuts (`/system`, `/model`, `/agent`,
   `/sample`, `/new`)
 - Stop generation at any time — partial answers are kept
+- **Rename or archive a conversation**: click its name in the header (or hover a sidebar
+  row and press **⋯**, or right-click the row) for a menu with *Rename* and *Archive*.
+  Archived chats collapse into an **Archived** group at the bottom of the sidebar — search
+  still finds them — and come back with *Unarchive*, the **Undo** on the "archived" toast,
+  or simply by sending a message in them. Renaming and archiving don't count as activity,
+  so they never change a chat's time or its place in the list. Double-click the header
+  name to rename it directly.
 
 ## Settings (Ctrl/Cmd + ,)
 
@@ -462,8 +469,8 @@ src/
   components/   chat (incl. the orchestrator plan card and roadmap timeline), artifacts,
                 settings, layout, github, common
   lib/          mime classification, csv, clipboard, schemas, storage,
-                roadmap (parse · diff · timeline), local file system,
-                github (REST client, device flow, publish payloads)
+                roadmap (parse · diff · timeline), popup-menu placement,
+                local file system, github (REST client, device flow, publish payloads)
 scripts/
   smoke.ts                  headless test suite
   github-oauth-relay.ts     the two OAuth calls, proxied for dev/preview

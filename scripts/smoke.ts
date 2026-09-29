@@ -24,7 +24,7 @@ if (typeof URL.createObjectURL !== 'function') {
 }
 
 import { useSettings } from '../src/store/settings'
-import { useChat } from '../src/store/chat'
+import { firstActiveId, hydrateConversations, MAX_TITLE_LENGTH, normalizeTitle, useChat } from '../src/store/chat'
 import { cooldownMsFor, useHealth } from '../src/store/health'
 import { sendUserMessage, stopGeneration } from '../src/engine/send'
 import { classifyHttp } from '../src/providers/base'
@@ -116,7 +116,7 @@ import {
   snapshotRoadmapFiles,
   tickFirstOpenStep,
 } from '../src/lib/roadmap'
-import type { Artifact, FsFile, RoadmapReport } from '../src/types'
+import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../src/types'
 // The browser build of react-dom/server avoids the `stream` require that the
 // node build does, which esbuild cannot bundled for ESM.
 import { renderToString } from 'react-dom/server.browser'
@@ -126,6 +126,11 @@ import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
 import { RoadmapTimeline } from '../src/components/chat/RoadmapTimeline'
+import { Toasts } from '../src/components/common/Toasts'
+import { archiveWithUndo, unarchiveWithToast } from '../src/components/layout/ConversationMenu'
+import { Header } from '../src/components/layout/Header'
+import { Sidebar } from '../src/components/layout/Sidebar'
+import { MENU_GAP, MENU_MARGIN, placeMenu, type MenuAnchor } from '../src/lib/menuPlacement'
 import { AddModelForm, ProviderTokenManager } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
 import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
@@ -3933,6 +3938,420 @@ async function testRoadmapFromGitHub() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Conversation menu: rename + archive                                  */
+/* ------------------------------------------------------------------ */
+
+const convFixture = (id: string, title: string, updatedAt: number, extra: Partial<Conversation> = {}): Conversation => ({
+  id,
+  title,
+  createdAt: updatedAt,
+  updatedAt,
+  messages: [],
+  ...extra,
+})
+
+const chatMessage = (conversationId: string, role: 'user' | 'assistant', content: string): Message => ({
+  id: `${conversationId}-${role}-${content.length}`,
+  role,
+  conversationId,
+  content,
+  createdAt: 1,
+  status: 'complete',
+})
+
+/** Replace the store's conversations with `list` (same order) and open `openId`. */
+function seedConversations(list: Conversation[], openId?: string) {
+  useChat.getState().clearAllConversations()
+  // importConversations puts each newcomer first, so feed the list back to front.
+  useChat.getState().importConversations([...list].reverse())
+  if (openId !== undefined) useChat.getState().selectConversation(openId)
+}
+
+function testConversationHelpers() {
+  console.log('conversation helpers (titles · hydrate · schema · menu placement):')
+
+  /* --- normalizeTitle ---------------------------------------------------- */
+  check('normalizeTitle collapses runs of spaces, newlines and tabs', normalizeTitle('  a \n b\t\tc  ') === 'a b c', normalizeTitle('  a \n b\t\tc  '))
+  check('normalizeTitle: blank → "" (which means "keep the old title")', normalizeTitle('  \n\t ') === '' && normalizeTitle('') === '')
+  check('normalizeTitle leaves an ordinary title alone', normalizeTitle('Trip planning: Lisbon') === 'Trip planning: Lisbon')
+  check(`normalizeTitle caps at ${MAX_TITLE_LENGTH} characters`, normalizeTitle('x'.repeat(500)).length === MAX_TITLE_LENGTH)
+  const emoji = normalizeTitle('😀'.repeat(400))
+  check(
+    'normalizeTitle cuts by code point, never through the middle of an emoji',
+    Array.from(emoji).length === MAX_TITLE_LENGTH && Array.from(emoji).every((c) => c === '😀') && !/[\ud800-\udbff](?![\udc00-\udfff])/.test(emoji),
+  )
+  check(
+    'normalizeTitle trims a space exposed by the cut',
+    normalizeTitle('a'.repeat(MAX_TITLE_LENGTH - 1) + ' tail') === 'a'.repeat(MAX_TITLE_LENGTH - 1),
+  )
+
+  /* --- firstActiveId ----------------------------------------------------- */
+  const rec = { a: convFixture('a', 'A', 30, { archived: true }), b: convFixture('b', 'B', 20), c: convFixture('c', 'C', 10) }
+  check('firstActiveId skips archived conversations', firstActiveId(['a', 'b', 'c'], rec) === 'b')
+  check('firstActiveId honours `except`', firstActiveId(['a', 'b', 'c'], rec, 'b') === 'c')
+  check('firstActiveId → "" when everything is archived or excluded', firstActiveId(['a'], rec) === '' && firstActiveId(['b'], rec, 'b') === '')
+  check('firstActiveId ignores ids missing from the record', firstActiveId(['ghost', 'c'], rec) === 'c')
+
+  /* --- hydrateConversations ---------------------------------------------- */
+  const asStored = (list: unknown[]) => JSON.parse(JSON.stringify(list)) as unknown
+  const legacy = hydrateConversations(asStored([convFixture('old', 'Legacy', 5), convFixture('new', 'Newer', 9)]))
+  check(
+    'a conversation saved before archiving existed loads as active',
+    legacy.conversations.old?.archived === undefined && legacy.order.join() === 'new,old' && legacy.currentId === 'new',
+  )
+  const newestArchived = hydrateConversations(asStored([convFixture('old', 'Old', 5), convFixture('arch', 'Newest but archived', 99, { archived: true })]))
+  check(
+    'startup opens the newest ACTIVE conversation, not an archived one',
+    newestArchived.currentId === 'old' && newestArchived.order[0] === 'arch' && newestArchived.conversations.arch?.archived === true,
+    JSON.stringify({ cur: newestArchived.currentId, order: newestArchived.order }),
+  )
+  const allArchived = hydrateConversations(asStored([convFixture('x', 'X', 5, { archived: true })]))
+  check('everything archived → no open conversation (the empty state)', allArchived.currentId === '' && allArchived.order.join() === 'x')
+  const mangledList = asStored([convFixture('m', 'Mangled', 9), convFixture('n', 'Fine', 4)]) as Array<Record<string, unknown>>
+  mangledList[0]!.archived = 'yes please'
+  const mangled = hydrateConversations(mangledList)
+  check(
+    'a mangled archived flag degrades to "active" and keeps EVERY conversation',
+    mangled.order.length === 2 && mangled.conversations.m?.archived === undefined && mangled.currentId === 'm',
+    JSON.stringify(mangled.order),
+  )
+  check('archived:false (e.g. from an export) means active', hydrateConversations(asStored([convFixture('f', 'False', 5, { archived: false })])).currentId === 'f')
+  check(
+    'garbage in storage → empty state, no throw',
+    hydrateConversations('nope').order.length === 0 && hydrateConversations(null).currentId === '' && hydrateConversations([{ id: 1 }]).order.length === 0,
+  )
+
+  /* --- schema ------------------------------------------------------------ */
+  const base = { id: 'c', title: 't', createdAt: 1, updatedAt: 1, messages: [] }
+  const withFlag = (archived: unknown) => conversationSchema.safeParse({ ...base, archived })
+  check('schema keeps archived:true', withFlag(true).success && withFlag(true).data?.archived === true)
+  check('schema keeps archived:false', withFlag(false).data?.archived === false)
+  const absent = conversationSchema.safeParse(base)
+  check('schema: an absent flag stays absent', absent.success && !('archived' in absent.data))
+  const bad = withFlag('yes')
+  check('schema: a mangled flag is dropped but the conversation still parses', bad.success && bad.data.archived === undefined)
+  const bundle = exportBundleSchema.safeParse({ app: 'slade', version: 1, exportedAt: 1, conversations: [{ ...base, archived: true }] })
+  check('an export bundle round-trips archived', bundle.success && bundle.data.conversations?.[0]?.archived === true, JSON.stringify(bundle.error?.issues.slice(0, 2)))
+
+  /* --- placeMenu --------------------------------------------------------- */
+  const VP = { width: 1000, height: 700 }
+  const MENU = { width: 200, height: 80 }
+  const rectAt = (left: number, top: number, w = 30, h = 30) => ({ left, top, right: left + w, bottom: top + h })
+
+  const below = placeMenu({ kind: 'rect', rect: rectAt(100, 50) }, MENU, VP)
+  check('a button with room below: the menu drops just under it, left edges aligned', below.left === 100 && below.top === 50 + 30 + MENU_GAP && !below.flipped, JSON.stringify(below))
+  const endAligned = placeMenu({ kind: 'rect', rect: rectAt(400, 50), align: 'end' }, MENU, VP)
+  check('align "end" lines the right edges up', endAligned.left === 430 - 200 && endAligned.top === below.top, JSON.stringify(endAligned))
+  const low = placeMenu({ kind: 'rect', rect: rectAt(100, 640) }, MENU, VP)
+  check('too low to drop down → flips above the button', low.flipped && low.top === 640 - MENU_GAP - MENU.height, JSON.stringify(low))
+  const shortMoreBelow = placeMenu({ kind: 'rect', rect: rectAt(100, 10, 30, 20) }, MENU, { width: 1000, height: 100 })
+  check('fits nowhere, more room below → stays below but is pulled back on-screen', !shortMoreBelow.flipped && shortMoreBelow.top === 100 - 80 - MENU_MARGIN, JSON.stringify(shortMoreBelow))
+  const shortMoreAbove = placeMenu({ kind: 'rect', rect: rectAt(100, 80, 30, 16) }, MENU, { width: 1000, height: 100 })
+  check('fits nowhere, more room above → flips and is pulled back on-screen', shortMoreAbove.flipped && shortMoreAbove.top === MENU_MARGIN, JSON.stringify(shortMoreAbove))
+  check('a button hanging off the left edge is clamped to the margin', placeMenu({ kind: 'rect', rect: rectAt(-50, 50) }, MENU, VP).left === MENU_MARGIN)
+  check('a button at the far right is clamped so the menu stays inside', placeMenu({ kind: 'rect', rect: rectAt(950, 50, 40) }, MENU, VP).left === 1000 - 200 - MENU_MARGIN)
+  check('align "end" near the left edge is clamped to the margin', placeMenu({ kind: 'rect', rect: rectAt(0, 50), align: 'end' }, MENU, VP).left === MENU_MARGIN)
+
+  const pt = placeMenu({ kind: 'point', x: 100, y: 100 }, MENU, VP)
+  check('right-click: the menu corner sits on the pointer', pt.left === 100 && pt.top === 100 && !pt.flipped)
+  const ptRight = placeMenu({ kind: 'point', x: 900, y: 100 }, MENU, VP)
+  check('right-click near the right edge mirrors to the pointer’s left', ptRight.left === 700 && ptRight.top === 100, JSON.stringify(ptRight))
+  const ptBottom = placeMenu({ kind: 'point', x: 100, y: 650 }, MENU, VP)
+  check('right-click near the bottom mirrors upward', ptBottom.top === 570 && ptBottom.flipped, JSON.stringify(ptBottom))
+  const ptCorner = placeMenu({ kind: 'point', x: 990, y: 690 }, MENU, VP)
+  check('right-click in the corner mirrors both ways', ptCorner.left === 790 && ptCorner.top === 610, JSON.stringify(ptCorner))
+  const tiny = placeMenu({ kind: 'point', x: 10, y: 10 }, MENU, { width: 150, height: 50 })
+  check('a window smaller than the menu: the top-left edge wins, no NaN', tiny.left === MENU_MARGIN && tiny.top === MENU_MARGIN, JSON.stringify(tiny))
+
+  // Property check: wherever a button or the pointer is, a menu that fits ends up fully inside the window.
+  let seed = 12345
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0
+    return seed / 2 ** 32
+  }
+  let escaped = 0
+  let notBelow = 0
+  let cases = 0
+  for (let i = 0; i < 3000; i++) {
+    const vw = 300 + rnd() * 1500
+    const vh = 200 + rnd() * 900
+    const mw = 120 + rnd() * 200
+    const mh = 40 + rnd() * 150
+    if (mw > vw - 2 * MENU_MARGIN || mh > vh - 2 * MENU_MARGIN) continue
+    cases++
+    const x = rnd() * vw
+    const y = rnd() * vh
+    const w = 16 + rnd() * 60
+    const h = 16 + rnd() * 30
+    const anchor: MenuAnchor =
+      rnd() < 0.5
+        ? { kind: 'point', x, y }
+        : { kind: 'rect', rect: { left: x, top: y, right: x + w, bottom: y + h }, align: rnd() < 0.5 ? 'start' : 'end' }
+    const p = placeMenu(anchor, { width: mw, height: mh }, { width: vw, height: vh })
+    const inside = p.left >= MENU_MARGIN - 1e-9 && p.top >= MENU_MARGIN - 1e-9 && p.left + mw <= vw - MENU_MARGIN + 1e-9 && p.top + mh <= vh - MENU_MARGIN + 1e-9
+    if (!inside) escaped++
+    if (anchor.kind === 'rect' && anchor.rect.bottom + MENU_GAP + mh <= vh - MENU_MARGIN) {
+      if (p.flipped || Math.abs(p.top - (anchor.rect.bottom + MENU_GAP)) > 1e-9) notBelow++
+    }
+  }
+  check(`${cases} random anchors: the menu always lands fully inside the window`, escaped === 0, `${escaped} escaped`)
+  check('…and a button with room below always gets the menu directly below it', notBelow === 0, `${notBelow} misplaced`)
+}
+
+async function testConversationArchive() {
+  console.log('archive · rename (store):')
+  const T0 = 1_000_000
+  const list = () => [
+    convFixture('a', 'Alpha', T0 + 4),
+    convFixture('b', 'Beta', T0 + 3),
+    convFixture('c', 'Gamma', T0 + 2),
+    convFixture('d', 'Delta', T0 + 1),
+  ]
+  const st = () => useChat.getState()
+  const conv = (id: string) => useChat.getState().conversations[id]
+  const hasFlag = (id: string) => Boolean(conv(id) && 'archived' in conv(id)!)
+
+  /* --- archive ------------------------------------------------------------ */
+  seedConversations(list(), 'a')
+  check('seed: order and open chat are as expected', st().order.join() === 'a,b,c,d' && st().currentId === 'a')
+  st().archiveConversation('c')
+  check('archive sets the flag', conv('c')?.archived === true)
+  check('archive keeps the order (it stays in the list, just not in the main group)', st().order.join() === 'a,b,c,d')
+  check('archive is not chat activity: updatedAt is untouched', conv('c')?.updatedAt === T0 + 2, String(conv('c')?.updatedAt))
+  check('archiving a chat that is not open leaves the open chat open', st().currentId === 'a')
+  const snapshot = st().conversations
+  st().archiveConversation('c')
+  check('archiving twice is a no-op (same state object)', st().conversations === snapshot)
+  st().archiveConversation('nope')
+  check('archiving an unknown id is a no-op', st().conversations === snapshot)
+
+  st().archiveConversation('a')
+  check('archiving the OPEN chat moves the view to the next active one', st().currentId === 'b', st().currentId)
+  st().archiveConversation('b')
+  check('…skipping archived chats (c is archived) → d', st().currentId === 'd', st().currentId)
+  st().archiveConversation('d')
+  check('archiving the last active chat leaves no open chat (the empty state)', st().currentId === '')
+  check('all four are flagged', ['a', 'b', 'c', 'd'].every((id) => conv(id)?.archived === true))
+
+  /* --- unarchive ---------------------------------------------------------- */
+  st().unarchiveConversation('c')
+  check('unarchive removes the flag entirely (not archived:false)', conv('c') !== undefined && !hasFlag('c'))
+  check('unarchive keeps updatedAt', conv('c')?.updatedAt === T0 + 2)
+  check('unarchiving does not open the chat', st().currentId === '')
+  const beforeNoop = st().conversations
+  st().unarchiveConversation('c')
+  check('unarchiving an active chat is a no-op', st().conversations === beforeNoop)
+
+  /* --- rename ------------------------------------------------------------- */
+  seedConversations(list(), 'a')
+  st().renameConversation('b', '  New\n name  ')
+  check('rename normalises whitespace', conv('b')?.title === 'New name', conv('b')?.title)
+  check('rename is not chat activity: updatedAt is untouched', conv('b')?.updatedAt === T0 + 3)
+  check('rename does not reorder the list', st().order.join() === 'a,b,c,d')
+  const renamed = st().conversations
+  st().renameConversation('b', '   ')
+  check('a blank name is ignored', conv('b')?.title === 'New name' && st().conversations === renamed)
+  st().renameConversation('b', 'New name')
+  check('renaming to the same name is a no-op', st().conversations === renamed)
+  st().renameConversation('ghost', 'x')
+  check('renaming an unknown id is a no-op', st().conversations === renamed)
+  st().renameConversation('b', 'y'.repeat(300))
+  check(`an over-long name is capped at ${MAX_TITLE_LENGTH}`, conv('b')?.title.length === MAX_TITLE_LENGTH)
+  st().renameConversation('c', 'Renamed and archived')
+  st().archiveConversation('c')
+  check('an archived chat can be renamed and stays archived', conv('c')?.title === 'Renamed and archived' && conv('c')?.archived === true)
+
+  /* --- writing to an archived chat ---------------------------------------- */
+  seedConversations(list(), 'a')
+  st().archiveConversation('c')
+  st().appendMessage(chatMessage('c', 'assistant', 'a late reply'))
+  check('a reply landing after the user archived the chat does NOT un-archive it', conv('c')?.archived === true)
+  st().appendMessage(chatMessage('c', 'user', 'hello again'))
+  check('a new USER message brings an archived chat back to the main list', conv('c') !== undefined && !hasFlag('c'))
+  check('…and that is activity: updatedAt moves forward', (conv('c')?.updatedAt ?? 0) > T0 + 2)
+  check('…with every message kept', conv('c')?.messages.length === 2)
+
+  /* --- delete / import ------------------------------------------------------ */
+  seedConversations(list(), 'b')
+  st().archiveConversation('a')
+  st().deleteConversation('b')
+  check('deleting the open chat falls back to an ACTIVE one, never an archived one', st().currentId === 'c', st().currentId)
+  st().deleteConversation('a')
+  check('deleting an archived chat leaves the open chat alone', st().currentId === 'c')
+  seedConversations([convFixture('x', 'X', 5, { archived: true }), convFixture('y', 'Y', 4)], 'y')
+  st().deleteConversation('y')
+  check('deleting the last active chat opens nothing when only archived ones remain', st().currentId === '')
+
+  st().clearAllConversations()
+  st().importConversations([convFixture('i1', 'I1', 5, { archived: true })])
+  check('importing only archived chats opens nothing', st().currentId === '')
+  st().importConversations([convFixture('i2', 'I2', 6)])
+  check('…and then importing an active one opens it', st().currentId === 'i2')
+
+  /* --- persistence ---------------------------------------------------------- */
+  seedConversations(list(), 'a')
+  st().archiveConversation('b')
+  await new Promise((r) => setTimeout(r, 500)) // the store persists on a 350ms debounce
+  const stored = () => JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]') as Conversation[]
+  check(
+    'the archived flag is written to storage',
+    stored().find((c) => c.id === 'b')?.archived === true && stored().find((c) => c.id === 'a')?.archived === undefined,
+  )
+  const reloaded = hydrateConversations(stored())
+  check('…and survives a reload', reloaded.conversations.b?.archived === true && reloaded.currentId === 'a')
+  check('…without changing its time', reloaded.conversations.b?.updatedAt === T0 + 3)
+  st().unarchiveConversation('b')
+  await new Promise((r) => setTimeout(r, 500))
+  check('un-archiving removes the flag from storage too', !('archived' in stored().find((c) => c.id === 'b')!))
+  check('storage still validates against the schema', z.array(conversationSchema).safeParse(stored()).success)
+  st().clearAllConversations()
+}
+
+/**
+ * Server rendering reads each store's *initial* state (see testGitHubUiRenders), so
+ * mirror the live chat and UI state into it for one render, then put it back.
+ */
+function renderWithLiveState(el: Parameters<typeof renderToString>[0]): string {
+  const stores = [useChat, useUI] as const
+  const inits = stores.map((st) => st.getInitialState() as unknown as Record<string, unknown>)
+  const originals = inits.map((init) => ({ ...init }))
+  stores.forEach((st, n) => Object.assign(inits[n]!, st.getState()))
+  try {
+    return renderToString(el).replace(/<!-- -->/g, '')
+  } finally {
+    inits.forEach((init, n) => {
+      for (const k of Object.keys(init)) delete init[k]
+      Object.assign(init, originals[n])
+    })
+  }
+}
+
+function testConversationMenuUi() {
+  console.log('conversation menu UI:')
+  const html = renderWithLiveState
+  const T0 = 1_000_000
+  const tag = (markup: string, cls: string) => new RegExp(`<button[^>]*class="${cls}"[^>]*>`).exec(markup)?.[0] ?? ''
+  const tags = (markup: string, cls: string) => markup.match(new RegExp(`<button[^>]*class="[^"]*${cls}[^"]*"[^>]*>`, 'g')) ?? []
+
+  /* --- sidebar -------------------------------------------------------------- */
+  seedConversations(
+    [
+      convFixture('a', 'Alpha chat', T0 + 4),
+      convFixture('b', 'Beta <img src=x onerror=alert(1)>', T0 + 3),
+      convFixture('c', 'Gamma archived', T0 + 2, { archived: true }),
+      convFixture('d', 'Delta archived', T0 + 1, { archived: true }),
+    ],
+    'a',
+  )
+  const side = html(createElement(Sidebar))
+  check('the main list shows the active chats', side.includes('Alpha chat') && side.includes('Beta '))
+  check('archived chats are not in the main list', !side.includes('Gamma archived') && !side.includes('Delta archived'))
+  const head = tag(side, 'conv-group-head')
+  check('an Archived group is offered, with a spoken count', head.includes('aria-label="Archived, 2 conversations"'), head)
+  check('…collapsed by default, wired to its list', head.includes('aria-expanded="false"') && head.includes('aria-controls="conv-archived-list"'))
+  check('…and clickable when not searching', !head.includes('disabled'))
+  check('the count is shown', /conv-count">2</.test(side))
+
+  const options = tags(side, 'conv-menu-btn')
+  check('each visible row has an options button', options.length === 2, String(options.length))
+  check('…that announces a menu popup, closed', options.every((b) => b.includes('aria-haspopup="menu"') && b.includes('aria-expanded="false"')))
+  check('…and says which conversation it belongs to', options[0]?.includes('aria-label="Options for Alpha chat"') === true, options[0])
+  check('each row also has its own delete button', tags(side, 'conv-delete').length === 2)
+  check('rows are containers with sibling buttons, not role="button" wrappers around buttons', !side.includes('role="button"'))
+  check('exactly the open chat is marked aria-current', (side.match(/aria-current="true"/g) ?? []).length === 1)
+  check('titles are escaped: no markup gets injected', !side.includes('<img') && side.includes('Beta &lt;img'))
+
+  seedConversations([convFixture('x', 'Only archived', T0, { archived: true })])
+  const allArchived = html(createElement(Sidebar))
+  check('everything archived → says so and still offers the group', allArchived.includes('Everything is archived.') && allArchived.includes('conv-group-head'))
+  useChat.getState().clearAllConversations()
+  check('no conversations → the plain empty message', html(createElement(Sidebar)).includes('No conversations yet.'))
+
+  /* --- header ---------------------------------------------------------------- */
+  seedConversations([convFixture('a', 'Alpha chat', T0 + 4), convFixture('c', 'Gamma archived', T0 + 2, { archived: true })], 'a')
+  const header = html(createElement(Header))
+  const titleBtn = tag(header, 'header-title-btn')
+  check('the header name is a button that announces a menu', titleBtn.includes('aria-haspopup="menu"') && titleBtn.includes('aria-expanded="false"'), titleBtn)
+  check('…named for the conversation', titleBtn.includes('aria-label="Conversation options: Alpha chat"'))
+  check('an active chat has no Archived badge', !header.includes('header-badge'))
+  useChat.getState().selectConversation('c')
+  const archivedHeader = html(createElement(Header))
+  check('an archived chat that is open shows the Archived badge', archivedHeader.includes('header-badge') && archivedHeader.includes('>Archived<'))
+  useChat.getState().clearAllConversations()
+  const noneHeader = html(createElement(Header))
+  check('no conversation → a plain "Slade" title and no menu button', !noneHeader.includes('header-title-btn') && noneHeader.includes('>Slade<'))
+
+  /* --- archive with undo (toasts) ---------------------------------------------- */
+  const toasts = () => useUI.getState().toasts
+  seedConversations([convFixture('a', 'Alpha chat', T0 + 4), convFixture('b', 'Beta', T0 + 3), convFixture('c', 'A'.repeat(90), T0 + 2)], 'a')
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('a')
+  const t1 = toasts()[0]
+  check('archiving raises a success toast', toasts().length === 1 && t1?.kind === 'success' && t1.title === 'Conversation archived')
+  check('…that says which chat and where it went', t1?.detail?.includes('“Alpha chat”') === true && t1.detail.includes('Archived in the sidebar'), t1?.detail)
+  check('…with an Undo action', t1?.action?.label === 'Undo')
+  check('the open chat moved on to the next one', useChat.getState().currentId === 'b')
+  t1?.action?.onClick()
+  check('Undo restores the chat AND the view (it was the open one)', useChat.getState().conversations.a?.archived === undefined && useChat.getState().currentId === 'a')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('b')
+  useChat.getState().selectConversation('c') // the user moved on before pressing Undo
+  toasts()[0]?.action?.onClick()
+  check('Undo for a chat that was not open does not yank the view back', useChat.getState().conversations.b?.archived === undefined && useChat.getState().currentId === 'c')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('c')
+  const longDetail = toasts()[0]?.detail ?? ''
+  check('a long title is shortened inside the toast', longDetail.includes('…') && longDetail.length < 90, longDetail)
+
+  seedConversations([convFixture('a', 'Alpha', T0 + 2), convFixture('b', 'Beta', T0 + 1)], 'a')
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('a')
+  useChat.getState().deleteConversation('a')
+  toasts()[0]?.action?.onClick()
+  check('Undo after the chat was deleted does nothing, and never points the view at a ghost', !useChat.getState().conversations.a && useChat.getState().currentId === 'b')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('b')
+  archiveWithUndo('b')
+  archiveWithUndo('ghost')
+  check('archiving twice, or an unknown id, raises no extra toast', toasts().length === 1)
+  useUI.setState({ toasts: [] })
+  unarchiveWithToast('nope')
+  check('unarchiving an unknown or active chat is a no-op', toasts().length === 0)
+  unarchiveWithToast('b')
+  check('unarchive raises a plain confirmation without an Undo', toasts()[0]?.title === 'Conversation restored' && toasts()[0]?.action === undefined, JSON.stringify(toasts()[0]))
+
+  /* --- the toast component ------------------------------------------------------ */
+  useUI.setState({ toasts: [] })
+  useUI.getState().toast({ kind: 'success', title: 'With button', action: { label: 'Undo', onClick: () => {} } })
+  useUI.getState().toast({ kind: 'info', title: 'Plain' })
+  const toastHtml = html(createElement(Toasts))
+  check('a toast with an action renders its button', toastHtml.includes('class="toast-action"') && toastHtml.includes('>Undo<'))
+  check('a plain toast has none', (toastHtml.match(/toast-action/g) ?? []).length === 1)
+
+  const realSetTimeout = globalThis.setTimeout
+  const delays: number[] = []
+  ;(globalThis as Record<string, unknown>).setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+    delays.push(ms ?? 0)
+    return realSetTimeout(fn, ms, ...rest)
+  }) as typeof setTimeout
+  try {
+    useUI.setState({ toasts: [] })
+    useUI.getState().toast({ kind: 'success', title: 'a', action: { label: 'Undo', onClick: () => {} } })
+    useUI.getState().toast({ kind: 'info', title: 'b' })
+    useUI.getState().toast({ kind: 'error', title: 'c' })
+  } finally {
+    ;(globalThis as Record<string, unknown>).setTimeout = realSetTimeout
+  }
+  check('a toast with a button lingers like an error (7s) so it can be pressed; a plain one goes at 4.2s', same(delays, [7000, 4200, 7000]), JSON.stringify(delays))
+
+  useUI.setState({ toasts: [] })
+  useChat.getState().clearAllConversations()
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -3980,6 +4399,9 @@ async function main() {
   await testGitLocalFsReadWriteAcross()
   await testRoadmapFromGitHub()
   testInlineThoughtsRendering()
+  testConversationHelpers()
+  await testConversationArchive()
+  testConversationMenuUi()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

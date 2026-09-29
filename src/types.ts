@@ -423,6 +423,12 @@ export interface Conversation {
   modelId?: string
   /** When true, sends go through the orchestrator agent instead of the plain chain. */
   agentEnabled?: boolean
+  /**
+   * Archived conversations are kept (and stay searchable) but leave the main
+   * sidebar list for the collapsible "Archived" group. Absent means active.
+   * Archiving never touches `updatedAt`: it is not chat activity.
+   */
+  archived?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -581,4 +587,6 @@ export interface Toast {
   kind: ToastKind
   title: string
   detail?: string
+  /** One inline button, e.g. "Undo". Clicking it runs `onClick` and dismisses the toast. */
+  action?: { label: string; onClick: () => void }
 }

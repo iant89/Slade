@@ -11,8 +11,39 @@ import { z } from 'zod'
 
 const conversationsArraySchema = z.array(conversationSchema)
 
-function hydrate(): { conversations: Record<string, Conversation>; order: string[]; currentId: string } {
-  const raw = loadRaw<unknown>(KEYS.conversations, null)
+/** Longest title the rename UI accepts (auto-titles from a prompt are ~43 characters). */
+export const MAX_TITLE_LENGTH = 120
+
+/**
+ * Collapse whitespace and newlines, trim, and cap the length (by code point, so an
+ * emoji is never cut in half). An empty result means "keep the current title".
+ */
+export function normalizeTitle(raw: string): string {
+  const t = raw.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(t)
+  return chars.length > MAX_TITLE_LENGTH ? chars.slice(0, MAX_TITLE_LENGTH).join('').trimEnd() : t
+}
+
+/** First conversation in `order` that is not archived (and is not `except`), or '' when there is none. */
+export function firstActiveId(
+  order: readonly string[],
+  conversations: Record<string, Conversation>,
+  except?: string,
+): string {
+  for (const id of order) {
+    if (id === except) continue
+    const c = conversations[id]
+    if (c && !c.archived) return id
+  }
+  return ''
+}
+
+/** Turn whatever was stored into store state. Pure, so it can be tested without a browser. */
+export function hydrateConversations(raw: unknown): {
+  conversations: Record<string, Conversation>
+  order: string[]
+  currentId: string
+} {
   let list: Conversation[] = []
   const parsed = conversationsArraySchema.safeParse(raw)
   if (parsed.success) {
@@ -29,7 +60,12 @@ function hydrate(): { conversations: Record<string, Conversation>; order: string
   const order = list
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map((c) => c.id)
-  return { conversations, order, currentId: order[0] ?? '' }
+  // Open on the newest conversation that is still in the main list, never on an archived one.
+  return { conversations, order, currentId: firstActiveId(order, conversations) }
+}
+
+function hydrate() {
+  return hydrateConversations(loadRaw<unknown>(KEYS.conversations, null))
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null
@@ -63,7 +99,15 @@ export interface ChatState {
   newConversation: (modelId?: string) => string
   selectConversation: (id: string) => void
   deleteConversation: (id: string) => void
+  /** Blank titles are ignored. Renaming is not chat activity: `updatedAt` is left alone. */
   renameConversation: (id: string, title: string) => void
+  /**
+   * Move a conversation out of the main list into the Archived group. If it is the
+   * open one, the view moves to the next active conversation (or the empty state).
+   * `updatedAt` is left alone, so its time and sort position survive a round trip.
+   */
+  archiveConversation: (id: string) => void
+  unarchiveConversation: (id: string) => void
   setConversationModel: (id: string, modelId: string | undefined) => void
   setConversationAgent: (id: string, enabled: boolean) => void
 
@@ -101,6 +145,22 @@ export const useChat = create<ChatState>((set, get) => {
     persistSoon()
   }
 
+  const setArchived = (id: string, archived: boolean) => {
+    const conv = get().conversations[id]
+    if (!conv || Boolean(conv.archived) === archived) return
+    set((st) => {
+      const cur = st.conversations[id]
+      if (!cur) return st
+      const { archived: _was, ...active } = cur
+      const conversations = { ...st.conversations, [id]: archived ? { ...cur, archived: true } : active }
+      return {
+        conversations,
+        currentId: archived && st.currentId === id ? firstActiveId(st.order, conversations, id) : st.currentId,
+      }
+    })
+    persistSoon()
+  }
+
   return {
     ...hydrate(),
 
@@ -124,19 +184,46 @@ export const useChat = create<ChatState>((set, get) => {
         const conversations = { ...st.conversations }
         delete conversations[id]
         const order = st.order.filter((x) => x !== id)
-        return { conversations, order, currentId: st.currentId === id ? (order[0] ?? '') : st.currentId }
+        return {
+          conversations,
+          order,
+          currentId: st.currentId === id ? firstActiveId(order, conversations) : st.currentId,
+        }
       })
       persistSoon()
     },
 
-    renameConversation: (id, title) => updateConv(id, (c) => ({ ...c, title })),
+    renameConversation: (id, title) => {
+      const next = normalizeTitle(title)
+      const conv = get().conversations[id]
+      if (!next || !conv || conv.title === next) return
+      set((st) => {
+        const cur = st.conversations[id]
+        return cur ? { conversations: { ...st.conversations, [id]: { ...cur, title: next } } } : st
+      })
+      persistSoon()
+    },
+
+    archiveConversation: (id) => setArchived(id, true),
+
+    unarchiveConversation: (id) => setArchived(id, false),
 
     setConversationModel: (id, modelId) => updateConv(id, (c) => ({ ...c, modelId })),
 
     setConversationAgent: (id, enabled) => updateConv(id, (c) => ({ ...c, agentEnabled: enabled })),
 
     appendMessage: (msg) =>
-      updateConv(msg.conversationId, (c) => ({ ...c, messages: [...c.messages, msg] })),
+      updateConv(msg.conversationId, (c) => {
+        const messages = [...c.messages, msg]
+        // Writing to an archived chat brings it back to the main list. Only a USER message
+        // does: a reply that finishes streaming after the user archived the chat must not
+        // silently undo that.
+        if (msg.role === 'user' && c.archived) {
+          const { archived: _was, ...active } = c
+          return { ...active, messages }
+        }
+        return { ...c, messages }
+      }),
 
     updateMessage: (id, patch) => {
       set((st) => {
@@ -230,7 +317,7 @@ export const useChat = create<ChatState>((set, get) => {
           if (!conversations[c.id]) order.unshift(c.id)
           conversations[c.id] = c
         }
-        const currentId = st.currentId || order[0] || ''
+        const currentId = st.currentId || firstActiveId(order, conversations)
         return { conversations, order, currentId }
       })
       persistSoon()
