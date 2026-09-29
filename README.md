@@ -83,7 +83,10 @@ orchestration, and everything is persisted with the message.
 - A step that fails on every candidate doesn't sink the run — the orchestrator is told
   and works around it (if *every* step dies, the run fails loudly, with reasons).
 - If the orchestrator's plan comes back malformed, it gets one repair pass; failing
-  that, Slade falls back to a single execution step and says so on the card.
+  that, Slade falls back to a single execution step and says so on the card. Replies that
+  are only *nearly* JSON — a worker prompt typed as a real multi-line string, a trailing
+  comma, a regex or path that lost its backslash — are repaired in place instead, so the
+  reformat pass is reserved for a reply that genuinely isn't a usable plan.
 - Simulators play along: with no API keys, agent mode is fully demoable — the
   built-in models produce plans, worker deliverables, and synthesis.
 

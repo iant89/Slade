@@ -509,6 +509,35 @@ function testPlannerParsing() {
   check('prose without JSON → undefined', parsePlannerReply('I would start by researching the topic.') === undefined)
   check('wrong shape → undefined', parsePlannerReply('{"mode":"surprise"}') === undefined)
   check('empty subtasks → undefined', parsePlannerReply('{"mode":"plan","subtasks":[]}') === undefined)
+
+  // Near-JSON: what a *long* planner reply drifts into. Real models "write" a
+  // multi-line worker prompt as a real multi-line string value, paste a regex
+  // that lost its doubled backslash, and leave a trailing comma behind. Each is
+  // a JSON.parse error, and each is worth repairing rather than spending
+  // another orchestrator round-trip to reformat a plan that is already complete.
+  const near = parsePlannerReply(
+    '{"mode":"plan","reply":"Two steps.",' +
+      '"subtasks":[{"title":"Build it","model":"","prompt":"ROLE: engineer\nOBJECTIVE: split on /\\s+/ and ship src/a.ts",},]}',
+  )
+  const nearPrompt = near?.mode === 'plan' ? near.subtasks[0]!.prompt : ''
+  check('a raw newline inside a string value still plans', near?.mode === 'plan', JSON.stringify(near))
+  check(
+    '…and the worker prompt keeps the line structure the model wrote',
+    nearPrompt === 'ROLE: engineer\nOBJECTIVE: split on /\\s+/ and ship src/a.ts',
+    JSON.stringify(nearPrompt),
+  )
+  check(
+    '…and a trailing comma is dropped instead of failing the plan',
+    parsePlannerReply('{"mode":"answer","answer":"ok",}')?.mode === 'answer',
+  )
+  check(
+    'a brace in the prose before the JSON does not hide the plan',
+    parsePlannerReply('Plan {see below}:\n{"mode":"answer","answer":"ok"}')?.mode === 'answer',
+  )
+  check(
+    'a truncated plan is still refused, never salvaged into half a plan',
+    parsePlannerReply('{"mode":"plan","reply":"r","subtasks":[{"title":"t","prompt":"cut off') === undefined,
+  )
 }
 
 function testWorkerResolution() {
@@ -636,6 +665,50 @@ async function testAgentMode() {
   // Restore the plain-chain defaults for later tests.
   useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
   useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+}
+
+/**
+ * The planner's near-JSON path, end to end. A first plan reply in the shape a
+ * real model actually sends it — the worker prompt typed as a real multi-line
+ * string, a regex that lost its doubled backslash, a trailing comma — must plan
+ * the run on that first call. Every miss sends the user "First plan was
+ * malformed — asking the orchestrator to reformat…" and spends an extra
+ * planning round-trip on a plan the model had already written out in full.
+ */
+async function testPlannerNearJsonRun() {
+  console.log('planner near-JSON (scripted models):')
+  const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+  const primary = 'ROLE: engineer\nOBJECTIVE: add splitWords() to src/split.ts\nCONSTRAINTS: keep /\\s+/ handling'
+  const second = 'Review src/split.ts\nand list what to fix'
+
+  await withScriptedAgent(script, async ({ seen }) => {
+    script.plans.push(
+      '{"mode":"plan","reply":"Implement, then review.",' +
+        `"subtasks":[{"title":"Implement the splitter","model":"","prompt":"${primary}"},` +
+        `{"title":"Review the splitter","model":"","prompt":"${second}",},]}`,
+    )
+    script.workers.push('Done: splitWords() added.', 'Reviewed — nothing to fix.')
+    script.synths.push('SUMMARY\nAdded the splitter.\n\nSTATUS\nCOMPLETE')
+    freshAgentConversation()
+    await sendUserMessage('add a word splitter helper', [])
+
+    const msg = lastAssistant()
+    const run = msg.agent
+    const planCalls = seen.filter((s) => s.kind === 'plan').length
+    check('run completed', msg.status === 'complete' && run?.phase === 'complete', `${msg.status}/${run?.phase}: ${msg.error ?? ''}`)
+    check('the near-JSON plan was accepted on the first call', planCalls === 1, `${planCalls} planning calls`)
+    check('…so the card never says the plan was malformed', !run?.note, String(run?.note))
+    check(
+      '…and both subtasks ran',
+      run?.steps.length === 2 && run.steps.every((s) => s.status === 'complete'),
+      JSON.stringify(run?.steps.map((s) => s.status)),
+    )
+    check(
+      'the worker received the multi-line prompt, regex backslash and all',
+      run?.steps[0]?.prompt === primary,
+      JSON.stringify(run?.steps[0]?.prompt),
+    )
+  })
 }
 
 /* ------------------------------------------------------------------ */
@@ -4603,6 +4676,7 @@ async function main() {
   testRoadmapParsing()
   testRoadmapReport()
   await testAgentMode()
+  await testPlannerNearJsonRun()
   await testRoadmapSimulator()
   testRepoIdentifiers()
   await testGitHubClient()

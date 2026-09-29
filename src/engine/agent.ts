@@ -233,9 +233,11 @@ type PlannerReply = z.infer<typeof plannerReplySchema>
 
 /**
  * Pull the JSON object out of a planner response. Real models wrap JSON in
- * prose or fences no matter how hard the prompt forbids it, so: try the reply
- * as written, then with the wrapping fences stripped. Each attempt tries the
- * outermost braces, then a string-aware balanced scan.
+ * prose or fences no matter how hard the prompt forbids it, and the object
+ * itself is frequently only *nearly* JSON, so: try the reply as written, then
+ * with the wrapping fences stripped. Each attempt tries the outermost braces,
+ * then a string-aware balanced scan, then a repair pass (`repairNearJson`) for
+ * the near-JSON every long planner reply drifts into.
  *
  * The reply is tried as written FIRST because a direct `answer` can contain
  * code blocks and file blocks of its own; stripping every triple-backtick up
@@ -245,17 +247,42 @@ export function extractJsonObject(text: string): unknown | undefined {
   return scanJsonObject(text) ?? scanJsonObject(text.replace(/```(?:json)?/gi, ''))
 }
 
+/**
+ * How many `{`-anchored candidates one scan inspects. A reply that is mostly
+ * code has a brace every few characters; each candidate costs one bounded walk,
+ * so the cap keeps a brace-heavy reply from turning the scan into a quadratic
+ * hunt for JSON that is not there.
+ */
+const MAX_JSON_CANDIDATES = 32
+
 function scanJsonObject(source: string): unknown | undefined {
-  const start = source.indexOf('{')
-  if (start < 0) return undefined
-  const end = source.lastIndexOf('}')
-  if (end > start) {
-    try {
-      return JSON.parse(source.slice(start, end + 1))
-    } catch {
-      /* fall through to the balanced scan */
-    }
+  const first = source.indexOf('{')
+  if (first < 0) return undefined
+  // Fast path: the outermost braces hold the whole reply's JSON. It is tried
+  // once, for the first `{`, because that is the shape a compliant model sends.
+  const last = source.lastIndexOf('}')
+  if (last > first) {
+    const whole = parseJsonish(source.slice(first, last + 1))
+    if (whole !== undefined) return whole
   }
+  // Otherwise walk `{`-anchored candidates. A failed candidate is not the end
+  // of the search: a brace in the prose before the JSON (or a code block after
+  // it) must not hide the object sitting between them.
+  for (let n = 0, from = first; n < MAX_JSON_CANDIDATES; n++) {
+    const start = source.indexOf('{', from)
+    if (start < 0) return undefined
+    const balanced = balancedObject(source, start)
+    if (balanced !== undefined) {
+      const value = parseJsonish(balanced)
+      if (value !== undefined) return value
+    }
+    from = start + 1
+  }
+  return undefined
+}
+
+/** The `{…}` slice that closes the object opening at `start`, or undefined. */
+function balancedObject(source: string, start: number): string | undefined {
   let depth = 0
   let inString = false
   let escaped = false
@@ -271,16 +298,109 @@ function scanJsonObject(source: string): unknown | undefined {
     else if (ch === '{') depth++
     else if (ch === '}') {
       depth--
-      if (depth === 0) {
-        try {
-          return JSON.parse(source.slice(start, i + 1))
-        } catch {
-          return undefined
-        }
-      }
+      if (depth === 0) return source.slice(start, i + 1)
     }
   }
   return undefined
+}
+
+/**
+ * Parse one candidate slice: as written, then after the near-JSON repair.
+ * The repair's output is only used when it parses cleanly, so a reply that was
+ * already valid JSON is never rewritten.
+ */
+function parseJsonish(slice: string): unknown | undefined {
+  try {
+    return JSON.parse(slice)
+  } catch {
+    /* fall through to the repair pass */
+  }
+  const repaired = repairNearJson(slice)
+  if (repaired === undefined) return undefined
+  try {
+    return JSON.parse(repaired)
+  } catch {
+    return undefined
+  }
+}
+
+/** Escape letters JSON defines after a backslash. `u` is handled separately. */
+const SIMPLE_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't'])
+const HEX4 = /^[0-9a-fA-F]{4}$/
+
+/**
+ * Repair the three ways a planner reply ends up *nearly* JSON. Each one is a
+ * `JSON.parse` error, and each one can be fixed without guessing at what the
+ * model meant — which matters, because the fallback (one more orchestrator
+ * call asking it to reformat) costs a whole planning round-trip and buries a
+ * plan that is already complete on screen:
+ *
+ * 1. Raw control characters inside a string value. A model "writes" a
+ *    multi-line worker prompt (`ROLE: …` / `OBJECTIVE: …`) as a real
+ *    multi-line string, which JSON forbids. Escaped, it reads back as written.
+ * 2. Backslashes that are not valid escapes — `\d`, `\s`, `\w`, `C:\Users` —
+ *    from a regex or path inside a prompt string. Doubling the backslash keeps
+ *    the text the model wrote; dropping it would silently change the worker's
+ *    instructions.
+ * 3. A trailing comma before `}` or `]`, which JSON also forbids.
+ *
+ * Returns undefined when nothing needed repairing, so the caller does not
+ * re-parse an unchanged string.
+ */
+function repairNearJson(slice: string): string | undefined {
+  let out = ''
+  let inString = false
+  let changed = false
+  for (let i = 0; i < slice.length; i++) {
+    const ch = slice[i]!
+    if (!inString) {
+      if (ch === '"') {
+        inString = true
+      } else if (ch === ',') {
+        let j = i + 1
+        while (j < slice.length && /\s/.test(slice[j]!)) j++
+        if (slice[j] === '}' || slice[j] === ']') {
+          changed = true
+          continue // drop the comma, keep the whitespace
+        }
+      }
+      out += ch
+      continue
+    }
+    if (ch === '"') {
+      inString = false
+      out += ch
+      continue
+    }
+    if (ch === '\\') {
+      const next = slice[i + 1]
+      const simple = next !== undefined && SIMPLE_ESCAPES.has(next)
+      const unicode = next === 'u' && HEX4.test(slice.slice(i + 2, i + 6))
+      if (simple || unicode) {
+        const keep = unicode ? 6 : 2
+        out += slice.slice(i, i + keep)
+        i += keep - 1
+      } else {
+        out += '\\\\'
+        changed = true
+      }
+      continue
+    }
+    if (ch === '\n' || ch === '\r' || ch === '\t' || ch < ' ') {
+      out +=
+        ch === '\n'
+          ? '\\n'
+          : ch === '\r'
+            ? '\\r'
+            : ch === '\t'
+              ? '\\t'
+              : `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
+      changed = true
+      continue
+    }
+    out += ch
+  }
+  return changed ? out : undefined
 }
 
 export function parsePlannerReply(text: string): PlannerReply | undefined {
