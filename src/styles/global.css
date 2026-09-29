@@ -310,7 +310,7 @@ kbd {
 }
 .conv-actions {
   position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
-  display: flex; align-items: center; gap: 1px;
+  display: flex; align-items: center; gap: 2px;
   /* The left padding is a fade, so the buttons sit over the tail of a long title. */
   padding-left: 22px;
   background: linear-gradient(90deg, transparent, var(--row-bg) 22px);
@@ -325,10 +325,15 @@ kbd {
 .conv-actions .icon-btn:hover { color: var(--text); }
 .conv-actions .conv-delete:hover { color: var(--danger); }
 .conv-list:focus-visible { outline: none; }
-/* Touch has no hover: keep the buttons on screen and reserve their room. */
-@media (hover: none) {
-  .conv-main { padding-right: 66px; }
-  .conv-actions { opacity: 1; pointer-events: auto; padding-left: 0; background: none; }
+/* Touch has no hover: keep the buttons on screen and reserve their room. They are also
+   made finger-sized and kept well apart, because Delete has no confirmation and now sits
+   beside a button people will press far more often. */
+@media (hover: none), (pointer: coarse) {
+  .conv-main { padding-right: 104px; }
+  .conv-actions { opacity: 1; pointer-events: auto; padding-left: 0; background: none; gap: 10px; right: 4px; }
+  /* .icon-btn.small is declared later with the same weight, so match it and add one. */
+  .conv-actions .icon-btn.small { width: 40px; height: 40px; }
+  .conv-actions .icon-btn.small svg { width: 17px; height: 17px; }
 }
 
 /* Archived group */
