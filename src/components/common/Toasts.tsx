@@ -29,6 +29,19 @@ export function Toasts() {
               <span className="toast-title">{t.title}</span>
               {t.detail && <span className="toast-detail">{t.detail}</span>}
             </span>
+            {t.action ? (
+              <button
+                className="toast-action"
+                type="button"
+                onClick={() => {
+                  // Dismiss first: the action may itself raise another toast.
+                  dismiss(t.id)
+                  t.action?.onClick()
+                }}
+              >
+                {t.action.label}
+              </button>
+            ) : null}
             <button className="icon-btn" onClick={() => dismiss(t.id)} aria-label="Dismiss notification">
               <IconX size={13} />
             </button>

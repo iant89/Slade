@@ -169,6 +169,7 @@ input, textarea, select { font: inherit; color: inherit; }
   .combobox-filter input,
   .model-picker-search input,
   .header-title-input,
+  .conv-rename-input,
   .select-wrap select,
   .model-config input,
   .model-config textarea,
@@ -270,29 +271,95 @@ kbd {
 .sidebar-search::placeholder { color: var(--text-faint); }
 .conv-list { flex: 1; overflow-y: auto; padding: 2px 8px 12px; min-height: 0; }
 .conv-empty { color: var(--text-faint); text-align: center; padding: 24px 10px; font-size: 0.9em; }
+/* A row is a container with sibling buttons: select (.conv-main), then the options
+   and delete buttons (.conv-actions). --row-bg is what the actions fade in over. */
 .conv-item {
+  --row-bg: var(--bg-sidebar);
   position: relative;
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 9px 30px 9px 12px;
+  display: flex; align-items: stretch;
   border-radius: var(--radius-s);
-  cursor: pointer;
   border: 1px solid transparent;
 }
-.conv-item:hover { background: var(--bg-panel); }
-.conv-item.active { background: var(--bg-raised); border-color: var(--border); }
+.conv-item:hover, .conv-item.menu-open { --row-bg: var(--bg-panel); background: var(--row-bg); }
+.conv-item.active { --row-bg: var(--bg-raised); background: var(--row-bg); border-color: var(--border); }
+/* Archived reads as muted, but the open chat keeps its accent: .active must come last. */
+.conv-item.archived .conv-title { color: var(--text-muted); }
 .conv-item.active .conv-title { color: var(--accent-ink); }
+.conv-main {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 9px 12px;
+  text-align: left;
+  border-radius: inherit;
+}
+.conv-main:focus-visible { outline-offset: -2px; }
+.conv-main-edit { justify-content: center; cursor: default; }
 .conv-title {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 0.92em; font-weight: 500;
 }
 .conv-time { font-size: 0.74em; color: var(--text-faint); }
-.conv-delete {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  opacity: 0; transition: opacity 0.12s;
-  color: var(--text-muted);
+.conv-rename-input {
+  width: 100%; min-width: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent-dim);
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 0.92em; font-weight: 500;
+  outline: none;
 }
-.conv-item:hover .conv-delete, .conv-delete:focus-visible { opacity: 1; }
-.conv-delete:hover { color: var(--danger); }
+.conv-actions {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 2px;
+  /* The left padding is a fade, so the buttons sit over the tail of a long title. */
+  padding-left: 22px;
+  background: linear-gradient(90deg, transparent, var(--row-bg) 22px);
+  opacity: 0; transition: opacity 0.12s;
+  /* Invisible buttons must not catch clicks meant for the row. */
+  pointer-events: none;
+}
+.conv-item:hover .conv-actions,
+.conv-item.menu-open .conv-actions,
+.conv-actions:focus-within { opacity: 1; pointer-events: auto; }
+.conv-actions .icon-btn { color: var(--text-muted); }
+.conv-actions .icon-btn:hover { color: var(--text); }
+.conv-actions .conv-delete:hover { color: var(--danger); }
+.conv-list:focus-visible { outline: none; }
+/* Touch has no hover: keep the buttons on screen and reserve their room. They are also
+   made finger-sized and kept well apart, because Delete has no confirmation and now sits
+   beside a button people will press far more often. */
+@media (hover: none), (pointer: coarse) {
+  .conv-main { padding-right: 104px; }
+  .conv-actions { opacity: 1; pointer-events: auto; padding-left: 0; background: none; gap: 10px; right: 4px; }
+  /* .icon-btn.small is declared later with the same weight, so match it and add one. */
+  .conv-actions .icon-btn.small { width: 40px; height: 40px; }
+  .conv-actions .icon-btn.small svg { width: 17px; height: 17px; }
+}
+
+/* Archived group */
+.conv-group { margin-top: 10px; }
+.conv-group-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-s);
+  font-size: 0.72em; font-weight: 650;
+  letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.conv-group-head:not(:disabled):hover { color: var(--text-muted); background: var(--bg-panel); }
+.conv-group-head:disabled { cursor: default; }
+.conv-group-head svg { flex: none; transition: transform 0.14s ease; }
+.conv-group-head[aria-expanded='true'] svg { transform: rotate(90deg); }
+.conv-count {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
 .sidebar-foot {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 16px;
@@ -318,6 +385,29 @@ kbd {
 .header-title {
   font-weight: 650; font-size: 0.98em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The name is a button: click for the conversation menu (rename / archive). */
+.header-title-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-width: 0; max-width: 100%;
+  /* The negative margin keeps the text where the plain title used to sit. */
+  padding: 4px 8px; margin-left: -8px;
+  border-radius: var(--radius-s);
+  transition: background 0.12s;
+}
+.header-title-btn:hover, .header-title-btn.open { background: var(--bg-raised); }
+.header-title-caret { flex: none; color: var(--text-faint); transition: transform 0.14s ease; }
+.header-title-btn:hover .header-title-caret, .header-title-btn.open .header-title-caret { color: var(--text-muted); }
+.header-title-btn.open .header-title-caret { transform: rotate(180deg); }
+.header-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 0.68em; font-weight: 650;
+  letter-spacing: 0.06em; text-transform: uppercase;
 }
 .header-title-input {
   background: var(--bg-raised);
@@ -896,6 +986,38 @@ kbd {
   padding: 5px;
   z-index: 30;
 }
+/* Popup menu (components/common/Menu.tsx): fixed, portaled, above drawers and modals'
+   siblings but under toasts. */
+.menu {
+  position: fixed; z-index: 90;
+  min-width: 184px; max-width: min(320px, calc(100vw - 16px));
+  padding: 5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow);
+  transform-origin: top left;
+  animation: menu-pop 0.12s ease-out;
+  user-select: none; -webkit-user-select: none;
+}
+.menu.flipped { transform-origin: bottom left; }
+@keyframes menu-pop { from { opacity: 0; transform: scale(0.96) translateY(-3px); } }
+.menu-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-s);
+  text-align: left; font-size: 0.88em;
+}
+.menu-item:hover, .menu-item:focus { background: var(--bg-raised); }
+.menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.menu-item:disabled { opacity: 0.45; cursor: default; }
+.menu-item.danger { color: var(--danger); }
+.menu-item-icon { display: inline-flex; flex: none; color: var(--text-muted); }
+.menu-item:hover .menu-item-icon, .menu-item:focus .menu-item-icon { color: var(--text); }
+.menu-item.danger .menu-item-icon { color: inherit; }
+.menu-item-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 .slash-item {
   display: flex; align-items: center; gap: 10px;
   width: 100%; padding: 9px 11px;
@@ -1662,6 +1784,14 @@ input[type='range']::-moz-range-thumb {
 .toast-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .toast-title { font-size: 0.84em; font-weight: 650; }
 .toast-detail { font-size: 0.76em; color: var(--text-muted); }
+.toast-action {
+  flex: none; align-self: center;
+  padding: 5px 10px;
+  border-radius: var(--radius-s);
+  font-size: 0.82em; font-weight: 650;
+  color: var(--accent-ink);
+}
+.toast-action:hover { background: var(--bg-panel); }
 
 /* ---------- Offline ---------- */
 
@@ -2814,3 +2944,180 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 }
 .agent-fs-chip.op-delete .agent-fs-op { color: var(--danger); }
 
+/* Roadmap timeline ---------------------------------------------------
+   The completion footer of an orchestrated run: overall progress plus the
+   previous / current / next roadmap step. Built on the same tokens as the
+   plan card. Sizes are relative to the message font so density settings
+   apply; the timeline turns vertical when the chat column is narrow. */
+
+.roadmap-card {
+  container-type: inline-size;
+  margin: 14px 0 2px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-raised) 65%, transparent);
+}
+.roadmap-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  margin-bottom: 9px;
+}
+.roadmap-title {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0;
+  font-size: 0.76em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.roadmap-title svg { flex: none; }
+.roadmap-title-text { min-width: 0; overflow-wrap: anywhere; }
+.roadmap-path {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 7px; border-radius: 999px;
+  font-family: var(--font-mono); font-size: 0.95em; font-weight: 500;
+  text-transform: none; letter-spacing: 0;
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+}
+.roadmap-open { flex: none; }
+
+.roadmap-bar {
+  height: 7px; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--border-strong) 70%, transparent);
+}
+.roadmap-bar-fill {
+  display: block; height: 100%;
+  width: var(--roadmap-to, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  animation: roadmap-fill 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.roadmap-card.is-complete .roadmap-bar-fill { background: var(--ok); }
+@keyframes roadmap-fill {
+  from { width: var(--roadmap-from, 0%); }
+  to   { width: var(--roadmap-to, 0%); }
+}
+
+.roadmap-progress {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px;
+  margin-top: 6px;
+  font-size: 0.8em; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.roadmap-progress-main strong { color: var(--text); font-weight: 700; }
+.roadmap-progress-delta { color: var(--ok); font-weight: 600; }
+.roadmap-progress-delta.is-negative { color: var(--warn); }
+
+/* previous — current — next */
+.roadmap-timeline {
+  list-style: none; margin: 14px 0 0; padding: 0;
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+}
+.roadmap-node {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  min-width: 0; padding: 0 6px;
+  text-align: center;
+}
+.roadmap-dot {
+  position: relative; z-index: 1;
+  width: 22px; height: 22px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  border: 2px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-faint);
+}
+.roadmap-node.status-done .roadmap-dot {
+  border-color: var(--ok); color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, var(--bg-panel));
+}
+.roadmap-node.status-active .roadmap-dot { border-color: var(--accent); color: var(--accent-ink); }
+.roadmap-node.slot-current .roadmap-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.roadmap-node.slot-current.status-done .roadmap-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+/* "in progress": a half-filled disc */
+.roadmap-dot-half {
+  width: 10px; height: 10px; border-radius: 999px;
+  border: 1.5px solid currentColor;
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+/* Connector from a node's dot to the next node's dot. It belongs to the node
+   before it, so in the stacked layout it can run the full height of that
+   node's text. Solid once travelled, dashed while ahead. */
+.roadmap-link {
+  position: absolute; top: 10px;
+  left: calc(50% + 17px); right: calc(-50% + 17px);
+  height: 0;
+  border-top: 2px solid var(--border-strong);
+}
+.roadmap-link.is-travelled { border-top-color: var(--ok); }
+.roadmap-link.is-ahead { border-top-style: dashed; }
+
+.roadmap-node-body {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; min-width: 0; margin-top: 8px;
+}
+.roadmap-slot {
+  font-size: 0.66em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.roadmap-node.slot-current .roadmap-slot { color: var(--accent-ink); }
+.roadmap-label {
+  font-size: 0.88em; line-height: 1.3; color: var(--text);
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.roadmap-node.status-todo .roadmap-label { color: var(--text-muted); }
+.roadmap-node.slot-current .roadmap-label { font-weight: 600; }
+.roadmap-group {
+  font-size: 0.72em; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roadmap-status { margin-top: 1px; font-size: 0.74em; color: var(--text-faint); }
+.roadmap-node.status-done .roadmap-status { color: var(--ok); }
+.roadmap-node.status-active .roadmap-status { color: var(--accent-ink); }
+
+/* what this run changed */
+.roadmap-changes {
+  list-style: none; margin: 12px 0 0; padding: 9px 0 0;
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.roadmap-change { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 0.8em; }
+.roadmap-change-verb {
+  flex: none; min-width: 5.6em;
+  font-size: 0.86em; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--text-faint);
+}
+.roadmap-change.to-done .roadmap-change-verb { color: var(--ok); }
+.roadmap-change.to-active .roadmap-change-verb { color: var(--accent-ink); }
+.roadmap-change.to-removed .roadmap-change-verb { color: var(--danger); }
+.roadmap-change-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.roadmap-more { color: var(--text-faint); }
+.roadmap-note {
+  margin: 12px 0 0; padding-top: 9px;
+  border-top: 1px solid var(--border);
+  font-size: 0.8em; color: var(--text-muted);
+}
+.roadmap-note.is-done { margin-top: 10px; color: var(--ok); }
+.roadmap-note.is-done + .roadmap-note { margin-top: 0; border-top: 0; padding-top: 4px; }
+
+/* narrow chat column: stack the timeline top to bottom */
+@container (max-width: 470px) {
+  .roadmap-timeline { grid-auto-flow: row; gap: 12px; }
+  .roadmap-node { flex-direction: row; align-items: flex-start; gap: 10px; padding: 0; text-align: left; }
+  .roadmap-node-body { margin-top: 0; }
+  .roadmap-link {
+    top: 26px; bottom: -8px; left: 10px; right: auto;
+    width: 0; height: auto;
+    border-top: 0; border-left: 2px solid var(--border-strong);
+  }
+  .roadmap-link.is-travelled { border-left-color: var(--ok); }
+  .roadmap-link.is-ahead { border-left-style: dashed; }
+}

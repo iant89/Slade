@@ -24,7 +24,7 @@ if (typeof URL.createObjectURL !== 'function') {
 }
 
 import { useSettings } from '../src/store/settings'
-import { useChat } from '../src/store/chat'
+import { firstActiveId, hydrateConversations, MAX_TITLE_LENGTH, normalizeTitle, useChat } from '../src/store/chat'
 import { cooldownMsFor, useHealth } from '../src/store/health'
 import { sendUserMessage, stopGeneration } from '../src/engine/send'
 import { classifyHttp } from '../src/providers/base'
@@ -106,8 +106,17 @@ import { buildTurns } from '../src/engine/turns'
 import { parsePlannerReply, resolveWorkerModel } from '../src/engine/agent'
 import { CODING_AGENT_ORCHESTRATOR_PROMPT } from '../src/engine/orchestratorPrompt'
 import { z } from 'zod'
-import { conversationSchema, exportBundleSchema } from '../src/lib/schemas'
-import type { Artifact, FsFile } from '../src/types'
+import { conversationSchema, exportBundleSchema, roadmapReportSchema } from '../src/lib/schemas'
+import {
+  buildRoadmapReport,
+  describeRoadmapReport,
+  findRoadmapBlobs,
+  isRoadmapPath,
+  parseRoadmap,
+  snapshotRoadmapFiles,
+  tickFirstOpenStep,
+} from '../src/lib/roadmap'
+import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../src/types'
 // The browser build of react-dom/server avoids the `stream` require that the
 // node build does, which esbuild cannot bundled for ESM.
 import { renderToString } from 'react-dom/server.browser'
@@ -116,6 +125,12 @@ import { GitHubPanel } from '../src/components/github/GitHubPanel'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
+import { RoadmapTimeline } from '../src/components/chat/RoadmapTimeline'
+import { Toasts } from '../src/components/common/Toasts'
+import { archiveWithUndo, unarchiveWithToast } from '../src/components/layout/ConversationMenu'
+import { Header } from '../src/components/layout/Header'
+import { Sidebar } from '../src/components/layout/Sidebar'
+import { MENU_GAP, MENU_MARGIN, placeMenu, type MenuAnchor } from '../src/lib/menuPlacement'
 import { AddModelForm, ProviderTokenManager } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
 import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
@@ -415,6 +430,48 @@ function testOrchestratorPrompt() {
   check('includes the no-false-completion quality gate', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('DO NOT MARK COMPLETE.'))
   check('includes the required final-report sections', ['IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'REMAINING', 'STATUS'].every((section) => CODING_AGENT_ORCHESTRATOR_PROMPT.includes(section)))
   check('includes the final orchestrator responsibility', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('The work is verified and complete.'))
+
+  // Completion report: a plain-language summary first, then only the issues
+  // the user must know about, then the detail — and the roadmap rules.
+  const reportSpec = CODING_AGENT_ORCHESTRATOR_PROMPT.slice(CODING_AGENT_ORCHESTRATOR_PROMPT.indexOf('36. FINAL REPORT'))
+  const at = ['SUMMARY', 'ISSUES', 'IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'ROADMAP', 'REMAINING', 'STATUS'].map(
+    (h) => reportSpec.indexOf(`\n${h}\n`),
+  )
+  check(
+    'final report leads with SUMMARY, then ISSUES, and keeps the detail sections in order',
+    at.every((n, i) => n >= 0 && (i === 0 || n > at[i - 1]!)),
+    JSON.stringify(at),
+  )
+  check(
+    'ISSUES is reserved for real problems and names what the user must know',
+    reportSpec.includes('Include ISSUES only when there is something real to report') &&
+      reportSpec.includes('Tests or builds that failed, were skipped, or could not be run.') &&
+      reportSpec.includes('Manual actions the user must take'),
+  )
+  check(
+    'ROADMAP section only appears when a roadmap was used',
+    reportSpec.includes('Include only when a roadmap or milestone file was used'),
+  )
+  check(
+    'orchestrator owns the roadmap and may only mark verified work done',
+    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('You own the roadmap.') &&
+      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Do not mark incomplete work as complete.') &&
+      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Mark a step done only when its acceptance criteria are verified'),
+  )
+  check(
+    'roadmap notation Slade parses is spelled out',
+    ['[x] the step is complete', '[~] the step is in progress', '[ ] the step is not started'].every((n) => CODING_AGENT_ORCHESTRATOR_PROMPT.includes(n)),
+  )
+  check(
+    'model is told Slade renders the timeline itself, and not to draw its own',
+    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('the previous step, the current step, and the next step when there is one') &&
+      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Do not draw your own timeline or progress bar in the report.'),
+  )
+  check(
+    'the model is told never to rewrite a roadmap it only saw truncated',
+    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('If the roadmap is shown to you truncated, never rewrite it.'),
+  )
+  check('quality gate covers the roadmap and the issues report', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('[ ] Everything the user must be made aware of is reported under ISSUES'))
 }
 
 function testPlannerParsing() {
@@ -433,6 +490,18 @@ function testPlannerParsing() {
   )
   check('braces inside strings survive the balanced scan', braceInString?.mode === 'plan')
 
+  // A direct answer may carry code blocks and file blocks of its own: their fences must survive.
+  const fenced = `Here is the change:\n\n${FENCE}ts:src/a.ts\nexport const a = 1\n${FENCE}\n`
+  const withCode = parsePlannerReply(JSON.stringify({ mode: 'answer', answer: fenced }))
+  check('a direct answer keeps the code fences inside it', withCode?.mode === 'answer' && withCode.answer === fenced, JSON.stringify(withCode))
+  check(
+    '…so a file block in a direct answer still becomes a file',
+    withCode?.mode === 'answer' && extractFsActions(withCode.answer).some((a) => a.op === 'write' && a.path === 'src/a.ts'),
+  )
+  const wrapped = parsePlannerReply(`Sure!\n${FENCE}json\n${JSON.stringify({ mode: 'answer', answer: 'plain' })}\n${FENCE}`)
+  check('a fence wrapped around the JSON is still tolerated', wrapped?.mode === 'answer' && wrapped.answer === 'plain')
+  const trailing = parsePlannerReply(`${JSON.stringify({ mode: 'answer', answer: 'ok' })}\n\n${FENCE}ts\nfunction f() { return { a: 1 } }\n${FENCE}`)
+  check('JSON followed by a code block with braces of its own still parses', trailing?.mode === 'answer' && trailing.answer === 'ok', JSON.stringify(trailing))
   check('prose without JSON → undefined', parsePlannerReply('I would start by researching the topic.') === undefined)
   check('wrong shape → undefined', parsePlannerReply('{"mode":"surprise"}') === undefined)
   check('empty subtasks → undefined', parsePlannerReply('{"mode":"plan","subtasks":[]}') === undefined)
@@ -3125,6 +3194,1164 @@ function testInlineThoughtsRendering() {
   settingsInit.s = origSettings
 }
 
+/* ------------------------------------------------------------------ */
+/* Roadmap tracking: the orchestrator's completion timeline            */
+/* ------------------------------------------------------------------ */
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+/** Order-insensitive deep equality: zod re-emits object keys in schema order. */
+const canon = (v: unknown): unknown =>
+  Array.isArray(v)
+    ? v.map(canon)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, canon(x)]))
+      : v
+const sameData = (a: unknown, b: unknown) => same(canon(a), canon(b))
+const stepLine = (s: { label: string; status: string; group?: string }) => `${s.status}:${s.label}${s.group ? `@${s.group}` : ''}`
+const parsedSteps = (md: string) => parseRoadmap(md).steps.map(stepLine)
+const FENCE = '```'
+/** A fenced file block the way models emit them: ```lang:path … ``` */
+const fileBlock = (info: string, body: string) => `${FENCE}${info}\n${body.endsWith('\n') ? body : `${body}\n`}${FENCE}\n`
+
+function testRoadmapPaths() {
+  console.log('roadmap file detection:')
+  const yes = ['ROADMAP.md', 'roadmap.md', 'docs/roadmap.md', 'MILESTONES.md', 'milestone.md', 'product-roadmap.txt', 'ROADMAP', 'docs/Q3_Milestones.markdown']
+  const no = ['README.md', 'CHANGELOG.md', 'src/lib/roadmap.ts', 'roadmap.test.ts', 'roadmapping.md', 'node_modules/pkg/ROADMAP.md', 'src/roadmap/index.ts']
+  check('recognises roadmap and milestone documents', yes.every(isRoadmapPath), JSON.stringify(yes.filter((p) => !isRoadmapPath(p))))
+  check('ignores source files, vendored copies and look-alikes', no.every((p) => !isRoadmapPath(p)), JSON.stringify(no.filter(isRoadmapPath)))
+
+  const snap = snapshotRoadmapFiles([
+    { path: 'ROADMAP.md', content: '- [x] a' },
+    { path: 'docs/milestones.md', content: '- [ ] b', encoding: 'utf8' },
+    { path: 'other/roadmap.md', content: 'AAAA', encoding: 'base64' },
+    { path: 'src/app.ts', content: 'x' },
+  ])
+  check('snapshot keeps only the text roadmap files', same(snap.map((f) => f.path), ['ROADMAP.md', 'docs/milestones.md']), JSON.stringify(snap))
+
+  const blobs = findRoadmapBlobs([
+    { path: 'docs/deep/roadmap.md', type: 'blob', size: 100 },
+    { path: 'ROADMAP.md', type: 'blob', size: 50 },
+    { path: 'huge/MILESTONES.md', type: 'blob', size: 900_000 },
+    { path: 'docs/ROADMAP', type: 'tree' },
+    { path: 'src/a.ts', type: 'blob', size: 10 },
+  ])
+  check('finds roadmap blobs in a repo tree: shallowest first, no folders, no huge files', same(blobs, ['ROADMAP.md', 'docs/deep/roadmap.md']), JSON.stringify(blobs))
+  check(
+    'caps how many roadmap files are pulled',
+    findRoadmapBlobs(['a/ROADMAP.md', 'b/ROADMAP.md', 'c/ROADMAP.md'].map((path) => ({ path, type: 'blob', size: 1 })), 2).length === 2,
+  )
+}
+
+function testRoadmapParsing() {
+  console.log('roadmap parsing:')
+
+  // 1. GFM task lists grouped under milestone headings; a parent with steps of its own is a group.
+  const checklist = [
+    '# Roadmap',
+    '',
+    '## Milestone 1 — Core chat',
+    '- [x] Streaming responses',
+    '- [x] Failover engine',
+    '',
+    '## Milestone 2 — GitHub',
+    '- [x] Device flow',
+    '- [~] Publish dialog',
+    '- [ ] Code search',
+    '  - [ ] nested child A',
+    '  - [x] nested child B',
+  ].join('\n')
+  check(
+    'task lists: [x] done, [~] in progress, [ ] not started, grouped by milestone heading',
+    same(parsedSteps(checklist), [
+      'done:Streaming responses@Milestone 1 — Core chat',
+      'done:Failover engine@Milestone 1 — Core chat',
+      'done:Device flow@Milestone 2 — GitHub',
+      'active:Publish dialog@Milestone 2 — GitHub',
+      'todo:nested child A@Milestone 2 — GitHub › Code search',
+      'done:nested child B@Milestone 2 — GitHub › Code search',
+    ]),
+    JSON.stringify(parsedSteps(checklist)),
+  )
+  check('the single H1 is the roadmap title, not a group', parseRoadmap(checklist).title === 'Roadmap')
+  check('steps are numbered 1..n in document order', same(parseRoadmap(checklist).steps.map((s) => s.index), [1, 2, 3, 4, 5, 6]))
+
+  // 2. Status-named sections: plain bullets take the section's status; nested notes are ignored.
+  const buckets = ['# Slade Roadmap', '', '## ✅ Done', '- Streaming responses', '- Failover engine', '  - uses SSE parsing (a note, not a step)', '', '## 🚧 In progress', '- Provider dialog', '', '## ⏳ Planned', '- Mobile app', '- Plugin API'].join('\n')
+  check(
+    'status sections (Done / In progress / Planned) give their bullets a status; sub-bullet notes are not steps',
+    same(parsedSteps(buckets), ['done:Streaming responses', 'done:Failover engine', 'active:Provider dialog', 'todo:Mobile app', 'todo:Plugin API']),
+    JSON.stringify(parsedSteps(buckets)),
+  )
+  check(
+    'Now / Next / Later sections',
+    same(parsedSteps(['## Now', '- Fix cooldown UI', '## Next', '- Multi-token rotation', '## Later', '- Team workspaces'].join('\n')), ['active:Fix cooldown UI', 'todo:Multi-token rotation', 'todo:Team workspaces']),
+  )
+  check(
+    'sub-headings inside a status section keep the section status',
+    same(parsedSteps(['## Planned', '### Q4', '- Mobile app', '### Q1', '- Plugin API'].join('\n')), ['todo:Mobile app@Q4', 'todo:Plugin API@Q1']),
+  )
+
+  // 3. Headings that carry a status (emoji, parenthesis, dash) are steps themselves.
+  check(
+    'status-marked headings are steps: emoji, (word) and ": word" forms',
+    same(parsedSteps(['# Product plan', '', '### M1 — Core chat ✅', '### M2 — GitHub 🚧', '### M3 — Agent (planned)', '### M4 — Mobile: not started'].join('\n')), [
+      'done:M1 — Core chat',
+      'active:M2 — GitHub',
+      'todo:M3 — Agent',
+      'todo:M4 — Mobile',
+    ]),
+  )
+  check(
+    'a "Status:" line under a heading gives the heading its status',
+    same(
+      parsedSteps(['# Plan', '', '## Milestone 1: Foundation', '**Status:** Done', '', '## Milestone 2: Providers', '**Status:** In progress · **Target:** Q4', '', '## Milestone 3: Agents', 'Status: planned'].join('\n')),
+      ['done:Milestone 1: Foundation', 'active:Milestone 2: Providers', 'todo:Milestone 3: Agents'],
+    ),
+  )
+  check(
+    'a status heading that contains steps only groups them',
+    same(parsedSteps(['## Milestone 1 ✅', '- [x] one', '- [x] two'].join('\n')), ['done:one@Milestone 1', 'done:two@Milestone 1']),
+  )
+
+  // 4. Tables.
+  check(
+    'tables: the Status column decides, the Milestone column names the step (not Owner)',
+    same(parsedSteps(['| Milestone | Owner | Status |', '|---|---|---|', '| M1 | ian | ✅ Done |', '| M2 | ian | 🚧 In progress |', '| M3 | sam | Planned |'].join('\n')), ['done:M1', 'active:M2', 'todo:M3']),
+  )
+  check(
+    'tables: a "#" column is skipped in favour of the named column',
+    same(parsedSteps(['| # | Milestone | Status |', '|---|---|---|', '| 1 | Core chat | ✅ |', '| 2 | Agents | ⏳ |'].join('\n')), ['done:Core chat', 'todo:Agents']),
+  )
+  check(
+    'tables: a marker on the label cell itself ("✅ Streaming") works without a Status column',
+    same(parsedSteps(['| Feature | Owner |', '|---|---|', '| ✅ Streaming | ian |', '| 🚧 Failover | sam |'].join('\n')), ['done:Streaming', 'active:Failover']),
+  )
+  check(
+    'tables: rows without a recognisable status are not steps',
+    same(parsedSteps(['| Milestone | Status |', '|---|---|', '| M1 | Done |', '| notes | see below |'].join('\n')), ['done:M1']),
+  )
+
+  // 5. Inline status markers on plain bullets.
+  const inline = ['- ✅ Core chat', '- 🔄 GitHub integration', '- ⏳ Agent mode', '- Search — done', '- Voice: in progress', '- Themes (planned)', '- **Done** — Export', '- [Planned] Import'].join('\n')
+  check(
+    'inline markers: emoji, "— done", ": in progress", "(planned)", **Done** — and [Planned] badges',
+    same(parsedSteps(inline), ['done:Core chat', 'active:GitHub integration', 'todo:Agent mode', 'done:Search', 'active:Voice', 'todo:Themes', 'done:Export', 'todo:Import']),
+    JSON.stringify(parsedSteps(inline)),
+  )
+  check('an explicit word beats an emoji when both are present', same(parsedSteps('- ⏳ Provider dialog (in progress)'), ['active:Provider dialog']))
+  check('a task checkbox beats a contradicting word, but [ ] plus "in progress" is in progress', same(parsedSteps('- [x] Foo (todo)\n- [ ] Publish (in progress)'), ['done:Foo', 'active:Publish']))
+  check('"Status page: in progress" is a step, not a Status line', same(parsedSteps('- Status page rewrite: in progress'), ['active:Status page rewrite']))
+
+  // 6. Things that must never count.
+  const noise = ['# Roadmap', 'Some prose that says done.', '', FENCE + 'md', '- [x] inside a fence, ignored', FENCE, '', '- [x] Real step', '- [ ] ~~Cancelled idea~~', '- [ ] **Bold** step with `code` and [a link](http://x)'].join('\n')
+  check(
+    'fenced code, struck-through items and prose are ignored; Markdown decoration is stripped from labels',
+    same(parsedSteps(noise), ['done:Real step', 'todo:Bold step with code and a link']),
+    JSON.stringify(parsedSteps(noise)),
+  )
+  check('a document with no status markers has no steps', parsedSteps('# Notes\n- buy milk\n- write docs\n## Ideas\n- something').length === 0)
+  check('an empty document has no steps', parsedSteps('').length === 0)
+
+  // 7. Titles, CRLF, long lines.
+  const twoH1 = parseRoadmap('# Phase 1\n- [x] A\n# Phase 2\n- [ ] B')
+  check('several H1s: no title, and each becomes its steps\' group', twoH1.title === undefined && same(twoH1.steps.map(stepLine), ['done:A@Phase 1', 'todo:B@Phase 2']))
+  check('CRLF line endings parse the same', same(parsedSteps('- [x] One\r\n- [ ] Two\r\n'), ['done:One', 'todo:Two']))
+  const long = parseRoadmap(`- [x] ${'a'.repeat(500)}`).steps[0]?.label ?? ''
+  check('over-long labels are clipped with an ellipsis', long.length <= 140 && long.endsWith('…'), String(long.length))
+
+  // 8. Ticking a step (simulator support).
+  const md = '# R\n- [x] A\n- [~] B\n- [ ] C\n'
+  const t1 = tickFirstOpenStep(md)
+  check('tickFirstOpenStep completes the first open step and touches nothing else', t1?.label === 'B' && t1.content === '# R\n- [x] A\n- [x] B\n- [ ] C\n', JSON.stringify(t1))
+  const t2 = t1 ? tickFirstOpenStep(t1.content) : undefined
+  const t3 = t2 ? tickFirstOpenStep(t2.content) : undefined
+  check('…then the next one, and finally reports there is nothing left', t2?.label === 'C' && t3 === undefined)
+  check('roadmaps without task-list lines (tables) are left alone', tickFirstOpenStep('| M | Status |\n|---|---|\n| M1 | Planned |') === undefined)
+  check('CRLF survives ticking', tickFirstOpenStep('- [ ] One\r\n- [ ] Two\r\n')?.content === '- [x] One\r\n- [ ] Two\r\n')
+}
+
+/** "# Roadmap" + one task-list line per mark: ' ' todo, '~' in progress, 'x' done. */
+const doc = (marks: string[]) => `# Roadmap\n\n${marks.map((m, i) => `- [${m}] Step ${i + 1}`).join('\n')}\n`
+const report = (before: string | null, after: string, delegated = true, path = 'ROADMAP.md') =>
+  buildRoadmapReport({ before: before === null ? [] : [{ path, content: before }], after: [{ path, content: after }], delegated })
+const tl = (s?: { index: number; label: string; status: string; changed?: boolean }) => (s ? `${s.index}:${s.label}:${s.status}${s.changed ? '*' : ''}` : '—')
+
+function testRoadmapReport() {
+  console.log('roadmap report (timeline + progress):')
+
+  // A step completed this run.
+  const a = report(doc(['x', 'x', '~', ' ', ' ']), doc(['x', 'x', 'x', ' ', ' ']))!
+  check(
+    'completed step → previous / current / next around it, current flagged as changed this run',
+    tl(a.previous) === '2:Step 2:done' && tl(a.current) === '3:Step 3:done*' && tl(a.next) === '4:Step 4:todo',
+    `${tl(a.previous)} | ${tl(a.current)} | ${tl(a.next)}`,
+  )
+  check('overall progress after: 3 of 5 = 60%', same(a.progress, { done: 3, active: 0, total: 5, percent: 60 }), JSON.stringify(a.progress))
+  check('progress before the run is kept: 2 of 5 = 40%, one in progress', same(a.before, { done: 2, active: 1, total: 5, percent: 40 }), JSON.stringify(a.before))
+  check('the status change is listed', same(a.changes, [{ label: 'Step 3', from: 'active', to: 'done' }]), JSON.stringify(a.changes))
+  check('report carries the file path and title', a.path === 'ROADMAP.md' && a.title === 'Roadmap')
+
+  // A step started, none completed.
+  const b = report(doc(['x', ' ', ' ']), doc(['x', '~', ' ']))!
+  check('started (not finished) step becomes current', tl(b.previous) === '1:Step 1:done' && tl(b.current) === '2:Step 2:active*' && tl(b.next) === '3:Step 3:todo')
+
+  // Several completed: the last one is current, the one before it is previous even though it changed too.
+  const c = report(doc([' ', ' ', ' ', ' ']), doc(['x', 'x', 'x', ' ']))!
+  check('several completed → the last is current; previous is its neighbour (also changed)', tl(c.previous) === '2:Step 2:done*' && tl(c.current) === '3:Step 3:done*' && tl(c.next) === '4:Step 4:todo')
+  check('every completion is listed in roadmap order', same(c.changes.map((x) => x.label), ['Step 1', 'Step 2', 'Step 3']))
+
+  // Completion outranks starting.
+  const c2 = report(doc([' ', ' ', ' ']), doc(['x', '~', ' ']))!
+  check('a completed step outranks a started one for "current"', tl(c2.current) === '1:Step 1:done*' && tl(c2.next) === '2:Step 2:active*')
+
+  // Nothing changed: where the roadmap stands.
+  const d1 = report(doc(['x', '~', ' ']), doc(['x', '~', ' ']))!
+  check('no change → current is the step in progress; nothing listed as changed', tl(d1.current) === '2:Step 2:active' && tl(d1.previous) === '1:Step 1:done' && tl(d1.next) === '3:Step 3:todo' && d1.changes.length === 0)
+  check('no change → progress before equals progress after', same(d1.before, d1.progress))
+  const d2 = report(doc(['x', 'x', ' ', ' ']), doc(['x', 'x', ' ', ' ']))!
+  check('no change and nothing in progress → current is the first step not started', tl(d2.current) === '3:Step 3:todo' && tl(d2.previous) === '2:Step 2:done' && tl(d2.next) === '4:Step 4:todo')
+  const d3 = report(doc(['x', 'x']), doc(['x', 'x']))!
+  check('everything done → current is the final step, no next, 100%', tl(d3.current) === '2:Step 2:done' && d3.next === undefined && d3.progress.percent === 100)
+
+  // Whether a report is produced at all.
+  check('roadmap untouched by a direct answer → no report', report(doc(['x', ' ']), doc(['x', ' ']), false) === undefined)
+  check('roadmap edited by a direct answer → report', report(doc(['x', ' ']), doc(['x', 'x']), false)?.progress.percent === 100)
+  check('a workspace without any roadmap → no report', buildRoadmapReport({ before: [], after: [], delegated: true }) === undefined)
+  check(
+    'a "roadmap" file with no status markers → no report',
+    buildRoadmapReport({ before: [], after: [{ path: 'ROADMAP.md', content: '# Roadmap\nWe will build things.' }], delegated: true }) === undefined,
+  )
+
+  // Created by the run.
+  const e = report(null, doc([' ', ' ', ' ']))!
+  check('roadmap created in the run → no "before", no changes, starts at the first step', e.before === undefined && e.changes.length === 0 && tl(e.current) === '1:Step 1:todo' && e.previous === undefined)
+  const e2 = report('# Roadmap\nJust notes so far.\n', doc(['x', ' ']))!
+  check('a notes-only file that gained steps counts as created too', e2.before === undefined && e2.progress.total === 2)
+
+  // Boundaries.
+  const f = report(doc([' ', ' ']), doc([' ', ' ']))!
+  check('first step current → no previous', f.previous === undefined && tl(f.current) === '1:Step 1:todo' && tl(f.next) === '2:Step 2:todo')
+  const g = report(doc(['x', '~']), doc(['x', 'x']))!
+  check('last step completed → no next, roadmap at 100%', g.next === undefined && tl(g.current) === '2:Step 2:done*' && g.progress.percent === 100)
+  const h = report(doc([' ', 'x', ' ']), doc(['x', 'x', ' ']))!
+  check('"next" skips steps that are already done', tl(h.current) === '1:Step 1:done*' && tl(h.next) === '3:Step 3:todo', tl(h.next))
+  check('"previous" is the immediate neighbour even when it was skipped', tl(report(doc([' ', ' ', ' ']), doc([' ', ' ', 'x']))!.previous) === '2:Step 2:todo')
+
+  // Matching steps across edits.
+  const j = report('## A\n- [~] Ship it\n', '## B\n- [x] Ship it\n')!
+  check('a step moved to another section is still the same step', same(j.changes, [{ label: 'Ship it', from: 'active', to: 'done' }]), JSON.stringify(j.changes))
+  const k = report(doc(['x', ' ']), '# Roadmap\n\n- [x] Step 1\n- [ ] Brand new\n')!
+  check(
+    'added and removed steps are reported',
+    same(k.changes, [{ label: 'Brand new', from: 'new', to: 'todo' }, { label: 'Step 2', from: 'todo', to: 'removed' }]),
+    JSON.stringify(k.changes),
+  )
+  const l = report(doc(['x', 'x']), doc(['x', ' ']))!
+  check('a reopened step becomes current and progress goes down', tl(l.current) === '2:Step 2:todo*' && l.progress.done === 1 && l.before?.done === 2)
+  const dup = report('- [ ] Write tests\n- [ ] Write tests\n', '- [x] Write tests\n- [ ] Write tests\n')!
+  check('duplicate labels are matched in order', same(dup.changes, [{ label: 'Write tests', from: 'todo', to: 'done' }]) && dup.current?.index === 1, JSON.stringify(dup.changes))
+
+  // Which file, when there are several.
+  const multi = buildRoadmapReport({
+    before: [{ path: 'ROADMAP.md', content: doc([' ', ' ']) }, { path: 'docs/roadmap.md', content: doc([' ', ' ']) }],
+    after: [{ path: 'ROADMAP.md', content: doc([' ', ' ']) }, { path: 'docs/roadmap.md', content: doc(['x', ' ']) }],
+    delegated: true,
+  })
+  check('the roadmap the run changed wins over one it left alone', multi?.path === 'docs/roadmap.md', multi?.path)
+  const multi2 = buildRoadmapReport({
+    before: [],
+    after: [{ path: 'docs/roadmap.md', content: doc([' ']) }, { path: 'MILESTONES.md', content: doc([' ']) }, { path: 'ROADMAP.md', content: doc([' ']) }],
+    delegated: true,
+  })
+  check('otherwise the shallowest wins, ROADMAP before MILESTONES', multi2?.path === 'ROADMAP.md', multi2?.path)
+
+  // Rounding and wording.
+  check('percentages round to whole numbers', report(doc([' ', ' ', ' ']), doc(['x', ' ', ' ']))!.progress.percent === 33 && report(doc([' ', ' ', ' ']), doc(['x', 'x', ' ']))!.progress.percent === 67)
+  check('a very long change list is capped', report(doc(Array(60).fill(' ')), doc(Array(60).fill('x')))!.changes.length <= 30)
+  check('screen-reader summary names the percentage and the current step', describeRoadmapReport(a) === 'Roadmap 60% complete, 3 of 5 steps done. Current step: Step 3.', describeRoadmapReport(a))
+}
+
+function testRoadmapPersistence() {
+  console.log('roadmap report persistence:')
+  const good: RoadmapReport = {
+    path: 'ROADMAP.md',
+    title: 'Roadmap',
+    previous: { index: 2, label: 'Step 2', status: 'done' },
+    current: { index: 3, label: 'Step 3', status: 'done', changed: true, group: 'M1' },
+    next: { index: 4, label: 'Step 4', status: 'todo' },
+    progress: { done: 3, active: 0, total: 5, percent: 60 },
+    before: { done: 2, active: 1, total: 5, percent: 40 },
+    changes: [{ label: 'Step 3', from: 'active', to: 'done' }],
+  }
+  const conv = (roadmap: unknown) => ({
+    id: 'c1',
+    title: 't',
+    createdAt: 1,
+    updatedAt: 1,
+    messages: [
+      {
+        id: 'm1',
+        role: 'assistant',
+        conversationId: 'c1',
+        content: 'final answer',
+        createdAt: 1,
+        status: 'complete',
+        agent: { phase: 'complete', goal: 'g', orchestratorModelId: 'mock-pro', steps: [], startedAt: 1, roadmap },
+      },
+    ],
+  })
+  const parse = (roadmap: unknown) => conversationSchema.safeParse(conv(roadmap))
+
+  check('a report is a valid schema value', roadmapReportSchema.safeParse(good).success)
+  const ok = parse(good)
+  const back = ok.success ? ok.data.messages[0]?.agent?.roadmap : undefined
+  check(
+    'a stored report survives a reload with every field intact',
+    ok.success && sameData(back, good),
+    JSON.stringify(back),
+  )
+
+  const broken = parse({ path: 'ROADMAP.md', progress: 'lots' })
+  check(
+    'a malformed report is dropped on its own — the conversation still loads',
+    broken.success && broken.data.messages[0]?.content === 'final answer' && broken.data.messages[0]?.agent?.roadmap === undefined,
+    JSON.stringify(broken.success ? broken.data : broken.error.issues.slice(0, 2)),
+  )
+  const badStatus = parse({ ...good, current: { ...good.current, status: 'nope' } })
+  check('an unknown step status also drops just the report', badStatus.success && badStatus.data.messages[0]?.agent?.roadmap === undefined)
+  const outOfRange = parse({ ...good, progress: { ...good.progress, percent: 240 } })
+  check('an impossible percentage is rejected', outOfRange.success && outOfRange.data.messages[0]?.agent?.roadmap === undefined)
+  check('conversations saved before this feature (no report) still load', parse(undefined).success)
+  const extra = parse({ ...good, futureField: 1 })
+  check('unknown extra keys are stripped, not fatal', extra.success && extra.data.messages[0]?.agent?.roadmap?.path === 'ROADMAP.md')
+}
+
+function testRoadmapUi() {
+  console.log('roadmap timeline UI:')
+  const html = (r: RoadmapReport) => renderToString(createElement(RoadmapTimeline, { report: r })).replace(/<!-- -->/g, '')
+  const A: RoadmapReport = {
+    path: 'ROADMAP.md',
+    title: 'Slade Roadmap',
+    previous: { index: 3, label: 'Supported-providers dialog', status: 'done', group: 'Milestone 2 — Providers' },
+    current: { index: 4, label: 'Delete-provider flow', status: 'done', group: 'Milestone 2 — Providers', changed: true },
+    next: { index: 5, label: 'Per-provider key testing', status: 'todo', group: 'Milestone 2 — Providers' },
+    progress: { done: 4, active: 0, total: 7, percent: 57 },
+    before: { done: 3, active: 1, total: 7, percent: 43 },
+    changes: [{ label: 'Delete-provider flow', from: 'active', to: 'done' }],
+  }
+  const a = html(A)
+  check('shows previous, current and next steps in that order', ['Previous', 'Current', 'Next'].every((w) => a.includes(w)) && a.indexOf('Supported-providers dialog') < a.indexOf('Delete-provider flow') && a.indexOf('Delete-provider flow') < a.indexOf('Per-provider key testing'))
+  check('the current step is marked for assistive tech', a.includes('aria-current="step"') && /aria-current="step"[^>]*>[\s\S]*?Delete-provider flow/.test(a))
+  check('overall progress is a labelled progressbar with the numbers', a.includes('role="progressbar"') && a.includes('aria-valuenow="57"') && a.includes('4 of 7 steps done') && a.includes('57%'))
+  check('run delta and the change list are shown', a.includes('+1 step this run') && a.includes('was 43%') && a.includes('Marked done') && a.includes('Delete-provider flow'))
+  check('each step states its status in words, and flags this run\'s change', a.includes('Done · this run') && a.includes('Not started'))
+  check('steps show their milestone and position', a.includes('Milestone 2 — Providers') && a.includes('step 4 of 7'))
+  check('the connector is solid where travelled and dashed ahead', a.includes('roadmap-link is-travelled') && a.includes('roadmap-link is-ahead'))
+  check('offers to open the roadmap file, naming it for screen readers', a.includes('aria-label="Open ROADMAP.md in Local Files"'))
+
+  const first = html({ path: 'ROADMAP.md', current: { index: 1, label: 'One', status: 'active' }, next: { index: 2, label: 'Two', status: 'todo' }, progress: { done: 0, active: 1, total: 2, percent: 0 }, before: { done: 0, active: 1, total: 2, percent: 0 }, changes: [] })
+  check('first step: no previous node, in-progress state is drawn', !first.includes('slot-previous') && first.includes('roadmap-dot-half') && first.includes('1 in progress'))
+  check('untouched roadmap says so plainly', first.includes('No step changed status in this run') && !first.includes('this run ·'))
+
+  const done = html({ path: 'ROADMAP.md', previous: { index: 1, label: 'One', status: 'done' }, current: { index: 2, label: 'Two', status: 'done', changed: true }, progress: { done: 2, active: 0, total: 2, percent: 100 }, before: { done: 1, active: 0, total: 2, percent: 50 }, changes: [{ label: 'Two', from: 'todo', to: 'done' }] })
+  check('complete roadmap: no next node, completion styling and note', !done.includes('slot-next') && done.includes('is-complete') && done.includes('Every step on the roadmap is done.'))
+
+  const created = html({ path: 'ROADMAP.md', current: { index: 1, label: 'One', status: 'todo' }, progress: { done: 0, active: 0, total: 1, percent: 0 }, changes: [] })
+  check('roadmap created by the run is called out', created.includes('created in this run') && !created.includes('was 0%'))
+
+  const many = html({ ...A, changes: ['a', 'b', 'c', 'd', 'e', 'f'].map((label) => ({ label, from: 'todo' as const, to: 'done' as const })) })
+  check('long change lists collapse to "+N more"', many.includes('+2 more') && !many.includes('>e<'))
+
+  const back = html({ ...A, before: { done: 5, active: 0, total: 7, percent: 71 }, changes: [{ label: 'X', from: 'active', to: 'todo' }, { label: 'Y', from: 'done', to: 'active' }] })
+  check('going backwards is shown as a decrease, with "Reopened" / "Set back" wording', back.includes('−1 step this run') && back.includes('is-negative') && back.includes('Set back') && back.includes('Reopened'))
+
+  // Inside a message: a completion footer after the final report, and only when the run is done.
+  const base = { id: 'm', role: 'assistant' as const, conversationId: 'c', content: 'Final report text.', createdAt: Date.now(), status: 'complete' as const, modelId: 'mock-pro' }
+  const agent = { phase: 'complete' as const, goal: 'g', orchestratorModelId: 'mock-pro', steps: [], startedAt: 1, finishedAt: 2, roadmap: A }
+  const done1 = renderToString(createElement(MessageBubble, { message: { ...base, agent } })).replace(/<!-- -->/g, '')
+  check('an orchestrated message renders the timeline after its final report', done1.includes('roadmap-card') && done1.indexOf('Final report text.') < done1.indexOf('roadmap-card'))
+  const live = renderToString(createElement(MessageBubble, { message: { ...base, status: 'streaming' as const, agent: { ...agent, phase: 'synthesizing' as const } } })).replace(/<!-- -->/g, '')
+  check('no timeline while the run is still going', !live.includes('roadmap-card'))
+  const none = renderToString(createElement(MessageBubble, { message: { ...base, agent: { ...agent, roadmap: undefined } } })).replace(/<!-- -->/g, '')
+  check('no timeline when no roadmap was used', !none.includes('roadmap-card') && none.includes('agent-plan'))
+}
+
+function testRoadmapContextPriority() {
+  console.log('roadmap in the agent context:')
+  useFs.getState().clearAll()
+  useFs.getState().writeFile('ROADMAP.md', '# Roadmap\n- [x] one\n- [ ] two\n', { source: { origin: 'user' } })
+  // Busier files, written later and big enough to eat the whole 32k context budget.
+  const t0 = Date.now()
+  while (Date.now() === t0) { /* make sure the next writes are strictly newer */ }
+  for (let i = 1; i <= 5; i++) useFs.getState().writeFile(`src/big${i}.ts`, `// file ${i}\n${'x'.repeat(12_000)}`, { source: { origin: 'user' } })
+
+  const ctx = formatFsContextForAgent(useFs.getState().listFiles())
+  check('the roadmap is in the context even when newer, bigger files fill the budget', ctx.includes('--- local file: ROADMAP.md') && ctx.includes('- [ ] two'))
+  check('the roadmap is the first file in the context', ctx.indexOf('--- local file: ') === ctx.indexOf('--- local file: ROADMAP.md'))
+  const hinted = formatFsContextForAgent(useFs.getState().listFiles(), { queryHint: 'please look at src/big1.ts' })
+  check('a file the prompt names still comes first', hinted.indexOf('--- local file: src/big1.ts') < hinted.indexOf('--- local file: ROADMAP.md'))
+
+  // The orchestrator rewrites a roadmap as a whole file, so it has to see all of it.
+  const longRoadmap = (n: number) => `# Roadmap\n${Array.from({ length: n }, (_, i) => `- [ ] Step number ${i + 1} of the plan`).join('\n')}\n`
+  useFs.getState().clearAll()
+  useFs.getState().writeFile('ROADMAP.md', longRoadmap(500), { source: { origin: 'user' } }) // ~17k chars: over the usual 12k cap
+  useFs.getState().writeFile('src/long.ts', 'x'.repeat(20_000), { source: { origin: 'user' } })
+  const long = formatFsContextForAgent(useFs.getState().listFiles())
+  check('a roadmap longer than the usual per-file cap still arrives whole', long.includes('Step number 500 of the plan') && !/ROADMAP\.md \([^)]*truncated/.test(long))
+  check('ordinary files keep the usual cap and are flagged when cut', /src\/long\.ts \([^)]*truncated/.test(long))
+  useFs.getState().writeFile('ROADMAP.md', longRoadmap(2000), { source: { origin: 'user' } }) // ~68k chars: beyond any allowance
+  const huge = formatFsContextForAgent(useFs.getState().listFiles())
+  check('an enormous roadmap is cut off and clearly flagged as truncated', /ROADMAP\.md \([^)]*, truncated\)/.test(huge) && !huge.includes('Step number 2000 of the plan'))
+  check('an explicit per-file cap is still honoured for roadmaps', /ROADMAP\.md \([^)]*, truncated\)/.test(formatFsContextForAgent(useFs.getState().listFiles(), { maxFileChars: 50 })))
+  useFs.getState().clearAll()
+}
+
+/**
+ * Run `fn` with the chain replaced by one scripted OpenRouter-style model.
+ * Replies are consumed from `script` by role: the planner, the workers and the
+ * synthesizer are told apart by the markers in their system prompts.
+ */
+async function withScriptedAgent<T>(
+  script: { plans: string[]; workers: string[]; synths: string[] },
+  fn: (ctx: { seen: { kind: 'plan' | 'work' | 'synth'; sys: string }[] }) => Promise<T>,
+): Promise<T> {
+  const seen: { kind: 'plan' | 'work' | 'synth'; sys: string }[] = []
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      const messages = (body.messages as { role: string; content: string }[]) ?? []
+      const sys = messages.find((m) => m.role === 'system')?.content ?? ''
+      const kind = sys.includes('[SLADE:ORCHESTRATOR:PLAN]') ? 'plan' : sys.includes('[SLADE:ORCHESTRATOR:SYNTH]') ? 'synth' : 'work'
+      seen.push({ kind, sys })
+      const queue = kind === 'plan' ? script.plans : kind === 'synth' ? script.synths : script.workers
+      return { status: 200, sse: orTextStream(queue.shift() ?? `(no scripted ${kind} reply)`) }
+    },
+  })
+  const settings = useSettings.getState()
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+  settings.setAgent({ maxParallel: 1, useLocalFs: true })
+  useHealth.getState().markHealthy('openrouter-test')
+  try {
+    return await fn({ seen })
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+    settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+    settings.setAgent({ maxParallel: 2, useLocalFs: true })
+    useHealth.getState().markHealthy('mock-pro')
+    useHealth.getState().markHealthy('mock-lite')
+    fake.close()
+  }
+}
+
+const onePlan = (title: string, prompt: string) =>
+  JSON.stringify({ mode: 'plan', reply: 'One step.', subtasks: [{ title, model: '', prompt }] })
+
+async function testRoadmapSimulator() {
+  console.log('built-in simulator plays along with the roadmap:')
+  const lite: ModelDef = { id: 'mock-lite', label: 'Simulacron Lite', provider: 'mock', apiModel: 'simulacron-lite', enabled: true }
+  const synth = async (systemPrompt: string) => {
+    const out: string[] = []
+    await mockAdapter.run({
+      model: lite,
+      turns: [{ role: 'user', text: 'Goal: ship the report\n\nSubtask results from the worker models:\n\n## [1] Build it — Simulacron Lite\n\nok\n\nAssemble the final answer now.' }],
+      systemPrompt,
+      temperature: 0.7,
+      maxTokens: 4096,
+      topP: 1,
+      stream: true,
+      apiKey: '',
+      signal: new AbortController().signal,
+      onEvent: (ev) => {
+        if (ev.type === 'delta') out.push(ev.text)
+      },
+    })
+    return out.join('')
+  }
+  // The synthesis system prompt as the engine builds it: marker + workspace context.
+  const contextFor = (files: Record<string, string>, opts?: { maxFileChars?: number }) => {
+    useFs.getState().clearAll()
+    for (const [path, content] of Object.entries(files)) useFs.getState().writeFile(path, content, { source: { origin: 'user' } })
+    return `[SLADE:ORCHESTRATOR:SYNTH]\n\n${formatFsContextForAgent(useFs.getState().listFiles(), opts)}`
+  }
+
+  const roadmap = '# Roadmap\n\n- [x] Alpha\n- [~] Beta\n- [ ] Gamma\n'
+  const reply = await synth(contextFor({ 'ROADMAP.md': roadmap, 'src/a.ts': 'export {}' }))
+  check('with a roadmap in the workspace it ticks the first open step and says so', reply.includes('### Roadmap') && reply.includes('Marked **Beta** done'), reply.slice(-300))
+  const write = extractFsActions(reply).find((a) => a.op === 'write' && a.path === 'ROADMAP.md')
+  check(
+    '…by emitting the whole updated file, as a real orchestrator is told to',
+    write?.op === 'write' && write.content.includes('- [x] Alpha') && write.content.includes('- [x] Beta') && write.content.includes('- [ ] Gamma'),
+    JSON.stringify(write),
+  )
+  check('without a roadmap it says nothing about one', !(await synth(contextFor({ 'src/a.ts': 'export {}' }))).includes('### Roadmap'))
+  check('a truncated roadmap is never rewritten', !(await synth(contextFor({ 'ROADMAP.md': roadmap }, { maxFileChars: 12 }))).includes('### Roadmap'))
+  check('a finished roadmap is left alone', !(await synth(contextFor({ 'ROADMAP.md': '- [x] a\n- [x] b\n' }))).includes('### Roadmap'))
+  check('a roadmap without task-list lines is left alone', !(await synth(contextFor({ 'ROADMAP.md': '| M | Status |\n|---|---|\n| M1 | Planned |\n' }))).includes('### Roadmap'))
+  useFs.getState().clearAll()
+}
+
+async function testRoadmapAgentRun() {
+  console.log('roadmap timeline (orchestrated runs, scripted models):')
+  useFs.getState().clearAll()
+  const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+
+  await withScriptedAgent(script, async ({ seen }) => {
+    const v1 = ['# Roadmap', '', '## Milestone 1 — Reports', '- [x] Streaming', '- [~] Report card', '- [ ] Roadmap timeline', '- [ ] Docs', ''].join('\n')
+    const v2 = v1.replace('- [~] Report card', '- [x] Report card').replace('- [ ] Roadmap timeline', '- [~] Roadmap timeline')
+    const roadmapText = () => useFs.getState().readFile('ROADMAP.md')?.content ?? ''
+    const html = (m: Parameters<typeof MessageBubble>[0]['message']) => renderToString(createElement(MessageBubble, { message: m })).replace(/<!-- -->/g, '')
+    useFs.getState().writeFile('ROADMAP.md', v1, { source: { origin: 'user' } })
+    useFs.getState().writeFile('src/report.ts', 'export const report = () => ""\n', { source: { origin: 'user' } })
+    const plan = onePlan('Build the report card', 'Update src/report.ts to render the completion report.')
+
+    /* ---- run 1: the run advances the roadmap ---- */
+    script.plans.push(plan)
+    script.workers.push(`Updated the report:\n\n${fileBlock('ts:src/report.ts', 'export const report = () => "done"')}`)
+    script.synths.push(`SUMMARY\nBuilt the report card.\n\nROADMAP\nReport card is done; the timeline is next.\n\n${fileBlock('markdown:ROADMAP.md', v2)}`)
+    freshAgentConversation()
+    await sendUserMessage('Implement the completion report card', [])
+    const msg1 = lastAssistant()
+    const run1 = msg1.agent!
+    check('run completed', msg1.status === 'complete' && run1?.phase === 'complete', `${msg1.status}/${run1?.phase}: ${msg1.error ?? ''}`)
+    check(
+      'the planner reads the roadmap from the workspace and is told to tie its plan to it',
+      seen[0]?.kind === 'plan' && seen[0].sys.includes('- [~] Report card') && seen[0].sys.includes('tie the plan to the step or steps it advances'),
+    )
+    check('workers are told to leave the roadmap to the orchestrator', seen[1]?.kind === 'work' && seen[1].sys.includes('Do not edit roadmap or milestone files'))
+    check(
+      'the synthesizer gets the new report headings and the roadmap-update contract',
+      seen[2]?.kind === 'synth' && seen[2].sys.includes('SUMMARY\nISSUES\nIMPLEMENTED') && seen[2].sys.includes('ROADMAP UPDATE.') && seen[2].sys.includes('- [~] Report card') && seen[2].sys.includes('If the roadmap is shown as truncated, never rewrite it'),
+    )
+    check(
+      'the updated roadmap was written to the local file system',
+      roadmapText().includes('- [x] Report card') && roadmapText().includes('- [~] Roadmap timeline') && useFs.getState().readFile('ROADMAP.md')?.version === 2,
+      roadmapText(),
+    )
+    check('the run recorded the roadmap write', Boolean(run1.fsOps?.some((o) => o.path === 'ROADMAP.md' && o.op === 'update')), JSON.stringify(run1.fsOps))
+
+    const r1 = run1.roadmap
+    check('the run carries a roadmap report', Boolean(r1), JSON.stringify(r1))
+    check(
+      'timeline: previous is Streaming, current is the step just finished, next is the one it started',
+      tl(r1?.previous) === '1:Streaming:done' && tl(r1?.current) === '2:Report card:done*' && tl(r1?.next) === '3:Roadmap timeline:active*',
+      `${tl(r1?.previous)} | ${tl(r1?.current)} | ${tl(r1?.next)}`,
+    )
+    check(
+      'overall progress moved from 25% to 50%',
+      same(r1?.before, { done: 1, active: 1, total: 4, percent: 25 }) && same(r1?.progress, { done: 2, active: 1, total: 4, percent: 50 }),
+      JSON.stringify([r1?.before, r1?.progress]),
+    )
+    check(
+      'the changes made to the roadmap are listed',
+      same(r1?.changes, [
+        { label: 'Report card', from: 'active', to: 'done' },
+        { label: 'Roadmap timeline', from: 'todo', to: 'active' },
+      ]),
+      JSON.stringify(r1?.changes),
+    )
+    check('the step\'s milestone travels with it', r1?.current?.group === 'Milestone 1 — Reports')
+
+    await new Promise((r) => setTimeout(r, 600)) // let the 350ms persist debounce flush
+    const stored = z.array(conversationSchema).safeParse(JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]'))
+    const storedReport = stored.success ? stored.data.flatMap((c) => c.messages).find((m) => m.agent?.roadmap)?.agent?.roadmap : undefined
+    check('the report is persisted with the message and survives validation', stored.success && storedReport?.current?.label === 'Report card' && storedReport.progress.percent === 50, JSON.stringify(stored.success ? storedReport : stored.error.issues.slice(0, 2)))
+    const page1 = html(msg1)
+    check('the message renders the timeline under its final report', page1.includes('roadmap-card') && page1.includes('aria-valuenow="50"') && page1.includes('Done · this run') && page1.includes('Roadmap timeline'))
+
+    /* ---- run 2: a delegated run that leaves the roadmap alone ---- */
+    script.plans.push(plan)
+    script.workers.push('Nothing here touches the roadmap.')
+    script.synths.push('SUMMARY\nNothing to record on the roadmap.')
+    freshAgentConversation()
+    await sendUserMessage('Tidy up the report code', [])
+    const msg2 = lastAssistant()
+    const r2 = msg2.agent?.roadmap
+    check('the next run\'s planner sees the roadmap as the previous run left it', seen[3]?.kind === 'plan' && seen[3].sys.includes('- [x] Report card'))
+    check(
+      'a delegated run that never touches the roadmap still reports where it stands',
+      Boolean(r2) && tl(r2?.previous) === '2:Report card:done' && tl(r2?.current) === '3:Roadmap timeline:active' && tl(r2?.next) === '4:Docs:todo' && r2?.changes.length === 0 && same(r2?.before, r2?.progress),
+      `${tl(r2?.previous)} | ${tl(r2?.current)} | ${tl(r2?.next)}`,
+    )
+    check('…and the card says no step changed', html(msg2).includes('No step changed status in this run'))
+
+    /* ---- run 3: a greeting next to the roadmap ---- */
+    script.plans.push(JSON.stringify({ mode: 'answer', answer: 'Hi there!' }))
+    freshAgentConversation()
+    await sendUserMessage('hello', [])
+    const msg3 = lastAssistant()
+    check('a greeting answered directly, with the roadmap untouched, gets no report', msg3.status === 'complete' && msg3.agent?.steps.length === 0 && msg3.agent?.roadmap === undefined)
+
+    /* ---- run 4: a direct answer that edits the roadmap ---- */
+    const v3 = v2.replace('- [~] Roadmap timeline', '- [x] Roadmap timeline')
+    script.plans.push(JSON.stringify({ mode: 'answer', answer: `Marked the timeline step done.\n\n${fileBlock('markdown:ROADMAP.md', v3)}` }))
+    freshAgentConversation()
+    await sendUserMessage('Mark the roadmap timeline step as done', [])
+    const msg4 = lastAssistant()
+    const r4 = msg4.agent?.roadmap
+    check(
+      'a direct answer that edits the roadmap still gets a report',
+      msg4.agent?.steps.length === 0 && Boolean(r4) && tl(r4?.current) === '3:Roadmap timeline:done*' && r4?.progress.percent === 75,
+      JSON.stringify(r4),
+    )
+
+    /* ---- run 5: the run creates the roadmap ---- */
+    useFs.getState().deleteFile('ROADMAP.md')
+    script.plans.push(plan)
+    script.workers.push('Drafted the plan.')
+    script.synths.push(`SUMMARY\nCreated a roadmap.\n\n${fileBlock('markdown:ROADMAP.md', ['# Roadmap', '', '- [ ] Scaffold', '- [ ] Ship', ''].join('\n'))}`)
+    freshAgentConversation()
+    await sendUserMessage('Create a roadmap for the project', [])
+    const r5 = lastAssistant().agent?.roadmap
+    check(
+      'a roadmap the run created is reported as new: no "before", no changes, starts at step 1',
+      Boolean(r5) && r5?.before === undefined && r5?.changes.length === 0 && tl(r5?.current) === '1:Scaffold:todo' && r5?.progress.total === 2,
+      JSON.stringify(r5),
+    )
+
+    /* ---- run 6: local file system switched off ---- */
+    useSettings.getState().setAgent({ useLocalFs: false })
+    script.plans.push(plan)
+    script.workers.push('ok')
+    script.synths.push('SUMMARY\nDone.')
+    freshAgentConversation()
+    await sendUserMessage('Do a thing', [])
+    check(
+      'with the local file system off there is no roadmap context and no report',
+      lastAssistant().agent?.roadmap === undefined && !seen[seen.length - 1]!.sys.includes('LOCAL FILE SYSTEM WORKSPACE'),
+    )
+    useSettings.getState().setAgent({ useLocalFs: true })
+  })
+  useFs.getState().clearAll()
+}
+
+async function testRoadmapFromGitHub() {
+  console.log('roadmap from a connected GitHub repository:')
+  useFs.getState().clearAll()
+  const token = 'ghp_' + 'r'.repeat(24)
+  const remoteRoadmap = '# Roadmap\n\n- [x] Foundation\n- [~] Provider dialog\n- [ ] Agent mode\n'
+  const fakeGh = await startFakeGitHub({
+    '/repos/octo/demo': () => ({
+      status: 200,
+      json: {
+        id: 1,
+        name: 'demo',
+        full_name: 'octo/demo',
+        owner: { login: 'octo', avatar_url: '' },
+        private: false,
+        fork: false,
+        archived: false,
+        description: 'demo',
+        default_branch: 'main',
+        html_url: 'https://github.com/octo/demo',
+        pushed_at: null,
+        updated_at: null,
+        language: 'TypeScript',
+        stargazers_count: 1,
+      },
+    }),
+    '/repos/octo/demo/branches': () => ({ status: 200, json: [{ name: 'main', commit: { sha: 'head_sha_1' } }] }),
+    '/repos/octo/demo/git/trees/main': () => ({
+      status: 200,
+      json: {
+        truncated: false,
+        tree: [
+          { path: 'ROADMAP.md', mode: '100644', type: 'blob', sha: 'sha_rm_1', size: remoteRoadmap.length },
+          { path: 'src/app.ts', mode: '100644', type: 'blob', sha: 'sha_app_1', size: 20 },
+        ],
+      },
+    }),
+    '/repos/octo/demo/contents/ROADMAP.md': () => ({
+      status: 200,
+      json: {
+        type: 'file',
+        name: 'ROADMAP.md',
+        path: 'ROADMAP.md',
+        sha: 'sha_rm_1',
+        size: remoteRoadmap.length,
+        encoding: 'base64',
+        content: Buffer.from(remoteRoadmap).toString('base64'),
+      },
+    }),
+  })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('https://api.github.com')) return realFetch(url.replace('https://api.github.com', fakeGh.base), init)
+    return realFetch(url, init)
+  }) as typeof fetch
+
+  try {
+    useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo'], repos: [], tree: undefined, preview: undefined })
+    const opened = await useGitHub.getState().openRepo('octo/demo', { branch: 'main' })
+    check('openRepo loads octo/demo@main', opened === true && useGitHub.getState().tree?.entries.length === 2)
+
+    const sync = (hint: string) => useGitHub.getState().syncRepoFilesForPrompt(hint)
+    const pulled = await sync('please refactor the parser')
+    check(
+      'the repo roadmap is pulled into the workspace although the prompt never names it',
+      pulled.length === 1 && pulled[0]?.path === 'ROADMAP.md' && useFs.getState().readFile('ROADMAP.md')?.content === remoteRoadmap,
+      JSON.stringify(pulled.map((f) => f.path)),
+    )
+    const pulledFile = useFs.getState().readFile('ROADMAP.md')
+    check('…as a synced remote file, not a local modification', pulledFile?.remote?.repo === 'octo/demo' && pulledFile.dirty === false)
+    check('files the prompt does not need are not pulled', !useFs.getState().exists('src/app.ts'))
+    check('a roadmap already in the workspace is not pulled again', (await sync('anything else')).length === 0)
+    useFs.getState().deleteFile('ROADMAP.md')
+    check('a roadmap the user deleted locally is not silently pulled back', (await sync('anything')).length === 0 && !useFs.getState().exists('ROADMAP.md'))
+    useFs.setState({ deletedRemotes: {} })
+    check('an empty prompt still pulls the roadmap when it is missing', (await sync('')).length === 1)
+
+    // The whole loop: an agent run picks the repo roadmap up itself, plans with it and updates it.
+    useFs.getState().clearAll()
+    const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+    await withScriptedAgent(script, async ({ seen }) => {
+      const updated = remoteRoadmap.replace('- [~] Provider dialog', '- [x] Provider dialog')
+      script.plans.push(onePlan('Finish the dialog', 'Finish the provider dialog.'))
+      script.workers.push('Implemented the dialog.')
+      script.synths.push(`SUMMARY\nDone.\n\n${fileBlock('markdown:ROADMAP.md', updated)}`)
+      freshAgentConversation()
+      await sendUserMessage('Finish the provider dialog', [])
+      const r = lastAssistant().agent?.roadmap
+      check('the agent pulled the repo roadmap on its own and planned with it', seen[0]?.kind === 'plan' && seen[0].sys.includes('- [~] Provider dialog'), seen[0]?.sys.slice(-200))
+      check(
+        'the run reports the repo roadmap: Foundation → Provider dialog (just finished) → Agent mode, 33% → 67%',
+        tl(r?.previous) === '1:Foundation:done' && tl(r?.current) === '2:Provider dialog:done*' && tl(r?.next) === '3:Agent mode:todo' && r?.before?.percent === 33 && r?.progress.percent === 67,
+        JSON.stringify(r),
+      )
+      const file = useFs.getState().readFile('ROADMAP.md')
+      check(
+        'the updated roadmap is a pending change to the repo file, ready to commit',
+        file?.dirty === true && file.remote?.repo === 'octo/demo' && file.content.includes('- [x] Provider dialog'),
+        JSON.stringify({ dirty: file?.dirty, remote: file?.remote?.repo }),
+      )
+    })
+  } finally {
+    globalThis.fetch = realFetch
+    useFs.getState().clearAll()
+    useGitHub.getState().signOut()
+    fakeGh.close()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Conversation menu: rename + archive                                  */
+/* ------------------------------------------------------------------ */
+
+const convFixture = (id: string, title: string, updatedAt: number, extra: Partial<Conversation> = {}): Conversation => ({
+  id,
+  title,
+  createdAt: updatedAt,
+  updatedAt,
+  messages: [],
+  ...extra,
+})
+
+const chatMessage = (conversationId: string, role: 'user' | 'assistant', content: string): Message => ({
+  id: `${conversationId}-${role}-${content.length}`,
+  role,
+  conversationId,
+  content,
+  createdAt: 1,
+  status: 'complete',
+})
+
+/** Replace the store's conversations with `list` (same order) and open `openId`. */
+function seedConversations(list: Conversation[], openId?: string) {
+  useChat.getState().clearAllConversations()
+  // importConversations puts each newcomer first, so feed the list back to front.
+  useChat.getState().importConversations([...list].reverse())
+  if (openId !== undefined) useChat.getState().selectConversation(openId)
+}
+
+function testConversationHelpers() {
+  console.log('conversation helpers (titles · hydrate · schema · menu placement):')
+
+  /* --- normalizeTitle ---------------------------------------------------- */
+  check('normalizeTitle collapses runs of spaces, newlines and tabs', normalizeTitle('  a \n b\t\tc  ') === 'a b c', normalizeTitle('  a \n b\t\tc  '))
+  check('normalizeTitle: blank → "" (which means "keep the old title")', normalizeTitle('  \n\t ') === '' && normalizeTitle('') === '')
+  check('normalizeTitle leaves an ordinary title alone', normalizeTitle('Trip planning: Lisbon') === 'Trip planning: Lisbon')
+  check(`normalizeTitle caps at ${MAX_TITLE_LENGTH} characters`, normalizeTitle('x'.repeat(500)).length === MAX_TITLE_LENGTH)
+  const emoji = normalizeTitle('😀'.repeat(400))
+  check(
+    'normalizeTitle cuts by code point, never through the middle of an emoji',
+    Array.from(emoji).length === MAX_TITLE_LENGTH && Array.from(emoji).every((c) => c === '😀') && !/[\ud800-\udbff](?![\udc00-\udfff])/.test(emoji),
+  )
+  check(
+    'normalizeTitle trims a space exposed by the cut',
+    normalizeTitle('a'.repeat(MAX_TITLE_LENGTH - 1) + ' tail') === 'a'.repeat(MAX_TITLE_LENGTH - 1),
+  )
+
+  /* --- firstActiveId ----------------------------------------------------- */
+  const rec = { a: convFixture('a', 'A', 30, { archived: true }), b: convFixture('b', 'B', 20), c: convFixture('c', 'C', 10) }
+  check('firstActiveId skips archived conversations', firstActiveId(['a', 'b', 'c'], rec) === 'b')
+  check('firstActiveId honours `except`', firstActiveId(['a', 'b', 'c'], rec, 'b') === 'c')
+  check('firstActiveId → "" when everything is archived or excluded', firstActiveId(['a'], rec) === '' && firstActiveId(['b'], rec, 'b') === '')
+  check('firstActiveId ignores ids missing from the record', firstActiveId(['ghost', 'c'], rec) === 'c')
+
+  /* --- hydrateConversations ---------------------------------------------- */
+  const asStored = (list: unknown[]) => JSON.parse(JSON.stringify(list)) as unknown
+  const legacy = hydrateConversations(asStored([convFixture('old', 'Legacy', 5), convFixture('new', 'Newer', 9)]))
+  check(
+    'a conversation saved before archiving existed loads as active',
+    legacy.conversations.old?.archived === undefined && legacy.order.join() === 'new,old' && legacy.currentId === 'new',
+  )
+  const newestArchived = hydrateConversations(asStored([convFixture('old', 'Old', 5), convFixture('arch', 'Newest but archived', 99, { archived: true })]))
+  check(
+    'startup opens the newest ACTIVE conversation, not an archived one',
+    newestArchived.currentId === 'old' && newestArchived.order[0] === 'arch' && newestArchived.conversations.arch?.archived === true,
+    JSON.stringify({ cur: newestArchived.currentId, order: newestArchived.order }),
+  )
+  const allArchived = hydrateConversations(asStored([convFixture('x', 'X', 5, { archived: true })]))
+  check('everything archived → no open conversation (the empty state)', allArchived.currentId === '' && allArchived.order.join() === 'x')
+  const mangledList = asStored([convFixture('m', 'Mangled', 9), convFixture('n', 'Fine', 4)]) as Array<Record<string, unknown>>
+  mangledList[0]!.archived = 'yes please'
+  const mangled = hydrateConversations(mangledList)
+  check(
+    'a mangled archived flag degrades to "active" and keeps EVERY conversation',
+    mangled.order.length === 2 && mangled.conversations.m?.archived === undefined && mangled.currentId === 'm',
+    JSON.stringify(mangled.order),
+  )
+  check('archived:false (e.g. from an export) means active', hydrateConversations(asStored([convFixture('f', 'False', 5, { archived: false })])).currentId === 'f')
+  check(
+    'garbage in storage → empty state, no throw',
+    hydrateConversations('nope').order.length === 0 && hydrateConversations(null).currentId === '' && hydrateConversations([{ id: 1 }]).order.length === 0,
+  )
+
+  /* --- schema ------------------------------------------------------------ */
+  const base = { id: 'c', title: 't', createdAt: 1, updatedAt: 1, messages: [] }
+  const withFlag = (archived: unknown) => conversationSchema.safeParse({ ...base, archived })
+  check('schema keeps archived:true', withFlag(true).success && withFlag(true).data?.archived === true)
+  check('schema keeps archived:false', withFlag(false).data?.archived === false)
+  const absent = conversationSchema.safeParse(base)
+  check('schema: an absent flag stays absent', absent.success && !('archived' in absent.data))
+  const bad = withFlag('yes')
+  check('schema: a mangled flag is dropped but the conversation still parses', bad.success && bad.data.archived === undefined)
+  const bundle = exportBundleSchema.safeParse({ app: 'slade', version: 1, exportedAt: 1, conversations: [{ ...base, archived: true }] })
+  check('an export bundle round-trips archived', bundle.success && bundle.data.conversations?.[0]?.archived === true, JSON.stringify(bundle.error?.issues.slice(0, 2)))
+
+  /* --- placeMenu --------------------------------------------------------- */
+  const VP = { width: 1000, height: 700 }
+  const MENU = { width: 200, height: 80 }
+  const rectAt = (left: number, top: number, w = 30, h = 30) => ({ left, top, right: left + w, bottom: top + h })
+
+  const below = placeMenu({ kind: 'rect', rect: rectAt(100, 50) }, MENU, VP)
+  check('a button with room below: the menu drops just under it, left edges aligned', below.left === 100 && below.top === 50 + 30 + MENU_GAP && !below.flipped, JSON.stringify(below))
+  const endAligned = placeMenu({ kind: 'rect', rect: rectAt(400, 50), align: 'end' }, MENU, VP)
+  check('align "end" lines the right edges up', endAligned.left === 430 - 200 && endAligned.top === below.top, JSON.stringify(endAligned))
+  const low = placeMenu({ kind: 'rect', rect: rectAt(100, 640) }, MENU, VP)
+  check('too low to drop down → flips above the button', low.flipped && low.top === 640 - MENU_GAP - MENU.height, JSON.stringify(low))
+  const shortMoreBelow = placeMenu({ kind: 'rect', rect: rectAt(100, 10, 30, 20) }, MENU, { width: 1000, height: 100 })
+  check('fits nowhere, more room below → stays below but is pulled back on-screen', !shortMoreBelow.flipped && shortMoreBelow.top === 100 - 80 - MENU_MARGIN, JSON.stringify(shortMoreBelow))
+  const shortMoreAbove = placeMenu({ kind: 'rect', rect: rectAt(100, 80, 30, 16) }, MENU, { width: 1000, height: 100 })
+  check('fits nowhere, more room above → flips and is pulled back on-screen', shortMoreAbove.flipped && shortMoreAbove.top === MENU_MARGIN, JSON.stringify(shortMoreAbove))
+  check('a button hanging off the left edge is clamped to the margin', placeMenu({ kind: 'rect', rect: rectAt(-50, 50) }, MENU, VP).left === MENU_MARGIN)
+  check('a button at the far right is clamped so the menu stays inside', placeMenu({ kind: 'rect', rect: rectAt(950, 50, 40) }, MENU, VP).left === 1000 - 200 - MENU_MARGIN)
+  check('align "end" near the left edge is clamped to the margin', placeMenu({ kind: 'rect', rect: rectAt(0, 50), align: 'end' }, MENU, VP).left === MENU_MARGIN)
+
+  const pt = placeMenu({ kind: 'point', x: 100, y: 100 }, MENU, VP)
+  check('right-click: the menu corner sits on the pointer', pt.left === 100 && pt.top === 100 && !pt.flipped)
+  const ptRight = placeMenu({ kind: 'point', x: 900, y: 100 }, MENU, VP)
+  check('right-click near the right edge mirrors to the pointer’s left', ptRight.left === 700 && ptRight.top === 100, JSON.stringify(ptRight))
+  const ptBottom = placeMenu({ kind: 'point', x: 100, y: 650 }, MENU, VP)
+  check('right-click near the bottom mirrors upward', ptBottom.top === 570 && ptBottom.flipped, JSON.stringify(ptBottom))
+  const ptCorner = placeMenu({ kind: 'point', x: 990, y: 690 }, MENU, VP)
+  check('right-click in the corner mirrors both ways', ptCorner.left === 790 && ptCorner.top === 610, JSON.stringify(ptCorner))
+  const tiny = placeMenu({ kind: 'point', x: 10, y: 10 }, MENU, { width: 150, height: 50 })
+  check('a window smaller than the menu: the top-left edge wins, no NaN', tiny.left === MENU_MARGIN && tiny.top === MENU_MARGIN, JSON.stringify(tiny))
+
+  // Property check: wherever a button or the pointer is, a menu that fits ends up fully inside the window.
+  let seed = 12345
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0
+    return seed / 2 ** 32
+  }
+  let escaped = 0
+  let notBelow = 0
+  let cases = 0
+  for (let i = 0; i < 3000; i++) {
+    const vw = 300 + rnd() * 1500
+    const vh = 200 + rnd() * 900
+    const mw = 120 + rnd() * 200
+    const mh = 40 + rnd() * 150
+    if (mw > vw - 2 * MENU_MARGIN || mh > vh - 2 * MENU_MARGIN) continue
+    cases++
+    const x = rnd() * vw
+    const y = rnd() * vh
+    const w = 16 + rnd() * 60
+    const h = 16 + rnd() * 30
+    const anchor: MenuAnchor =
+      rnd() < 0.5
+        ? { kind: 'point', x, y }
+        : { kind: 'rect', rect: { left: x, top: y, right: x + w, bottom: y + h }, align: rnd() < 0.5 ? 'start' : 'end' }
+    const p = placeMenu(anchor, { width: mw, height: mh }, { width: vw, height: vh })
+    const inside = p.left >= MENU_MARGIN - 1e-9 && p.top >= MENU_MARGIN - 1e-9 && p.left + mw <= vw - MENU_MARGIN + 1e-9 && p.top + mh <= vh - MENU_MARGIN + 1e-9
+    if (!inside) escaped++
+    if (anchor.kind === 'rect' && anchor.rect.bottom + MENU_GAP + mh <= vh - MENU_MARGIN) {
+      if (p.flipped || Math.abs(p.top - (anchor.rect.bottom + MENU_GAP)) > 1e-9) notBelow++
+    }
+  }
+  check(`${cases} random anchors: the menu always lands fully inside the window`, escaped === 0, `${escaped} escaped`)
+  check('…and a button with room below always gets the menu directly below it', notBelow === 0, `${notBelow} misplaced`)
+}
+
+async function testConversationArchive() {
+  console.log('archive · rename (store):')
+  const T0 = 1_000_000
+  const list = () => [
+    convFixture('a', 'Alpha', T0 + 4),
+    convFixture('b', 'Beta', T0 + 3),
+    convFixture('c', 'Gamma', T0 + 2),
+    convFixture('d', 'Delta', T0 + 1),
+  ]
+  const st = () => useChat.getState()
+  const conv = (id: string) => useChat.getState().conversations[id]
+  const hasFlag = (id: string) => Boolean(conv(id) && 'archived' in conv(id)!)
+
+  /* --- archive ------------------------------------------------------------ */
+  seedConversations(list(), 'a')
+  check('seed: order and open chat are as expected', st().order.join() === 'a,b,c,d' && st().currentId === 'a')
+  st().archiveConversation('c')
+  check('archive sets the flag', conv('c')?.archived === true)
+  check('archive keeps the order (it stays in the list, just not in the main group)', st().order.join() === 'a,b,c,d')
+  check('archive is not chat activity: updatedAt is untouched', conv('c')?.updatedAt === T0 + 2, String(conv('c')?.updatedAt))
+  check('archiving a chat that is not open leaves the open chat open', st().currentId === 'a')
+  const snapshot = st().conversations
+  st().archiveConversation('c')
+  check('archiving twice is a no-op (same state object)', st().conversations === snapshot)
+  st().archiveConversation('nope')
+  check('archiving an unknown id is a no-op', st().conversations === snapshot)
+
+  st().archiveConversation('a')
+  check('archiving the OPEN chat moves the view to the next active one', st().currentId === 'b', st().currentId)
+  st().archiveConversation('b')
+  check('…skipping archived chats (c is archived) → d', st().currentId === 'd', st().currentId)
+  st().archiveConversation('d')
+  check('archiving the last active chat leaves no open chat (the empty state)', st().currentId === '')
+  check('all four are flagged', ['a', 'b', 'c', 'd'].every((id) => conv(id)?.archived === true))
+
+  /* --- unarchive ---------------------------------------------------------- */
+  st().unarchiveConversation('c')
+  check('unarchive removes the flag entirely (not archived:false)', conv('c') !== undefined && !hasFlag('c'))
+  check('unarchive keeps updatedAt', conv('c')?.updatedAt === T0 + 2)
+  check('unarchiving does not open the chat', st().currentId === '')
+  const beforeNoop = st().conversations
+  st().unarchiveConversation('c')
+  check('unarchiving an active chat is a no-op', st().conversations === beforeNoop)
+
+  /* --- rename ------------------------------------------------------------- */
+  seedConversations(list(), 'a')
+  st().renameConversation('b', '  New\n name  ')
+  check('rename normalises whitespace', conv('b')?.title === 'New name', conv('b')?.title)
+  check('rename is not chat activity: updatedAt is untouched', conv('b')?.updatedAt === T0 + 3)
+  check('rename does not reorder the list', st().order.join() === 'a,b,c,d')
+  const renamed = st().conversations
+  st().renameConversation('b', '   ')
+  check('a blank name is ignored', conv('b')?.title === 'New name' && st().conversations === renamed)
+  st().renameConversation('b', 'New name')
+  check('renaming to the same name is a no-op', st().conversations === renamed)
+  st().renameConversation('ghost', 'x')
+  check('renaming an unknown id is a no-op', st().conversations === renamed)
+  st().renameConversation('b', 'y'.repeat(300))
+  check(`an over-long name is capped at ${MAX_TITLE_LENGTH}`, conv('b')?.title.length === MAX_TITLE_LENGTH)
+  st().renameConversation('c', 'Renamed and archived')
+  st().archiveConversation('c')
+  check('an archived chat can be renamed and stays archived', conv('c')?.title === 'Renamed and archived' && conv('c')?.archived === true)
+
+  /* --- writing to an archived chat ---------------------------------------- */
+  seedConversations(list(), 'a')
+  st().archiveConversation('c')
+  st().appendMessage(chatMessage('c', 'assistant', 'a late reply'))
+  check('a reply landing after the user archived the chat does NOT un-archive it', conv('c')?.archived === true)
+  st().appendMessage(chatMessage('c', 'user', 'hello again'))
+  check('a new USER message brings an archived chat back to the main list', conv('c') !== undefined && !hasFlag('c'))
+  check('…and that is activity: updatedAt moves forward', (conv('c')?.updatedAt ?? 0) > T0 + 2)
+  check('…with every message kept', conv('c')?.messages.length === 2)
+
+  /* --- delete / import ------------------------------------------------------ */
+  seedConversations(list(), 'b')
+  st().archiveConversation('a')
+  st().deleteConversation('b')
+  check('deleting the open chat falls back to an ACTIVE one, never an archived one', st().currentId === 'c', st().currentId)
+  st().deleteConversation('a')
+  check('deleting an archived chat leaves the open chat alone', st().currentId === 'c')
+  seedConversations([convFixture('x', 'X', 5, { archived: true }), convFixture('y', 'Y', 4)], 'y')
+  st().deleteConversation('y')
+  check('deleting the last active chat opens nothing when only archived ones remain', st().currentId === '')
+
+  st().clearAllConversations()
+  st().importConversations([convFixture('i1', 'I1', 5, { archived: true })])
+  check('importing only archived chats opens nothing', st().currentId === '')
+  st().importConversations([convFixture('i2', 'I2', 6)])
+  check('…and then importing an active one opens it', st().currentId === 'i2')
+
+  /* --- persistence ---------------------------------------------------------- */
+  seedConversations(list(), 'a')
+  st().archiveConversation('b')
+  await new Promise((r) => setTimeout(r, 500)) // the store persists on a 350ms debounce
+  const stored = () => JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]') as Conversation[]
+  check(
+    'the archived flag is written to storage',
+    stored().find((c) => c.id === 'b')?.archived === true && stored().find((c) => c.id === 'a')?.archived === undefined,
+  )
+  const reloaded = hydrateConversations(stored())
+  check('…and survives a reload', reloaded.conversations.b?.archived === true && reloaded.currentId === 'a')
+  check('…without changing its time', reloaded.conversations.b?.updatedAt === T0 + 3)
+  st().unarchiveConversation('b')
+  await new Promise((r) => setTimeout(r, 500))
+  check('un-archiving removes the flag from storage too', !('archived' in stored().find((c) => c.id === 'b')!))
+  check('storage still validates against the schema', z.array(conversationSchema).safeParse(stored()).success)
+  st().clearAllConversations()
+}
+
+/**
+ * Server rendering reads each store's *initial* state (see testGitHubUiRenders), so
+ * mirror the live chat and UI state into it for one render, then put it back.
+ */
+function renderWithLiveState(el: Parameters<typeof renderToString>[0]): string {
+  const stores = [useChat, useUI] as const
+  const inits = stores.map((st) => st.getInitialState() as unknown as Record<string, unknown>)
+  const originals = inits.map((init) => ({ ...init }))
+  stores.forEach((st, n) => Object.assign(inits[n]!, st.getState()))
+  try {
+    return renderToString(el).replace(/<!-- -->/g, '')
+  } finally {
+    inits.forEach((init, n) => {
+      for (const k of Object.keys(init)) delete init[k]
+      Object.assign(init, originals[n])
+    })
+  }
+}
+
+function testConversationMenuUi() {
+  console.log('conversation menu UI:')
+  const html = renderWithLiveState
+  const T0 = 1_000_000
+  const tag = (markup: string, cls: string) => new RegExp(`<button[^>]*class="${cls}"[^>]*>`).exec(markup)?.[0] ?? ''
+  const tags = (markup: string, cls: string) => markup.match(new RegExp(`<button[^>]*class="[^"]*${cls}[^"]*"[^>]*>`, 'g')) ?? []
+
+  /* --- sidebar -------------------------------------------------------------- */
+  seedConversations(
+    [
+      convFixture('a', 'Alpha chat', T0 + 4),
+      convFixture('b', 'Beta <img src=x onerror=alert(1)>', T0 + 3),
+      convFixture('c', 'Gamma archived', T0 + 2, { archived: true }),
+      convFixture('d', 'Delta archived', T0 + 1, { archived: true }),
+    ],
+    'a',
+  )
+  const side = html(createElement(Sidebar))
+  check('the main list shows the active chats', side.includes('Alpha chat') && side.includes('Beta '))
+  check('archived chats are not in the main list', !side.includes('Gamma archived') && !side.includes('Delta archived'))
+  const head = tag(side, 'conv-group-head')
+  check('an Archived group is offered, with a spoken count', head.includes('aria-label="Archived, 2 conversations"'), head)
+  check('…collapsed by default, wired to its list', head.includes('aria-expanded="false"') && head.includes('aria-controls="conv-archived-list"'))
+  check('…and clickable when not searching', !head.includes('disabled'))
+  check('the count is shown', /conv-count">2</.test(side))
+
+  const options = tags(side, 'conv-menu-btn')
+  check('each visible row has an options button', options.length === 2, String(options.length))
+  check('…that announces a menu popup, closed', options.every((b) => b.includes('aria-haspopup="menu"') && b.includes('aria-expanded="false"')))
+  check('…and says which conversation it belongs to', options[0]?.includes('aria-label="Options for Alpha chat"') === true, options[0])
+  check('each row also has its own delete button', tags(side, 'conv-delete').length === 2)
+  check('rows are containers with sibling buttons, not role="button" wrappers around buttons', !side.includes('role="button"'))
+  check('exactly the open chat is marked aria-current', (side.match(/aria-current="true"/g) ?? []).length === 1)
+  check('titles are escaped: no markup gets injected', !side.includes('<img') && side.includes('Beta &lt;img'))
+
+  seedConversations([convFixture('x', 'Only archived', T0, { archived: true })])
+  const allArchived = html(createElement(Sidebar))
+  check('everything archived → says so and still offers the group', allArchived.includes('Everything is archived.') && allArchived.includes('conv-group-head'))
+  useChat.getState().clearAllConversations()
+  check('no conversations → the plain empty message', html(createElement(Sidebar)).includes('No conversations yet.'))
+
+  /* --- header ---------------------------------------------------------------- */
+  seedConversations([convFixture('a', 'Alpha chat', T0 + 4), convFixture('c', 'Gamma archived', T0 + 2, { archived: true })], 'a')
+  const header = html(createElement(Header))
+  const titleBtn = tag(header, 'header-title-btn')
+  check('the header name is a button that announces a menu', titleBtn.includes('aria-haspopup="menu"') && titleBtn.includes('aria-expanded="false"'), titleBtn)
+  check('…named for the conversation', titleBtn.includes('aria-label="Conversation options: Alpha chat"'))
+  check('an active chat has no Archived badge', !header.includes('header-badge'))
+  useChat.getState().selectConversation('c')
+  const archivedHeader = html(createElement(Header))
+  check('an archived chat that is open shows the Archived badge', archivedHeader.includes('header-badge') && archivedHeader.includes('>Archived<'))
+  useChat.getState().clearAllConversations()
+  const noneHeader = html(createElement(Header))
+  check('no conversation → a plain "Slade" title and no menu button', !noneHeader.includes('header-title-btn') && noneHeader.includes('>Slade<'))
+
+  /* --- archive with undo (toasts) ---------------------------------------------- */
+  const toasts = () => useUI.getState().toasts
+  seedConversations([convFixture('a', 'Alpha chat', T0 + 4), convFixture('b', 'Beta', T0 + 3), convFixture('c', 'A'.repeat(90), T0 + 2)], 'a')
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('a')
+  const t1 = toasts()[0]
+  check('archiving raises a success toast', toasts().length === 1 && t1?.kind === 'success' && t1.title === 'Conversation archived')
+  check('…that says which chat and where it went', t1?.detail?.includes('“Alpha chat”') === true && t1.detail.includes('Archived in the sidebar'), t1?.detail)
+  check('…with an Undo action', t1?.action?.label === 'Undo')
+  check('the open chat moved on to the next one', useChat.getState().currentId === 'b')
+  t1?.action?.onClick()
+  check('Undo restores the chat AND the view (it was the open one)', useChat.getState().conversations.a?.archived === undefined && useChat.getState().currentId === 'a')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('b')
+  useChat.getState().selectConversation('c') // the user moved on before pressing Undo
+  toasts()[0]?.action?.onClick()
+  check('Undo for a chat that was not open does not yank the view back', useChat.getState().conversations.b?.archived === undefined && useChat.getState().currentId === 'c')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('c')
+  const longDetail = toasts()[0]?.detail ?? ''
+  check('a long title is shortened inside the toast', longDetail.includes('…') && longDetail.length < 90, longDetail)
+
+  seedConversations([convFixture('a', 'Alpha', T0 + 2), convFixture('b', 'Beta', T0 + 1)], 'a')
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('a')
+  useChat.getState().deleteConversation('a')
+  toasts()[0]?.action?.onClick()
+  check('Undo after the chat was deleted does nothing, and never points the view at a ghost', !useChat.getState().conversations.a && useChat.getState().currentId === 'b')
+
+  useUI.setState({ toasts: [] })
+  archiveWithUndo('b')
+  archiveWithUndo('b')
+  archiveWithUndo('ghost')
+  check('archiving twice, or an unknown id, raises no extra toast', toasts().length === 1)
+  useUI.setState({ toasts: [] })
+  unarchiveWithToast('nope')
+  check('unarchiving an unknown or active chat is a no-op', toasts().length === 0)
+  unarchiveWithToast('b')
+  check('unarchive raises a plain confirmation without an Undo', toasts()[0]?.title === 'Conversation restored' && toasts()[0]?.action === undefined, JSON.stringify(toasts()[0]))
+
+  /* --- the toast component ------------------------------------------------------ */
+  useUI.setState({ toasts: [] })
+  useUI.getState().toast({ kind: 'success', title: 'With button', action: { label: 'Undo', onClick: () => {} } })
+  useUI.getState().toast({ kind: 'info', title: 'Plain' })
+  const toastHtml = html(createElement(Toasts))
+  check('a toast with an action renders its button', toastHtml.includes('class="toast-action"') && toastHtml.includes('>Undo<'))
+  check('a plain toast has none', (toastHtml.match(/toast-action/g) ?? []).length === 1)
+
+  const realSetTimeout = globalThis.setTimeout
+  const delays: number[] = []
+  ;(globalThis as Record<string, unknown>).setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+    delays.push(ms ?? 0)
+    return realSetTimeout(fn, ms, ...rest)
+  }) as typeof setTimeout
+  try {
+    useUI.setState({ toasts: [] })
+    useUI.getState().toast({ kind: 'success', title: 'a', action: { label: 'Undo', onClick: () => {} } })
+    useUI.getState().toast({ kind: 'info', title: 'b' })
+    useUI.getState().toast({ kind: 'error', title: 'c' })
+  } finally {
+    ;(globalThis as Record<string, unknown>).setTimeout = realSetTimeout
+  }
+  check('a toast with a button lingers like an error (7s) so it can be pressed; a plain one goes at 4.2s', same(delays, [7000, 4200, 7000]), JSON.stringify(delays))
+
+  useUI.setState({ toasts: [] })
+  useChat.getState().clearAllConversations()
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -3143,7 +4370,11 @@ async function main() {
   testOrchestratorPrompt()
   testPlannerParsing()
   testWorkerResolution()
+  testRoadmapPaths()
+  testRoadmapParsing()
+  testRoadmapReport()
   await testAgentMode()
+  await testRoadmapSimulator()
   testRepoIdentifiers()
   await testGitHubClient()
   await testGitHubErrors()
@@ -3160,9 +4391,17 @@ async function main() {
   testLocalFsPrimitives()
   testLocalFsStore()
   await testAgentLocalFsIntegration()
+  await testRoadmapAgentRun()
+  testRoadmapPersistence()
+  testRoadmapUi()
+  testRoadmapContextPriority()
   testLocalFsUiRenders()
   await testGitLocalFsReadWriteAcross()
+  await testRoadmapFromGitHub()
   testInlineThoughtsRendering()
+  testConversationHelpers()
+  await testConversationArchive()
+  testConversationMenuUi()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

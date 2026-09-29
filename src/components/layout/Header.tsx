@@ -1,11 +1,14 @@
-import { useState } from 'react'
-import { useCurrentConversation, useChat } from '../../store/chat'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCurrentConversation, useChat, MAX_TITLE_LENGTH } from '../../store/chat'
 import { useSettings } from '../../store/settings'
 import { useHealth } from '../../store/health'
 import { useGitHub } from '../../store/github'
 import { useFs } from '../../store/fs'
 import { useUI } from '../../store/ui'
-import { IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
+import type { MenuAnchor } from '../../lib/menuPlacement'
+import { RenameInput } from '../common/RenameInput'
+import { ConversationMenu, type ConversationMenuState } from './ConversationMenu'
+import { IconChevronDown, IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
 
 /** Local file system workspace toggle — shows a dot when files are stored. */
 function FilesButton() {
@@ -79,11 +82,42 @@ export function Header() {
   const openSettings = useUI((s) => s.openSettings)
   const toggleSidebar = useUI((s) => s.toggleSidebar)
   const toggleRail = useUI((s) => s.toggleRail)
-  const [editing, setEditing] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [menu, setMenu] = useState<ConversationMenuState | null>(null)
+  const titleRef = useRef<HTMLButtonElement>(null)
+  const convId = conv?.id
+  // A rename belongs to the conversation it started on. Deriving this from the id (rather
+  // than a plain flag) ends the edit in the very render that switches chats, so the field
+  // is never on screen carrying the next chat's handlers.
+  const editing = editingId !== null && editingId === convId
 
-  const commitTitle = (title: string) => {
-    if (conv && title.trim()) useChat.getState().renameConversation(conv.id, title.trim())
-    setEditing(false)
+  // Nothing half-done follows you to another conversation, or waits for you to come back.
+  useEffect(() => {
+    setMenu(null)
+    setEditingId(null)
+  }, [convId])
+
+  const commitTitle = (id: string, title: string) => {
+    // Blank or unchanged text is ignored by the store.
+    useChat.getState().renameConversation(id, title)
+    setEditingId((cur) => (cur === id ? null : cur))
+  }
+
+  const openMenu = (anchor: MenuAnchor) => {
+    if (conv && titleRef.current) setMenu({ convId: conv.id, anchor, opener: titleRef.current })
+  }
+
+  // A click on the name toggles the menu (it hangs off the button, below it).
+  const toggleMenu = () => {
+    if (menu) return setMenu(null)
+    const btn = titleRef.current
+    if (btn) openMenu({ kind: 'rect', rect: btn.getBoundingClientRect(), align: 'start' })
+  }
+
+  // Right-click gives the same menu, at the pointer.
+  const onContextMenu = (e: MouseEvent) => {
+    e.preventDefault()
+    openMenu({ kind: 'point', x: e.clientX, y: e.clientY })
   }
 
   return (
@@ -93,21 +127,37 @@ export function Header() {
           <IconPanelLeft size={17} />
         </button>
         {editing && conv ? (
-          <input
+          <RenameInput
             className="header-title-input"
-            defaultValue={conv.title}
-            autoFocus
-            aria-label="Conversation title"
-            onBlur={(e) => commitTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitTitle(e.currentTarget.value)
-              if (e.key === 'Escape') setEditing(false)
-            }}
+            initial={conv.title}
+            label="Conversation title"
+            maxLength={MAX_TITLE_LENGTH}
+            onSubmit={(value) => commitTitle(conv.id, value)}
+            onCancel={() => setEditingId(null)}
           />
+        ) : conv ? (
+          <button
+            ref={titleRef}
+            type="button"
+            className={`header-title-btn${menu ? ' open' : ''}`}
+            aria-haspopup="menu"
+            aria-expanded={Boolean(menu)}
+            aria-label={`Conversation options: ${conv.title}`}
+            title="Rename or archive · double-click to rename"
+            onClick={toggleMenu}
+            // Two clicks toggle the menu open and shut again; the double-click then renames.
+            onDoubleClick={() => {
+              setMenu(null)
+              setEditingId(conv.id)
+            }}
+            onContextMenu={onContextMenu}
+          >
+            <span className="header-title">{conv.title}</span>
+            {conv.archived ? <span className="header-badge">Archived</span> : null}
+            <IconChevronDown size={13} className="header-title-caret" />
+          </button>
         ) : (
-          <span className="header-title" onDoubleClick={() => conv && setEditing(true)} title="Double-click to rename">
-            {conv?.title ?? 'Slade'}
-          </span>
+          <span className="header-title">Slade</span>
         )}
       </div>
       <div className="header-right">
@@ -127,6 +177,7 @@ export function Header() {
           <IconGear size={17} />
         </button>
       </div>
+      {menu && <ConversationMenu state={menu} onRename={setEditingId} onClose={() => setMenu(null)} />}
     </header>
   )
 }

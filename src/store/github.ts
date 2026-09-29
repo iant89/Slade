@@ -6,6 +6,7 @@ import { useArtifacts, artifactFromRemote } from './artifacts'
 import { useFs } from './fs'
 import { useUI } from './ui'
 import { findMentionedRepoPaths, tryNormalizeFsPath } from '../lib/fs'
+import { findRoadmapBlobs } from '../lib/roadmap'
 import {
   DEFAULT_SCOPE,
   DeviceFlowError,
@@ -661,11 +662,15 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
     syncRepoFilesForPrompt: async (promptHint) => {
       const { activeRepo, activeBranch, tree } = get()
-      if (!activeRepo || !activeBranch || !tree || !promptHint.trim()) return []
-      const mentioned = findMentionedRepoPaths(tree.entries, promptHint, 6)
+      if (!activeRepo || !activeBranch || !tree) return []
+      const mentioned = promptHint.trim() ? findMentionedRepoPaths(tree.entries, promptHint, 6) : []
+      // A roadmap / milestone file is workspace context whether or not the
+      // prompt names it: without it in the local file system the agent could
+      // never track or update the project's plan.
+      const roadmaps = findRoadmapBlobs(tree.entries).filter((p) => !mentioned.includes(p))
       const fs = useFs.getState()
       const pulled: FsFile[] = []
-      for (const path of mentioned) {
+      for (const path of [...mentioned, ...roadmaps]) {
         if (fs.exists(path) || fs.deletedRemotes[path]) continue
         const saved = await get().pullFileToFs(path, { repo: activeRepo, ref: activeBranch, silent: true })
         if (saved) pulled.push(saved)

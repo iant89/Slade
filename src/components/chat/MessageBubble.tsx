@@ -10,6 +10,7 @@ import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
+import { RoadmapTimeline } from './RoadmapTimeline'
 import {
   IconBranch,
   IconBrain,
@@ -378,6 +379,10 @@ function AssistantBody({
           ) : null}
         </div>
       ))}
+      {/* Completion footer: where the roadmap stands once the run is done. */}
+      {message.agent?.roadmap && message.agent.phase === 'complete' && message.status === 'complete' ? (
+        <RoadmapTimeline report={message.agent.roadmap} />
+      ) : null}
       {pending ? <span className="sr-only">Assistant is thinking…</span> : null}
       {error ? <ErrorBanner message={message} /> : null}
       {cancelled ? <div className="msg-cancelled">Generation stopped — the partial answer above is kept.</div> : null}

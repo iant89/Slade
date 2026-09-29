@@ -3,6 +3,7 @@ import type { AttemptConfig, ProviderAdapter, KeyTestResult } from './base'
 import { ProviderError } from './base'
 import { uid } from '../lib/id'
 import { kindLabel } from '../lib/mime'
+import { isRoadmapPath, tickFirstOpenStep } from '../lib/roadmap'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -77,8 +78,43 @@ function mockPlan(goal: string): MockPlan {
   }
 }
 
+/**
+ * Roadmap files as the agent's workspace-context block presents them
+ * (`--- local file: ROADMAP.md (v1, 312 B) ---` followed by a fenced body).
+ * Truncated files are skipped: a partial file can't be rewritten safely.
+ */
+function roadmapFilesInContext(systemPrompt: string): { path: string; content: string }[] {
+  const found: { path: string; content: string }[] = []
+  const header = /^--- local file: (.+?) \(v\d+, ([^)]*)\) ---\n```\n/gm
+  for (let m = header.exec(systemPrompt); m; m = header.exec(systemPrompt)) {
+    const path = m[1]!
+    if (!isRoadmapPath(path) || m[2]!.includes('truncated')) continue
+    const start = m.index + m[0].length
+    const end = systemPrompt.indexOf('\n```', start)
+    if (end < 0) continue
+    found.push({ path, content: systemPrompt.slice(start, end) })
+  }
+  return found
+}
+
+/**
+ * The simulator's stand-in for what a real orchestrator is told to do: when a
+ * roadmap is in the workspace, tick its first open step and emit the updated
+ * file. Lets agent mode demo roadmap tracking with no API key.
+ */
+function mockRoadmapUpdate(systemPrompt: string): string {
+  for (const file of roadmapFilesInContext(systemPrompt)) {
+    const ticked = tickFirstOpenStep(file.content)
+    if (!ticked) continue
+    const fence = ticked.content.includes('```') ? '````' : '```'
+    const body = ticked.content.replace(/\n+$/, '')
+    return `\n### Roadmap\n\nMarked **${ticked.label}** done in \`${file.path}\`.\n\n${fence}markdown:${file.path}\n${body}\n${fence}\n`
+  }
+  return ''
+}
+
 /** Turn the synthesis request's step results into a final answer. */
-function mockSynthesis(requestText: string, model: ModelDef): string {
+function mockSynthesis(requestText: string, model: ModelDef, systemPrompt = ''): string {
   const goalMatch = /^Goal: (.+)$/m.exec(requestText)
   const goal = goalMatch?.[1]?.trim() ?? 'your task'
   const steps = [...requestText.matchAll(/^## \[(\d+)\] (.+?) —/gm)].map((m) => m[2]!)
@@ -99,7 +135,7 @@ ${hasCsv ? '\nThe generated dataset landed as a spreadsheet artifact inside the 
 ### The result
 
 ${model.label.includes('Lite') ? 'All checks passed — the combined output is ready to use as-is.' : 'I reviewed each worker\'s output as it came back: the pieces are consistent with each other, nothing contradicts the original goal, and the deliverable is assembled above and in the step cards.'}
-
+${mockRoadmapUpdate(systemPrompt)}
 Want me to iterate — e.g. regenerate a step with a different model, add a follow-up step, or export the combined result?`
 }
 
@@ -320,7 +356,7 @@ export class MockAdapter implements ProviderAdapter {
         ? JSON.stringify({ mode: 'answer', answer: mockReply(lastText, attachments, model) })
         : JSON.stringify(mockPlan(lastText))
     } else if (cfg.systemPrompt.includes(ORCHESTRATOR_SYNTH_MARKER)) {
-      reply = mockSynthesis(lastText, model)
+      reply = mockSynthesis(lastText, model, cfg.systemPrompt)
     } else {
       reply = mockReply(lastText, attachments, model)
     }
