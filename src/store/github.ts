@@ -1,9 +1,11 @@
 import { create } from 'zustand'
-import type { Artifact } from '../types'
+import type { Artifact, FsFile } from '../types'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 import { githubPersistedSchema } from '../lib/schemas'
 import { useArtifacts, artifactFromRemote } from './artifacts'
+import { useFs } from './fs'
 import { useUI } from './ui'
+import { findMentionedRepoPaths, tryNormalizeFsPath } from '../lib/fs'
 import {
   DEFAULT_SCOPE,
   DeviceFlowError,
@@ -13,6 +15,7 @@ import {
 } from '../lib/github-auth'
 import {
   baseName,
+  commitTree,
   GitHubError,
   githubErrorMessage,
   getRepo,
@@ -26,6 +29,8 @@ import {
   parseRepoInput,
   readFile,
   searchCode,
+  type CommitTreeEntryInput,
+  type CommitTreeResult,
   type GitHubBranch,
   type GitHubRateInfo,
   type GitHubRepo,
@@ -202,6 +207,22 @@ export interface GitHubState {
   openFile: (path: string) => Promise<void>
   closeFile: () => void
   attachFile: (path: string, opts?: { silent?: boolean }) => Promise<Artifact | null>
+  /** Pull one file from a GitHub repo/branch into Slade's local file system (`useFs`). */
+  pullFileToFs: (path: string, opts?: { repo?: string; ref?: string; silent?: boolean }) => Promise<FsFile | null>
+  /** Pull multiple files (or a directory/repo subset) from the active GitHub repo into `useFs`. */
+  pullTreeToFs: (opts?: { prefix?: string; paths?: string[]; maxFiles?: number; silent?: boolean }) => Promise<FsFile[]>
+  /** Automatically pull any files from the active GitHub tree mentioned in a prompt into `useFs`. */
+  syncRepoFilesForPrompt: (promptHint: string) => Promise<FsFile[]>
+  /** Commit and push local file system changes (`useFs`) to a GitHub repository branch. */
+  commitFsToGitHub: (opts: {
+    paths?: string[]
+    includeDeleted?: boolean
+    repo?: string
+    branch?: string
+    newBranch?: string
+    message: string
+    silent?: boolean
+  }) => Promise<CommitTreeResult | null>
   runSearch: (query: string) => Promise<void>
   clearSearch: () => void
   attachHit: (hit: GitHubSearchHit) => Promise<Artifact | null>
@@ -551,6 +572,207 @@ export const useGitHub = create<GitHubState>((set, get) => {
       }
     },
 
+    pullFileToFs: async (path, opts) => {
+      const repo = opts?.repo ?? get().activeRepo
+      const ref = opts?.ref ?? get().activeBranch
+      if (!repo || !ref) return null
+      const normPath = tryNormalizeFsPath(path)
+      if (!normPath) return null
+      try {
+        const file = await readFile(repo, normPath, ref, { token: get().token || undefined })
+        const textual = file.text != null && isTextualPath(normPath, file.mime)
+        const content = textual ? (file.text ?? '') : (file.base64 ?? '')
+        const saved = useFs.getState().writeFile(normPath, content, {
+          encoding: textual ? 'utf8' : 'base64',
+          mime: file.mime || mimeForPath(normPath),
+          source: { origin: 'user' },
+          remote: {
+            kind: 'github',
+            repo,
+            ref,
+            path: normPath,
+            url: artifactUrl(repo, ref, normPath),
+            sha: file.sha,
+          },
+          dirty: false,
+          syncArtifact: true,
+        })
+        if (!opts?.silent) {
+          useUI.getState().toast({
+            kind: 'success',
+            title: `Saved ${normPath} to Local Files`,
+            detail: `${repo} @ ${ref}`,
+          })
+        }
+        return saved
+      } catch (err) {
+        if (!opts?.silent) {
+          useUI.getState().toast({
+            kind: 'error',
+            title: `Couldn't pull ${baseName(path)}`,
+            detail: textOf(err),
+          })
+        }
+        return null
+      }
+    },
+
+    pullTreeToFs: async (opts) => {
+      const { activeRepo, activeBranch, tree } = get()
+      if (!activeRepo || !activeBranch || !tree) return []
+      const maxFiles = opts?.maxFiles ?? 25
+      let targets: string[] = []
+
+      if (opts?.paths?.length) {
+        targets = opts.paths.slice(0, maxFiles)
+      } else {
+        const prefix = opts?.prefix ? opts.prefix.replace(/^\/+|\/+$/g, '') : ''
+        const candidates = tree.entries.filter((e) => {
+          if (e.type !== 'blob') return false
+          if (prefix && e.path !== prefix && !e.path.startsWith(`${prefix}/`)) return false
+          if (e.size != null && e.size > 500_000) return false
+          return isTextualPath(e.path)
+        })
+        targets = candidates.slice(0, maxFiles).map((e) => e.path)
+      }
+
+      const pulled: FsFile[] = []
+      for (const p of targets) {
+        const saved = await get().pullFileToFs(p, { repo: activeRepo, ref: activeBranch, silent: true })
+        if (saved) pulled.push(saved)
+      }
+
+      if (!opts?.silent) {
+        if (pulled.length > 0) {
+          useUI.getState().toast({
+            kind: 'success',
+            title: `Pulled ${pulled.length} file${pulled.length === 1 ? '' : 's'} into Local Files`,
+            detail: `${activeRepo} @ ${activeBranch}`,
+          })
+        } else {
+          useUI.getState().toast({
+            kind: 'info',
+            title: 'No matching text files to pull',
+          })
+        }
+      }
+      return pulled
+    },
+
+    syncRepoFilesForPrompt: async (promptHint) => {
+      const { activeRepo, activeBranch, tree } = get()
+      if (!activeRepo || !activeBranch || !tree || !promptHint.trim()) return []
+      const mentioned = findMentionedRepoPaths(tree.entries, promptHint, 6)
+      const fs = useFs.getState()
+      const pulled: FsFile[] = []
+      for (const path of mentioned) {
+        if (fs.exists(path) || fs.deletedRemotes[path]) continue
+        const saved = await get().pullFileToFs(path, { repo: activeRepo, ref: activeBranch, silent: true })
+        if (saved) pulled.push(saved)
+      }
+      return pulled
+    },
+
+    commitFsToGitHub: async (opts) => {
+      const token = get().token
+      if (!token) {
+        const msg = 'Connect GitHub first (Settings → GitHub).'
+        set({ publishError: msg })
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: 'Not connected to GitHub', detail: msg })
+        return null
+      }
+
+      const repo = (opts.repo ?? get().activeRepo ?? get().publishDefaults.repo ?? '').trim()
+      if (!repo) {
+        const msg = 'Choose a GitHub repository first.'
+        set({ publishError: msg })
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: msg })
+        return null
+      }
+
+      const branch = (opts.branch ?? get().activeBranch ?? get().publishDefaults.branch ?? '').trim() || undefined
+      const fsState = useFs.getState()
+      const allFiles = fsState.listFiles()
+
+      let filesToCommit: FsFile[]
+      if (opts.paths?.length) {
+        const pathSet = new Set(opts.paths.map((p) => tryNormalizeFsPath(p)).filter(Boolean))
+        filesToCommit = allFiles.filter((f) => pathSet.has(f.path))
+      } else {
+        const changed = allFiles.filter((f) => f.dirty || !f.remote || f.remote.repo !== repo)
+        filesToCommit = changed.length > 0 ? changed : allFiles
+      }
+
+      const includeDeleted = opts.includeDeleted ?? true
+      const deletedPaths = includeDeleted
+        ? Object.entries(fsState.deletedRemotes)
+            .filter(([, rem]) => rem.repo === repo)
+            .map(([p]) => p)
+        : []
+
+      const entries: CommitTreeEntryInput[] = [
+        ...filesToCommit.map((f): CommitTreeEntryInput =>
+          f.encoding === 'base64'
+            ? { path: f.path, base64: f.content }
+            : { path: f.path, content: f.content },
+        ),
+        ...deletedPaths.map((p): CommitTreeEntryInput => ({ path: p, deleted: true })),
+      ]
+
+      if (entries.length === 0) {
+        const msg = 'No files in Local Files to commit.'
+        if (!opts.silent) useUI.getState().toast({ kind: 'info', title: msg })
+        return null
+      }
+
+      set({ publishing: true, publishError: undefined, publishStep: `committing ${entries.length} file${entries.length === 1 ? '' : 's'}…` })
+      try {
+        const res = await commitTree(repo, {
+          token,
+          branch,
+          newBranch: opts.newBranch?.trim() || undefined,
+          message: opts.message.trim() || `Update ${entries.length} file${entries.length === 1 ? '' : 's'} (via Slade)`,
+          entries,
+        })
+
+        useFs.getState().markSyncedWithRemote(
+          repo,
+          res.branch,
+          filesToCommit.map((f) => f.path),
+          res.fileShas,
+          deletedPaths,
+        )
+
+        const publishResult: PublishResult = {
+          kind: 'file',
+          url: res.htmlUrl,
+          label: `commit ${res.commitSha.slice(0, 7)} (${entries.length} file${entries.length === 1 ? '' : 's'})`,
+          detail: `${repo} @ ${res.branch}`,
+        }
+        set({ publishing: false, publishStep: undefined, lastPublish: publishResult })
+
+        if (get().activeRepo === repo && get().activeBranch === res.branch) {
+          void get().refreshTree()
+        }
+
+        if (!opts.silent) {
+          useUI.getState().toast({
+            kind: 'success',
+            title: `Committed ${entries.length} file${entries.length === 1 ? '' : 's'} to ${repo}@${res.branch}`,
+            detail: res.commitSha.slice(0, 7),
+          })
+        }
+        return res
+      } catch (err) {
+        const msg = publishErrorMessage(err)
+        set({ publishing: false, publishStep: undefined, publishError: msg })
+        if (!opts.silent) {
+          useUI.getState().toast({ kind: 'error', title: 'Commit failed', detail: msg })
+        }
+        return null
+      }
+    },
+
     /* ---------------- search ---------------- */
 
     runSearch: async (query) => {
@@ -613,6 +835,13 @@ export const useGitHub = create<GitHubState>((set, get) => {
           onStep: (step) => set({ publishStep: step }),
         })
         set({ publishing: false, publishStep: undefined, lastPublish: result })
+        if (req.target === 'file' && req.repo) {
+          const targetBranch = req.newBranch?.trim() || req.branch?.trim() || get().activeBranch || 'HEAD'
+          const filePath = (req.path ?? req.name).replace(/^\/+/, '')
+          if (filePath && useFs.getState().exists(filePath)) {
+            useFs.getState().markSyncedWithRemote(req.repo, targetBranch, [filePath])
+          }
+        }
         return result
       } catch (err) {
         set({ publishing: false, publishStep: undefined, publishError: publishErrorMessage(err) })

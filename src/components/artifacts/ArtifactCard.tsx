@@ -2,11 +2,13 @@ import { useEffect, useState, type ComponentType } from 'react'
 import { motion } from 'framer-motion'
 import type { Artifact } from '../../types'
 import { useArtifacts } from '../../store/artifacts'
+import { useFs } from '../../store/fs'
 import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { formatBytes } from '../../lib/format'
 import { kindLabel } from '../../lib/mime'
 import { artifactUrl, copyText, downloadUrl } from '../../lib/clipboard'
+import { tryNormalizeFsPath } from '../../lib/fs'
 import {
   IconAudio,
   IconArchive,
@@ -17,6 +19,7 @@ import {
   IconExternal,
   IconFile,
   IconFileText,
+  IconFolder,
   IconGithub,
   IconImage,
   IconPin,
@@ -42,6 +45,8 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
   const artifact = useArtifacts((s) => s.byId[artifactId])
   const prefs = useSettings((s) => s.s.artifacts)
   const toast = useUI((s) => s.toast)
+  const targetFsPath = artifact ? (artifact.localPath ?? tryNormalizeFsPath(artifact.name) ?? undefined) : undefined
+  const storedInFs = useFs((s) => Boolean(targetFsPath && s.files[targetFsPath]))
 
   const [collapsed, setCollapsed] = useState(prefs.collapsedByDefault)
   useEffect(() => {
@@ -87,6 +92,15 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
           </span>
           <span className="artifact-sub">
             {kindLabel(kind)} · {formatBytes(artifact.size)} · {provenance}
+            {artifact.localPath ? (
+              <>
+                {' '}
+                ·{' '}
+                <span className="artifact-remote" title={`Local file system path: ${artifact.localPath}`}>
+                  {artifact.localPath}
+                </span>
+              </>
+            ) : null}
             {artifact.remote ? (
               <>
                 {' '}
@@ -151,6 +165,32 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
           type="button"
         >
           <IconGithub size={12} /> Publish to GitHub
+        </button>
+        <button
+          className="artifact-action"
+          onClick={() => {
+            if (storedInFs && targetFsPath) {
+              useFs.getState().selectFile(targetFsPath)
+              useUI.getState().openFiles()
+              return
+            }
+            const saved = useFs.getState().saveArtifact(artifact, targetFsPath)
+            if (saved) {
+              useFs.getState().selectFile(saved.path)
+              useUI.getState().openFiles()
+              toast({ kind: 'success', title: `Saved ${saved.path} to Local Files` })
+            } else {
+              toast({ kind: 'error', title: `Couldn't save ${artifact.name} to Local Files` })
+            }
+          }}
+          title={
+            storedInFs
+              ? `Open ${targetFsPath ?? artifact.name} in the local file system`
+              : `Save ${artifact.name} into the local file system`
+          }
+          type="button"
+        >
+          <IconFolder size={12} /> {storedInFs ? 'Open in Files' : 'Save to Files'}
         </button>
         {artifact.remote ? (
           <a

@@ -562,6 +562,158 @@ export async function fileSha(fullName: string, path: string, ref: string, o: Gh
   }
 }
 
+export interface DeleteFileOptions extends GhRequest {
+  message: string
+  sha: string
+  branch?: string
+}
+
+export async function deleteRemoteFile(fullName: string, path: string, o: DeleteFileOptions): Promise<{ commitSha?: string }> {
+  const res = await ghFetch<{ commit?: { sha: string } }>(`/repos/${fullName}/contents/${encodePath(path)}`, {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'DELETE',
+    body: {
+      message: o.message,
+      sha: o.sha,
+      branch: o.branch,
+    },
+  })
+  return { commitSha: res?.commit?.sha }
+}
+
+export interface CommitTreeEntryInput {
+  path: string
+  /** UTF-8 text content, or omit when `base64` or `deleted` is set. */
+  content?: string
+  /** Raw base64 content for binary files. */
+  base64?: string
+  /** True to delete this file from the Git tree. */
+  deleted?: boolean
+}
+
+export interface CommitTreeOptions extends GhRequest {
+  /** Base branch to read the parent commit and tree from (defaults to repo default_branch). */
+  branch?: string
+  /** Optional new branch to create/update with the commit. */
+  newBranch?: string
+  message: string
+  entries: CommitTreeEntryInput[]
+}
+
+export interface CommitTreeResult {
+  branch: string
+  commitSha: string
+  treeSha: string
+  htmlUrl: string
+  fileShas: Record<string, string>
+}
+
+/**
+ * Commit multiple file creations, updates, and deletions atomically in a
+ * single Git commit via GitHub's Git Data API.
+ */
+export async function commitTree(fullName: string, o: CommitTreeOptions): Promise<CommitTreeResult> {
+  if (o.entries.length === 0) {
+    throw new GitHubError('validation', 'No file changes to commit.')
+  }
+  const reqOpts: GhRequest = { token: o.token, baseUrl: o.baseUrl, signal: o.signal }
+
+  let baseBranch = o.branch?.trim()
+  if (!baseBranch) {
+    const repo = await getRepo(fullName, reqOpts)
+    baseBranch = repo.default_branch
+  }
+
+  const baseCommitSha = await getBranchSha(fullName, baseBranch, reqOpts)
+  const baseCommit = await ghFetch<{ sha: string; tree?: { sha: string } }>(
+    `/repos/${fullName}/git/commits/${baseCommitSha}`,
+    reqOpts,
+  )
+  const baseTreeSha = baseCommit?.tree?.sha ?? baseCommitSha
+
+  const fileShas: Record<string, string> = {}
+  const treeItems: Array<{
+    path: string
+    mode: '100644'
+    type: 'blob'
+    content?: string
+    sha?: string | null
+  }> = []
+
+  for (const entry of o.entries) {
+    const cleanPath = entry.path.replace(/^\/+/, '')
+    if (!cleanPath) continue
+    if (entry.deleted) {
+      treeItems.push({ path: cleanPath, mode: '100644', type: 'blob', sha: null })
+    } else if (entry.base64 != null) {
+      const blob = await ghFetch<{ sha: string }>(`/repos/${fullName}/git/blobs`, {
+        ...reqOpts,
+        method: 'POST',
+        body: { content: entry.base64, encoding: 'base64' },
+      })
+      fileShas[cleanPath] = blob.sha
+      treeItems.push({ path: cleanPath, mode: '100644', type: 'blob', sha: blob.sha })
+    } else {
+      treeItems.push({ path: cleanPath, mode: '100644', type: 'blob', content: entry.content ?? '' })
+    }
+  }
+
+  const createdTree = await ghFetch<{ sha: string; tree?: Array<{ path: string; sha: string }> }>(
+    `/repos/${fullName}/git/trees`,
+    {
+      ...reqOpts,
+      method: 'POST',
+      body: { base_tree: baseTreeSha, tree: treeItems },
+    },
+  )
+  for (const t of createdTree.tree ?? []) {
+    if (t.path && t.sha) fileShas[t.path] = t.sha
+  }
+
+  const createdCommit = await ghFetch<{ sha: string; html_url?: string }>(`/repos/${fullName}/git/commits`, {
+    ...reqOpts,
+    method: 'POST',
+    body: {
+      message: o.message,
+      tree: createdTree.sha,
+      parents: [baseCommitSha],
+    },
+  })
+
+  const targetBranch = o.newBranch?.trim() || baseBranch
+  if (o.newBranch?.trim() && o.newBranch.trim() !== baseBranch) {
+    try {
+      await createBranch(fullName, targetBranch, createdCommit.sha, reqOpts)
+    } catch (err) {
+      if (isGitHubError(err) && (err.kind === 'validation' || err.kind === 'conflict')) {
+        await ghFetch(`/repos/${fullName}/git/refs/heads/${encodeURIComponent(targetBranch)}`, {
+          ...reqOpts,
+          method: 'PATCH',
+          body: { sha: createdCommit.sha },
+        })
+      } else {
+        throw err
+      }
+    }
+  } else {
+    await ghFetch(`/repos/${fullName}/git/refs/heads/${encodeURIComponent(targetBranch)}`, {
+      ...reqOpts,
+      method: 'PATCH',
+      body: { sha: createdCommit.sha },
+    })
+  }
+
+  return {
+    branch: targetBranch,
+    commitSha: createdCommit.sha,
+    treeSha: createdTree.sha,
+    htmlUrl: createdCommit.html_url ?? `https://github.com/${fullName}/commit/${createdCommit.sha}`,
+    fileShas,
+  }
+}
+
 export interface GistFile {
   name: string
   content: string

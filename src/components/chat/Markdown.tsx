@@ -7,6 +7,7 @@ import { useArtifacts } from '../../store/artifacts'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { CopyButton } from '../artifacts/CodeArtifact'
 import { mimeFromName, classifyArtifact } from '../../lib/mime'
+import { fsBaseName, tryNormalizeFsPath } from '../../lib/fs'
 
 /* ------------------------------------------------------------------ */
 /* Model-emitted artifacts: fenced blocks with a filename info string  */
@@ -32,22 +33,27 @@ function ensureArtifactFromCode(
   messageId: string,
 ): string {
   const store = useArtifacts.getState()
-  const id = `art_gen_${messageId}_${hashId(fileName)}`
+  const localPath = tryNormalizeFsPath(fileName) ?? undefined
+  const displayName = localPath ? fsBaseName(localPath) : fileName
+  const id = `art_gen_${messageId}_${hashId(localPath ?? fileName)}`
   const existing = store.byId[id]
   if (existing) {
-    if (existing.text !== code) store.add({ ...existing, text: code, size: code.length })
+    if (existing.text !== code || existing.localPath !== localPath) {
+      store.add({ ...existing, text: code, size: code.length, localPath: localPath ?? existing.localPath })
+    }
     return id
   }
-  const mime = mimeFromName(fileName, 'text/plain')
-  const kind = classifyArtifact(fileName, mime)
+  const mime = mimeFromName(displayName, 'text/plain')
+  const kind = classifyArtifact(displayName, mime)
   store.add({
     id,
-    name: fileName,
+    name: displayName,
     mime,
     size: code.length,
     kind,
     createdAt: Date.now(),
     provenance,
+    localPath,
     text: code,
   })
   if (kind === 'sheet') {
@@ -102,9 +108,15 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId }: 
         // code block.
         const langMatch = /language-([\w+#.:/-]+)/.exec(className ?? '')
         const token = langMatch?.[1] ?? ''
+        const fsWriteMatch = /^fs:(?:write|create|save|update|append):(.+)$/i.exec(token)
         const colon = token.indexOf(':')
-        const fileName = colon >= 0 ? token.slice(colon + 1) : ''
-        const lang = colon >= 0 ? token.slice(0, colon) : token
+        const isFsCmd = /^fs:(?:delete|rm|remove|move|rename)(?::|$)/i.test(token)
+        const fileName = fsWriteMatch
+          ? fsWriteMatch[1]!
+          : !isFsCmd && colon >= 0
+            ? token.slice(colon + 1)
+            : ''
+        const lang = fsWriteMatch ? '' : colon >= 0 ? token.slice(0, colon) : token
 
         if (fileName && provenance && messageId) {
           const artifactId = ensureArtifactFromCode(fileName, lang, raw, provenance, messageId)

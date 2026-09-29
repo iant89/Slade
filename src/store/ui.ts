@@ -15,6 +15,8 @@ export interface UIState {
   /** GitHub context workspace drawer. */
   githubOpen: boolean
   githubTab: 'repos' | 'files' | 'search'
+  /** Local file system workspace drawer. */
+  filesOpen: boolean
   publishSource: PublishSource | null
   online: boolean
   toasts: Toast[]
@@ -45,6 +47,9 @@ export interface UIState {
   closeGithub: () => void
   toggleGithub: () => void
   setGithubTab: (tab: UIState['githubTab']) => void
+  openFiles: () => void
+  closeFiles: () => void
+  toggleFiles: () => void
   openPublish: (source: PublishSource) => void
   closePublish: () => void
   setOnline: (v: boolean) => void
@@ -65,6 +70,7 @@ export const useUI = create<UIState>((set) => ({
   railOpen: false,
   githubOpen: false,
   githubTab: 'repos',
+  filesOpen: false,
   publishSource: null,
   online: typeof navigator !== 'undefined' ? navigator.onLine : true,
   toasts: [],
@@ -94,10 +100,13 @@ export const useUI = create<UIState>((set) => ({
   setSettingsTab: (tab) => set({ settingsTab: tab }),
   toggleSidebar: () => set((st) => ({ sidebarOpen: !st.sidebarOpen })),
   toggleRail: () => set((st) => ({ railOpen: !st.railOpen })),
-  openGithub: (tab) => set((st) => ({ githubOpen: true, githubTab: tab ?? st.githubTab })),
+  openGithub: (tab) => set((st) => ({ githubOpen: true, filesOpen: false, githubTab: tab ?? st.githubTab })),
   closeGithub: () => set({ githubOpen: false }),
-  toggleGithub: () => set((st) => ({ githubOpen: !st.githubOpen })),
+  toggleGithub: () => set((st) => ({ githubOpen: !st.githubOpen, filesOpen: st.githubOpen ? st.filesOpen : false })),
   setGithubTab: (tab) => set({ githubTab: tab }),
+  openFiles: () => set({ filesOpen: true, githubOpen: false }),
+  closeFiles: () => set({ filesOpen: false }),
+  toggleFiles: () => set((st) => ({ filesOpen: !st.filesOpen, githubOpen: st.filesOpen ? st.githubOpen : false })),
   openPublish: (source) => set({ publishSource: source }),
   closePublish: () => set({ publishSource: null }),
   setOnline: (v) => set({ online: v }),

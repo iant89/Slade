@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useGitHub } from '../../store/github'
 import { GhEmpty, GhError, Spinner } from './bits'
-import { IconExternal, IconPaperclip, IconSearch } from '../icons'
+import { IconExternal, IconFolder, IconPaperclip, IconSearch } from '../icons'
 
 /**
  * Search tab: GitHub code search scoped to the open repository.
@@ -14,6 +14,7 @@ export function CodeSearch() {
   const runSearch = useGitHub((s) => s.runSearch)
   const clearSearch = useGitHub((s) => s.clearSearch)
   const attachHit = useGitHub((s) => s.attachHit)
+  const pullFileToFs = useGitHub((s) => s.pullFileToFs)
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -77,6 +78,20 @@ export function CodeSearch() {
               <a className="icon-btn small" href={hit.html_url} target="_blank" rel="noreferrer" aria-label="Open on GitHub" title="Open on GitHub">
                 <IconExternal size={13} />
               </a>
+              <button
+                className="icon-btn small"
+                disabled={busy === hit.path}
+                onClick={async () => {
+                  setBusy(hit.path)
+                  await pullFileToFs(hit.path, { repo: hit.repository?.full_name ?? activeRepo })
+                  setBusy(null)
+                }}
+                aria-label={`Save ${hit.path} to Local Files`}
+                title="Save to Local Files"
+                type="button"
+              >
+                <IconFolder size={12} />
+              </button>
               <button
                 className="icon-btn small"
                 disabled={busy === hit.path}

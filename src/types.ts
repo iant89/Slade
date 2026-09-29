@@ -149,6 +149,8 @@ export interface Artifact {
   provenance: ArtifactSource
   /** Set when the artifact was pulled from a repository rather than uploaded. */
   remote?: RemoteSource
+  /** Set when the artifact is backed by a file in the local file system. */
+  localPath?: string
   /** Small artifacts are persisted as data URLs; larger ones live in memory. */
   dataURL?: string
   /** Runtime object URL (never persisted; recreated from dataURL on load). */
@@ -162,6 +164,56 @@ export interface Artifact {
   durationSec?: number
   /** True when the artifact exists only for this session (large files). */
   ephemeral?: boolean
+}
+
+/* ------------------------------------------------------------------ */
+/* Local file system                                                   */
+/* ------------------------------------------------------------------ */
+
+export type FsFileEncoding = 'utf8' | 'base64'
+
+/**
+ * One file stored in Slade's local file system. Shared across the
+ * orchestrator, worker steps, and chat turns so agents can create, inspect,
+ * update, and organize persistent files in a workspace.
+ */
+export interface FsFile {
+  /** Canonical normalized relative path, e.g. "src/app.ts" or "data/sales.csv". */
+  path: string
+  /** Basename of the file, e.g. "app.ts". */
+  name: string
+  /** File content (UTF-8 string, or base64 payload when `encoding === 'base64'`). */
+  content: string
+  encoding?: FsFileEncoding
+  mime: string
+  kind: ArtifactKind
+  size: number
+  createdAt: number
+  updatedAt: number
+  createdBy: ArtifactSource
+  updatedBy: ArtifactSource
+  /** Incremented every time the file is written/updated (starts at 1). */
+  version: number
+  /** Conversation id that last modified this file, when written during a turn. */
+  conversationId?: string
+  /** Message or step id that last modified this file. */
+  messageId?: string
+  /** Upstream GitHub repository source when pulled from or pushed to GitHub. */
+  remote?: RemoteSource
+  /** True when the file was modified locally since it was last pulled/pushed to `remote`. */
+  dirty?: boolean
+}
+
+export type FsOpKind = 'create' | 'update' | 'delete' | 'move' | 'pull'
+
+/** Record of one file system operation performed by an agent or model. */
+export interface FsOpRecord {
+  op: FsOpKind
+  path: string
+  fromPath?: string
+  size?: number
+  version?: number
+  at: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +247,8 @@ export interface AgentStep {
   elapsedMs?: number
   /** True when the worker's output was cut off by the token cap. */
   truncated?: boolean
+  /** Files created, updated, moved, or deleted in the local file system by this step. */
+  fsOps?: FsOpRecord[]
 }
 
 export interface AgentRun {
@@ -210,6 +264,8 @@ export interface AgentRun {
   error?: string
   startedAt: number
   finishedAt?: number
+  /** Aggregate local file system operations performed across this run. */
+  fsOps?: FsOpRecord[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -367,6 +423,11 @@ export interface AgentSettings {
    * empty. Raising a ceiling costs nothing unless the tokens are used.
    */
   stepMaxTokens: number
+  /**
+   * When true, agents automatically read existing files from the local file
+   * system as workspace context and store emitted files back into it.
+   */
+  useLocalFs: boolean
 }
 
 export interface AppearanceSettings {

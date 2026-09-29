@@ -4,6 +4,7 @@ import { useSettings, DEFAULT_SETTINGS, providerById } from '../../store/setting
 import { useHealth } from '../../store/health'
 import { useChat } from '../../store/chat'
 import { useArtifacts } from '../../store/artifacts'
+import { useFs } from '../../store/fs'
 import { useUI } from '../../store/ui'
 import { adapterFor } from '../../providers/registry'
 import { exportBundleSchema, settingsSchema } from '../../lib/schemas'
@@ -23,6 +24,7 @@ import { Modal } from '../common/Modal'
 import { FieldRow, SegmentedControl, SelectRow, SectionTitle, SliderRow, Toggle } from '../common/controls'
 import {
   IconDatabase,
+  IconFolder,
   IconGithub,
   IconGrip,
   IconBot,
@@ -595,6 +597,29 @@ function AgentTab() {
         label="Expand worker output in the plan card"
         hint="Completed steps show their full result; turn off to keep the card compact"
       />
+
+      <SectionTitle>Local file system</SectionTitle>
+      <Toggle
+        checked={agent.useLocalFs ?? true}
+        onChange={(v) => set({ useLocalFs: v })}
+        label="Store and read files in the local file system"
+        hint="Agents receive a manifest and contents of stored files as workspace context, and any fenced file blocks they emit (```lang:path/to/file.ext) are persisted to Local Files"
+      />
+      <FieldRow
+        label="Workspace browser"
+        hint="Inspect, create, edit, or attach files stored by agents (Ctrl+E or /files)"
+      >
+        <button
+          className="btn ghost small"
+          onClick={() => {
+            useUI.getState().closeSettings()
+            useUI.getState().openFiles()
+          }}
+          type="button"
+        >
+          <IconFolder size={13} /> Open Local Files
+        </button>
+      </FieldRow>
     </div>
   )
 }
@@ -1094,10 +1119,11 @@ function DataTab() {
     const chat = useChat.getState()
     const conversations = chat.order.map((id) => chat.conversations[id]).filter(Boolean)
     const artifacts = Object.values(useArtifacts.getState().byId).filter((a) => !a.ephemeral && (a.dataURL || a.text))
-    const bundle = { app: 'slade' as const, version: 1, exportedAt: Date.now(), settings, conversations, artifacts }
+    const files = useFs.getState().listFiles()
+    const bundle = { app: 'slade' as const, version: 1, exportedAt: Date.now(), settings, conversations, artifacts, files }
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
     downloadUrl(URL.createObjectURL(blob), `slade-backup-${new Date().toISOString().slice(0, 10)}.json`)
-    toast({ kind: 'success', title: 'Exported settings, conversations & artifacts' })
+    toast({ kind: 'success', title: 'Exported settings, conversations, artifacts & local files' })
   }
 
   const importFile = async (file: File) => {
@@ -1111,6 +1137,9 @@ function DataTab() {
       if (bundle.settings) {
         const s = settingsSchema.parse(bundle.settings)
         useSettings.getState().replaceAll(s)
+      }
+      if (bundle.files) {
+        useFs.getState().importFiles(bundle.files)
       }
       if (bundle.conversations) {
         // Rehydrate generated artifacts' blob URLs where possible, then import.
@@ -1161,6 +1190,18 @@ function DataTab() {
           type="button"
         >
           <IconTrash size={14} /> Clear conversation history
+        </button>
+        <button
+          className="btn danger"
+          onClick={() => {
+            if (confirm('Delete all files in the local file system? This cannot be undone.')) {
+              useFs.getState().clearAll()
+              toast({ kind: 'success', title: 'Local file system cleared' })
+            }
+          }}
+          type="button"
+        >
+          <IconTrash size={14} /> Clear local file system
         </button>
         <button
           className="btn danger"

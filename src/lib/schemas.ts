@@ -93,8 +93,9 @@ export const settingsSchema = z.object({
       // output cap sits well above the chat default. Defaulted so settings
       // saved by older builds keep validating and upgrade in place.
       stepMaxTokens: z.number().int().min(1024).max(200_000).default(16_384),
+      useLocalFs: z.boolean().default(true),
     })
-    .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true, stepMaxTokens: 16_384 }),
+    .default({ maxSteps: 4, maxParallel: 2, expandStepResults: true, stepMaxTokens: 16_384, useLocalFs: true }),
   // New shape: a list of provider instances. Old backups/settings keep a
   // record keyed by kind; the union migrates it in place so a provider entry
   // appears for every key and models referencing the key keep working.
@@ -130,6 +131,15 @@ export const attemptFailureSchema = z.object({
   midStream: z.boolean(),
 })
 
+export const fsOpRecordSchema = z.object({
+  op: z.enum(['create', 'update', 'delete', 'move', 'pull']),
+  path: z.string(),
+  fromPath: z.string().optional(),
+  size: z.number().optional(),
+  version: z.number().optional(),
+  at: z.number(),
+})
+
 export const agentStepSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -143,6 +153,7 @@ export const agentStepSchema = z.object({
   failedChain: z.array(z.string()),
   elapsedMs: z.number().optional(),
   truncated: z.boolean().optional(),
+  fsOps: z.array(fsOpRecordSchema).optional(),
 })
 
 export const agentRunSchema = z.object({
@@ -155,6 +166,7 @@ export const agentRunSchema = z.object({
   error: z.string().optional(),
   startedAt: z.number(),
   finishedAt: z.number().optional(),
+  fsOps: z.array(fsOpRecordSchema).optional(),
 })
 
 export const messageSchema = z.object({
@@ -230,6 +242,7 @@ export const artifactSchema = z.object({
       sha: z.string().optional(),
     })
     .optional(),
+  localPath: z.string().optional(),
   dataURL: z.string().optional(),
   text: z.string().optional(),
   columns: z.array(z.string()).optional(),
@@ -273,6 +286,40 @@ export const githubPersistedSchema = z.object({
   }),
 })
 
+export const fsFileSchema = z.object({
+  path: z.string().min(1),
+  name: z.string().min(1),
+  content: z.string(),
+  encoding: z.enum(['utf8', 'base64']).optional(),
+  mime: z.string(),
+  kind: z.enum(['image', 'code', 'doc', 'sheet', 'audio', 'video', 'archive', 'unknown']),
+  size: z.number().nonnegative(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  createdBy: z.union([
+    z.object({ origin: z.literal('user') }),
+    z.object({ origin: z.literal('model'), modelId: z.string(), modelLabel: z.string() }),
+  ]),
+  updatedBy: z.union([
+    z.object({ origin: z.literal('user') }),
+    z.object({ origin: z.literal('model'), modelId: z.string(), modelLabel: z.string() }),
+  ]),
+  version: z.number().int().positive().default(1),
+  conversationId: z.string().optional(),
+  messageId: z.string().optional(),
+  remote: z
+    .object({
+      kind: z.literal('github'),
+      repo: z.string(),
+      ref: z.string(),
+      path: z.string(),
+      url: z.string(),
+      sha: z.string().optional(),
+    })
+    .optional(),
+  dirty: z.boolean().optional(),
+})
+
 export const exportBundleSchema = z.object({
   app: z.literal('slade'),
   version: z.number(),
@@ -280,6 +327,7 @@ export const exportBundleSchema = z.object({
   settings: settingsSchema.optional(),
   conversations: z.array(conversationSchema).optional(),
   artifacts: z.array(artifactSchema).optional(),
+  files: z.array(fsFileSchema).optional(),
 })
 
 export type ExportBundle = z.infer<typeof exportBundleSchema>

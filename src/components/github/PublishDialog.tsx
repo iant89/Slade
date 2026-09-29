@@ -126,7 +126,11 @@ export function PublishDialog() {
     setRepo(defaults.repo ?? activeRepo ?? '')
     setBranch(defaults.branch ?? activeBranch ?? '')
     setName(resolved.name)
-    setPath(suggestRepoPath(resolved.name, defaults.prefix))
+    setPath(
+      resolved.artifact?.localPath ??
+        resolved.artifact?.remote?.path ??
+        suggestRepoPath(resolved.name, defaults.prefix),
+    )
     setDescription('')
     setPublicGist(defaults.gistPublic)
     setCommitMessage(`Add ${resolved.name} (via Slade)`)
