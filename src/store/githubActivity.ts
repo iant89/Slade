@@ -31,6 +31,12 @@ export interface GitHubActionEntry extends GitHubActionInfo {
   error?: string
   /** How many identical calls this card stands for (same action + same target). */
   count: number
+  /**
+   * The agent run that caused this call, when one was running. Cards carrying a
+   * scope render inline with that run's answer; cards without one are the
+   * GitHub calls you made yourself and render in the strip above the composer.
+   */
+  scope?: string
 }
 
 /** A GitHub action that did not go through the REST client (OAuth, sign-out, clone). */
@@ -50,7 +56,12 @@ export interface GitHubActivityState {
   entries: GitHubActionEntry[]
   /** Lifetime count for this session, so the header can say "12 calls". */
   total: number
-  collapsed: boolean
+  /**
+   * Open run scopes, innermost last. An agent run pushes its scope for the
+   * duration of the run so every call it makes is attributable to it; the chat
+   * and the GitHub drawer leave the stack empty.
+   */
+  scopes: string[]
   /** Open a card for a call that is still in flight. Returns its id. */
   log: (input: GitHubActionInput) => string
   /** Add a card for a call that is already over. Returns its id. */
@@ -61,10 +72,18 @@ export interface GitHubActivityState {
   ) => void
   remove: (id: string) => void
   clear: () => void
-  setCollapsed: (v: boolean) => void
+  /** Attribute every card logged from now on to `id` (nested runs supported). */
+  enterScope: (id: string) => void
+  /** Stop attributing cards to `id` (safe out of order, e.g. two open chats). */
+  exitScope: (id: string) => void
 }
 
-function toEntry(input: GitHubActionInput, status: GitHubActionStatus): GitHubActionEntry {
+/** The scope new cards belong to: the innermost open run, if any. */
+export function activeScope(state: Pick<GitHubActivityState, 'scopes'>): string | undefined {
+  return state.scopes[state.scopes.length - 1]
+}
+
+function toEntry(input: GitHubActionInput, status: GitHubActionStatus, scope?: string): GitHubActionEntry {
   return {
     id: uid('gha'),
     kind: input.kind,
@@ -76,22 +95,23 @@ function toEntry(input: GitHubActionInput, status: GitHubActionStatus): GitHubAc
     at: Date.now(),
     count: 1,
     error: input.error,
+    scope,
   }
 }
 
 export const useGitHubActivity = create<GitHubActivityState>((set) => ({
   entries: [],
   total: 0,
-  collapsed: false,
+  scopes: [],
 
   log: (input) => {
-    const entry = toEntry(input, 'running')
+    const entry = toEntry(input, 'running', activeScope(useGitHubActivity.getState()))
     set((st) => ({ entries: [...st.entries, entry].slice(-MAX_ENTRIES), total: st.total + 1 }))
     return entry.id
   },
 
   logDone: (input) => {
-    const entry = toEntry(input, 'done')
+    const entry = toEntry(input, 'done', activeScope(useGitHubActivity.getState()))
     set((st) => ({ entries: [...st.entries, entry].slice(-MAX_ENTRIES), total: st.total + 1 }))
     return entry.id
   },
@@ -120,7 +140,9 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
 
   clear: () => set({ entries: [] }),
 
-  setCollapsed: (v) => set({ collapsed: v }),
+  enterScope: (id) => set((st) => ({ scopes: [...st.scopes, id] })),
+
+  exitScope: (id) => set((st) => ({ scopes: st.scopes.filter((s) => s !== id) })),
 }))
 
 /* ------------------------------------------------------------------ */
@@ -140,11 +162,13 @@ onGitHubCall((event) => {
 
     // Fold a repeat of the newest identical call into that card instead of
     // pushing another row for it: pulling a tree reads dozens of files, and a
-    // wall of identical cards would bury everything else.
+    // wall of identical cards would bury everything else. Only within the same
+    // scope — a manual call must never be absorbed into a run's card.
     const newest = activity.entries[activity.entries.length - 1]
     if (
       newest &&
       newest.status !== 'running' &&
+      newest.scope === activeScope(activity) &&
       Date.now() - newest.at < DEDUPE_WINDOW_MS &&
       githubActionSignature(newest) === githubActionSignature(info)
     ) {

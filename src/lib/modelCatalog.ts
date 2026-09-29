@@ -201,6 +201,16 @@ export const MODEL_CATALOG: CatalogModel[] = [
     strengths: ['coding', 'longContext', 'value'],
     note: 'Alibaba flagship MoE; 1M context at commodity prices.',
   },
+  {
+    provider: 'openrouter',
+    apiModel: 'nvidia/nemotron-3-super-120b-a12b',
+    label: 'Nemotron 3 Super',
+    contextWindow: 262_144,
+    costPer1kIn: 0.00008,
+    costPer1kOut: 0.00045,
+    strengths: ['coding', 'agents', 'reasoning', 'value'],
+    note: 'NVIDIA’s 120B hybrid Mamba-Transformer MoE (12B active), built for multi-agent loops — 60.5% SWE-bench Verified (OpenHands) at $0.08/$0.45 per M tokens.',
+  },
 
   /* ---------------- OpenAI-compatible endpoints ---------------- */
   {
@@ -258,6 +268,15 @@ export const MODEL_CATALOG: CatalogModel[] = [
     note: 'Alibaba flagship via DashScope’s compatible mode.',
     baseURL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
   },
+  {
+    provider: 'openai-compatible',
+    apiModel: 'nvidia/nemotron-3-super-120b-a12b',
+    label: 'Nemotron 3 Super',
+    contextWindow: 1 * M,
+    strengths: ['coding', 'agents', 'reasoning', 'longContext', 'value'],
+    note: 'The same open MoE from NVIDIA’s own endpoint (build.nvidia.com): free tier, up to 1M context, thinking on by default — keep the step token cap roomy.',
+    baseURL: 'https://integrate.api.nvidia.com/v1',
+  },
 ]
 
 export function catalogFor(provider: AddableProvider): CatalogModel[] {
@@ -271,8 +290,19 @@ export function formatCtx(n: number): string {
   return String(n)
 }
 
-/** "$2.50" style price for a per-1k-token figure; em-dash when unknown. */
+/**
+ * "$2.50" style price for a per-1k-token figure; em-dash when unknown.
+ *
+ * The catalogue spans three orders of magnitude — $0.03 per 1k at the top,
+ * $0.00008 at the bottom — so below a dollar the digit count adapts to keep two
+ * significant digits. A fixed number of decimals would print NVIDIA's
+ * $0.45-per-million output price as "$0.0005" (11% high) and Gemini 3.1 Pro's
+ * $12-per-million as "$0.01" (20% low).
+ */
 export function formatPrice(per1k?: number): string {
   if (per1k == null) return '—'
-  return `$${per1k < 0.01 ? per1k.toFixed(4) : per1k.toFixed(2).replace(/\.00$/, '')}`
+  if (per1k === 0) return '$0'
+  if (per1k >= 1) return `$${per1k.toFixed(2).replace(/\.00$/, '')}`
+  const decimals = Math.min(8, 1 - Math.floor(Math.log10(per1k)))
+  return `$${per1k.toFixed(decimals).replace(/(\.\d*[1-9])0+$/, '$1')}`
 }

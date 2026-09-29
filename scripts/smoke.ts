@@ -122,8 +122,8 @@ import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
-import { GitHubActionCard, GitHubActivityFeed } from '../src/components/github/GitHubActivity'
-import { useGitHubActivity, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
+import { GitHubActionCard, GitHubActivityFeed, GitHubRunActivity } from '../src/components/github/GitHubActivity'
+import { useGitHubActivity, logGitHubAction, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
 import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
@@ -509,6 +509,35 @@ function testPlannerParsing() {
   check('prose without JSON → undefined', parsePlannerReply('I would start by researching the topic.') === undefined)
   check('wrong shape → undefined', parsePlannerReply('{"mode":"surprise"}') === undefined)
   check('empty subtasks → undefined', parsePlannerReply('{"mode":"plan","subtasks":[]}') === undefined)
+
+  // Near-JSON: what a *long* planner reply drifts into. Real models "write" a
+  // multi-line worker prompt as a real multi-line string value, paste a regex
+  // that lost its doubled backslash, and leave a trailing comma behind. Each is
+  // a JSON.parse error, and each is worth repairing rather than spending
+  // another orchestrator round-trip to reformat a plan that is already complete.
+  const near = parsePlannerReply(
+    '{"mode":"plan","reply":"Two steps.",' +
+      '"subtasks":[{"title":"Build it","model":"","prompt":"ROLE: engineer\nOBJECTIVE: split on /\\s+/ and ship src/a.ts",},]}',
+  )
+  const nearPrompt = near?.mode === 'plan' ? near.subtasks[0]!.prompt : ''
+  check('a raw newline inside a string value still plans', near?.mode === 'plan', JSON.stringify(near))
+  check(
+    '…and the worker prompt keeps the line structure the model wrote',
+    nearPrompt === 'ROLE: engineer\nOBJECTIVE: split on /\\s+/ and ship src/a.ts',
+    JSON.stringify(nearPrompt),
+  )
+  check(
+    '…and a trailing comma is dropped instead of failing the plan',
+    parsePlannerReply('{"mode":"answer","answer":"ok",}')?.mode === 'answer',
+  )
+  check(
+    'a brace in the prose before the JSON does not hide the plan',
+    parsePlannerReply('Plan {see below}:\n{"mode":"answer","answer":"ok"}')?.mode === 'answer',
+  )
+  check(
+    'a truncated plan is still refused, never salvaged into half a plan',
+    parsePlannerReply('{"mode":"plan","reply":"r","subtasks":[{"title":"t","prompt":"cut off') === undefined,
+  )
 }
 
 function testWorkerResolution() {
@@ -636,6 +665,50 @@ async function testAgentMode() {
   // Restore the plain-chain defaults for later tests.
   useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
   useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+}
+
+/**
+ * The planner's near-JSON path, end to end. A first plan reply in the shape a
+ * real model actually sends it — the worker prompt typed as a real multi-line
+ * string, a regex that lost its doubled backslash, a trailing comma — must plan
+ * the run on that first call. Every miss sends the user "First plan was
+ * malformed — asking the orchestrator to reformat…" and spends an extra
+ * planning round-trip on a plan the model had already written out in full.
+ */
+async function testPlannerNearJsonRun() {
+  console.log('planner near-JSON (scripted models):')
+  const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+  const primary = 'ROLE: engineer\nOBJECTIVE: add splitWords() to src/split.ts\nCONSTRAINTS: keep /\\s+/ handling'
+  const second = 'Review src/split.ts\nand list what to fix'
+
+  await withScriptedAgent(script, async ({ seen }) => {
+    script.plans.push(
+      '{"mode":"plan","reply":"Implement, then review.",' +
+        `"subtasks":[{"title":"Implement the splitter","model":"","prompt":"${primary}"},` +
+        `{"title":"Review the splitter","model":"","prompt":"${second}",},]}`,
+    )
+    script.workers.push('Done: splitWords() added.', 'Reviewed — nothing to fix.')
+    script.synths.push('SUMMARY\nAdded the splitter.\n\nSTATUS\nCOMPLETE')
+    freshAgentConversation()
+    await sendUserMessage('add a word splitter helper', [])
+
+    const msg = lastAssistant()
+    const run = msg.agent
+    const planCalls = seen.filter((s) => s.kind === 'plan').length
+    check('run completed', msg.status === 'complete' && run?.phase === 'complete', `${msg.status}/${run?.phase}: ${msg.error ?? ''}`)
+    check('the near-JSON plan was accepted on the first call', planCalls === 1, `${planCalls} planning calls`)
+    check('…so the card never says the plan was malformed', !run?.note, String(run?.note))
+    check(
+      '…and both subtasks ran',
+      run?.steps.length === 2 && run.steps.every((s) => s.status === 'complete'),
+      JSON.stringify(run?.steps.map((s) => s.status)),
+    )
+    check(
+      'the worker received the multi-line prompt, regex backslash and all',
+      run?.steps[0]?.prompt === primary,
+      JSON.stringify(run?.steps[0]?.prompt),
+    )
+  })
 }
 
 /* ------------------------------------------------------------------ */
@@ -2321,7 +2394,7 @@ async function testGitHubActionCards() {
 
   const observed: string[] = []
   const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
-  useGitHubActivity.setState({ entries: [], total: 0, collapsed: false })
+  useGitHubActivity.setState({ entries: [], total: 0, scopes: [] })
   try {
     useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo', 'gist'], repos: [], tree: undefined, preview: undefined })
 
@@ -2413,13 +2486,74 @@ async function testGitHubActionCards() {
     const activityInit = useGitHubActivity.getInitialState() as unknown as {
       entries: ReturnType<typeof useGitHubActivity.getState>['entries']
     }
-    activityInit.entries = useGitHubActivity.getState().entries
-    const feed = renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
-    check('the feed lists every card', feed.includes('gh-activity-list') && feed.includes('GitHub Action: Signed out'), feed.slice(0, 200))
-    check('the feed counts the actions', /\d+ GitHub actions/.test(feed), feed.slice(0, 300))
-    // Exactly two buttons in the whole feed: collapse + clear. A card is never
-    // a button, because a card is never expandable.
-    check('the feed offers clearing, and nothing expands', (feed.match(/<button/g) ?? []).length === 2 && feed.includes('Clear'), String((feed.match(/<button/g) ?? []).length))
+    // SSR renders from the store's *initial* snapshot, so every render below
+    // has to be seeded with the ledger as it stands right now.
+    const seed = () => {
+      activityInit.entries = useGitHubActivity.getState().entries
+    }
+    const feedHtml = () => {
+      seed()
+      return renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
+    }
+    const runHtml = (scope: string) => {
+      seed()
+      return renderToString(createElement(GitHubRunActivity, { scope })).replace(/<!-- -->/g, '')
+    }
+
+    // Idle: the ledger folds to its count line (the calls are over), and the
+    // strip stays one line tall instead of holding a column of cards open all
+    // session. Exactly two buttons either way: toggle + Clear.
+    const idleFeed = feedHtml()
+    check(
+      'an idle ledger folds to its count line',
+      !idleFeed.includes('gh-activity-list') && /\d+ GitHub actions/.test(idleFeed) && idleFeed.includes('Clear'),
+      idleFeed.slice(0, 240),
+    )
+    check('…with just the toggle and Clear', (idleFeed.match(/<button/g) ?? []).length === 2, String((idleFeed.match(/<button/g) ?? []).length))
+
+    // In flight: it opens itself, and lists the cards.
+    const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
+    const liveFeed = feedHtml()
+    check(
+      'a call in flight opens the list',
+      liveFeed.includes('gh-activity-list') && liveFeed.includes('/live.ts') && liveFeed.includes('1 running'),
+      liveFeed.slice(0, 300),
+    )
+    check('…and a card is still not a button', !/gh-action-card[^>]*>\s*<button/.test(liveFeed), liveFeed.slice(0, 200))
+    finishGitHubAction(liveId, { status: 'done' })
+
+    /* ---- run-scoped cards render inline, not in the strip ---- */
+    useGitHubActivity.getState().enterScope('scope_run_1')
+    const inRun = logGitHubAction({ kind: 'get-file', subject: '/src/math.ts', repo: 'octo/demo', ref: 'main' })
+    const runCards = useGitHubActivity.getState().entries.filter((e) => e.id === inRun)
+    check('a card logged during a run carries the scope', runCards[0]?.scope === 'scope_run_1', JSON.stringify(runCards))
+
+    const inlineLive = runHtml('scope_run_1')
+    check(
+      'a run’s calls render inline, in the run’s own block',
+      inlineLive.includes('GitHub activity · 1 call') &&
+        inlineLive.includes('gh-activity-list') &&
+        inlineLive.includes('/src/math.ts') &&
+        !inlineLive.includes('/live.ts'),
+      inlineLive.slice(0, 300),
+    )
+    finishGitHubAction(inRun, { status: 'done' })
+    useGitHubActivity.getState().exitScope('scope_run_1')
+    check('the scope stack is released again', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
+    const inlineFolded = runHtml('scope_run_1')
+    check(
+      '…and fold to the count line once the run goes quiet',
+      inlineFolded.includes('GitHub activity · 1 call') && !inlineFolded.includes('gh-activity-list'),
+      inlineFolded.slice(0, 200),
+    )
+
+    const afterRunFeed = feedHtml()
+    check(
+      'the strip does not also show the run’s cards',
+      !afterRunFeed.includes('/src/math.ts'),
+      afterRunFeed.slice(0, 300),
+    )
+    check('a scope with no calls renders nothing', runHtml('scope_nothing') === '')
 
     useGitHubActivity.getState().clear()
     activityInit.entries = []
@@ -2562,6 +2696,38 @@ function testModelPicker() {
   check('formatCtx renders millions compactly', formatCtx(1_048_576) === '1M' && formatCtx(1_000_000) === '1M', `${formatCtx(1_048_576)}/${formatCtx(1_000_000)}`)
   check('formatCtx renders kilos compactly', formatCtx(262_144) === '262K' && formatCtx(400_000) === '400K', `${formatCtx(262_144)}/${formatCtx(400_000)}`)
   check('formatPrice hides unknowns and trims zeros', formatPrice(undefined) === '—' && formatPrice(0.03) === '$0.03' && formatPrice(0.0005) === '$0.0005', `${formatPrice(undefined)}/${formatPrice(0.03)}/${formatPrice(0.0005)}`)
+  check(
+    'formatPrice keeps cheap models truthful instead of rounding them up',
+    formatPrice(0.00008) === '$0.00008' && formatPrice(0.00045) === '$0.00045' && formatPrice(0.00087) === '$0.00087',
+    `${formatPrice(0.00008)}/${formatPrice(0.00045)}/${formatPrice(0.00087)}`,
+  )
+
+  // NVIDIA Nemotron 3 Super: curated on both routes a user can take — the
+  // OpenRouter slug (262K served context, $0.08/$0.45 per million) and NVIDIA's
+  // own OpenAI-compatible endpoint, which the form prefills.
+  const nemotron = MODEL_CATALOG.filter((m) => m.apiModel === 'nvidia/nemotron-3-super-120b-a12b')
+  check(
+    'Nemotron 3 Super is catalogued for OpenRouter and NVIDIA NIM',
+    nemotron.length === 2 && new Set(nemotron.map((m) => m.provider)).size === 2,
+    JSON.stringify(nemotron.map((m) => m.provider)),
+  )
+  const orNemotron = nemotron.find((m) => m.provider === 'openrouter')
+  check(
+    '…the OpenRouter entry carries the 262K context and real per-1k pricing',
+    orNemotron?.contextWindow === 262_144 && orNemotron.costPer1kIn === 0.00008 && orNemotron.costPer1kOut === 0.00045,
+    JSON.stringify(orNemotron),
+  )
+  const nimNemotron = nemotron.find((m) => m.provider === 'openai-compatible')
+  check(
+    '…and the NIM entry prefills NVIDIA’s OpenAI-compatible endpoint',
+    nimNemotron?.baseURL === 'https://integrate.api.nvidia.com/v1',
+    String(nimNemotron?.baseURL),
+  )
+  check(
+    'agentic models qualify for the catalogue',
+    (orNemotron?.strengths.includes('agents') && nimNemotron?.strengths.includes('agents')) === true,
+    JSON.stringify(nemotron.map((m) => m.strengths)),
+  )
 
   // SSR: the picker table for OpenAI. Default sort is context, descending,
   // so the 1M-context GPTs lead and the 400K mini trails.
@@ -2592,6 +2758,17 @@ function testModelPicker() {
   const orTable = renderToString(createElement(ModelPickerTable, { provider: 'openrouter', onPick: () => {} }))
   check('provider swap re-scopes the table to OpenRouter slugs', orTable.includes('deepseek/deepseek-v4-pro') && !orTable.includes('gpt-5.5'), orTable.match(/\d+ of \d+/)?.[0])
   check('openrouter rows keep vendor-prefixed IDs', orTable.includes('z-ai/glm-5.2') && orTable.includes('moonshotai/kimi-k2.7-code'))
+  check(
+    'the OpenRouter table lists Nemotron 3 Super with its context and price intact',
+    orTable.includes('nvidia/nemotron-3-super-120b-a12b') && orTable.includes('262K') && orTable.includes('$0.00008') && orTable.includes('$0.00045'),
+    orTable.includes('nvidia/nemotron-3-super-120b-a12b') ? 'row present, price cell rendered' : 'row missing',
+  )
+  const compatTable = renderToString(createElement(ModelPickerTable, { provider: 'openai-compatible', onPick: () => {} }))
+  check(
+    'the OpenAI-compatible table lists the NIM endpoint too',
+    compatTable.includes('nvidia/nemotron-3-super-120b-a12b') && compatTable.includes('build.nvidia.com'),
+    compatTable.match(/1M/)?.[0] ?? 'no context chip',
+  )
 }
 
 /**
@@ -3044,6 +3221,7 @@ function testLocalFsUiRenders() {
       status: 'complete' as const,
       agent: {
         phase: 'complete' as const,
+        goal: 'write the runner module',
         orchestratorId: 'sim-pro',
         strategy: 'Write the runner module.',
         steps: [
@@ -3316,6 +3494,43 @@ async function testGitLocalFsReadWriteAcross() {
         useFs.getState().readFile('src/math.test.ts')?.remote?.repo === 'octo/demo' &&
         Object.keys(useFs.getState().deletedRemotes).length === 0,
     )
+
+    /* ---- the run's GitHub calls are attributed to its message ---- */
+
+    const runMsg = useChat.getState().conversations[useChat.getState().currentId]!.messages.find(
+      (m) => m.agent?.githubScope,
+    )
+    const scope = runMsg?.agent?.githubScope
+    check('the agent run stamped a GitHub scope on its message', typeof scope === 'string' && scope.length > 0, String(scope))
+    check('the run released its scope when it finished', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
+    const scoped = useGitHubActivity.getState().entries.filter((e) => e.scope === scope)
+    check(
+      'the files the run pulled from GitHub are logged under that scope',
+      scoped.some((e) => e.kind === 'get-file' && e.subject === '/src/math.ts'),
+      JSON.stringify(scoped.map((e) => `${e.title} ${e.subject}`)),
+    )
+    check(
+      'the commit the button triggered afterwards is NOT part of the run',
+      useGitHubActivity.getState().entries.some((e) => !e.scope && e.kind === 'create-commit') &&
+        !useGitHubActivity.getState().entries.some((e) => e.scope === scope && e.kind === 'create-commit'),
+      JSON.stringify(useGitHubActivity.getState().entries.map((e) => `${e.kind}:${e.scope ? 'run' : 'manual'}`)),
+    )
+    // SSR hands React each store's *initial* snapshot, so seed the ledger the
+    // way the live session would have it before rendering the message.
+    const activityInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
+    activityInit.entries = useGitHubActivity.getState().entries
+    const inlineRun = renderToString(createElement(MessageBubble, { message: runMsg! })).replace(/<!-- -->/g, '')
+    check(
+      'the run’s message carries its GitHub calls inline, folded to the count',
+      inlineRun.includes('gh-activity is-inline') &&
+        inlineRun.includes('GitHub activity · 1 call') &&
+        !inlineRun.includes('gh-activity is-inline collapsed aria-hidden'),
+      inlineRun.slice(Math.max(0, inlineRun.indexOf('gh-activity')), inlineRun.indexOf('gh-activity') + 300),
+    )
+    check(
+      '…and the strip above the composer does not repeat them',
+      !renderToString(createElement(GitHubActivityFeed)).includes('/src/math.ts'),
+    )
   } finally {
     globalThis.fetch = realFetch
     settings.removeModel('openrouter-test')
@@ -3388,6 +3603,7 @@ function testInlineThoughtsRendering() {
     modelId: 'mock-pro',
     agent: {
       phase: 'complete' as const,
+      goal: 'ship the widget',
       orchestratorModelId: 'mock-pro',
       strategy: 'Divide into frontend and backend tasks',
       planningReasoning: 'Decomposing task requirements into modular subcomponents',
@@ -3420,6 +3636,60 @@ function testInlineThoughtsRendering() {
   check('agent steps render the same Thoughts card', stepBodyAt >= 0 && agentHtml.slice(stepBodyAt).includes('thought-title\">Thoughts<'), agentHtml.slice(0, 600))
   check('thinking bodies stay collapsed until opened', !agentHtml.includes('Analyzing state requirements and rendering logic'), 'step reasoning should be behind the card')
   check('agent cards never label thoughts per-model', !agentHtml.includes('thought process') && !agentHtml.includes('Planning reasoning'), agentHtml.slice(0, 500))
+
+  // The card is called "Task plan": it must show the plan — the task it is
+  // executing and what each step was actually asked to do — not just outcomes.
+  check(
+    'the plan card names the task it is planning',
+    agentHtml.includes('agent-plan-goal') && agentHtml.includes('ship the widget'),
+    agentHtml.slice(0, 400),
+  )
+  check(
+    '…and each step shows the brief the orchestrator wrote for it',
+    agentHtml.includes('agent-step-brief') && agentHtml.includes('Brief') && agentHtml.includes('Write component'),
+    agentHtml.slice(stepBodyAt, stepBodyAt + 600),
+  )
+
+  // With step results collapsed by default, a step is still a real disclosure:
+  // the row opens onto the brief, so the plan is readable before any result.
+  settingsInit.s = { ...origSettings, agent: { ...origSettings.agent, expandStepResults: false } }
+  const collapsedSteps = renderToString(createElement(MessageBubble, { message: msgWithAgentThoughts })).replace(/<!-- -->/g, '')
+  const headOf = (html: string) => html.slice(html.indexOf('agent-step-head'), html.indexOf('agent-step-head') + 300)
+  check(
+    'a collapsed step row still offers its brief',
+    !collapsedSteps.includes('agent-step-body') &&
+      /aria-expanded="false"/.test(headOf(collapsedSteps)) &&
+      !/disabled/.test(headOf(collapsedSteps)),
+    headOf(collapsedSteps),
+  )
+
+  // …and a step that has not produced anything yet is not a dead row either.
+  settingsInit.s = origSettings
+  const pendingBrief = {
+    ...msgWithAgentThoughts,
+    agent: {
+      ...msgWithAgentThoughts.agent,
+      phase: 'executing' as const,
+      steps: [
+        {
+          id: 'step_pending',
+          title: 'Queued work',
+          prompt: 'Do the queued thing',
+          modelId: 'mock-pro',
+          modelLabel: 'Simulacron Pro',
+          status: 'pending' as const,
+          attempts: [],
+          failedChain: [],
+        },
+      ],
+    },
+  }
+  const pendingHtml = renderToString(createElement(MessageBubble, { message: pendingBrief })).replace(/<!-- -->/g, '')
+  check(
+    'a queued step can still be opened to read its brief',
+    /aria-expanded="false"/.test(headOf(pendingHtml)) && !/disabled/.test(headOf(pendingHtml)),
+    headOf(pendingHtml),
+  )
   settingsInit.s = origSettings
 }
 
@@ -4603,6 +4873,7 @@ async function main() {
   testRoadmapParsing()
   testRoadmapReport()
   await testAgentMode()
+  await testPlannerNearJsonRun()
   await testRoadmapSimulator()
   testRepoIdentifiers()
   await testGitHubClient()

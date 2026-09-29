@@ -275,6 +275,12 @@ export interface AgentRun {
   /** Aggregate local file system operations performed across this run. */
   fsOps?: FsOpRecord[]
   /**
+   * Identifies the GitHub cards this run produced, so they render inline with
+   * the run's answer instead of the strip above the composer (see
+   * `useGitHubActivity` and `GitHubRunActivity`).
+   */
+  githubScope?: string
+  /**
    * Where the project's roadmap / milestone file stands after this run:
    * previous, current and next step plus overall progress. Present only when
    * a roadmap was actually used (see `src/lib/roadmap.ts`).

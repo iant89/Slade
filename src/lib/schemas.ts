@@ -215,6 +215,9 @@ export const agentRunSchema = z.object({
   startedAt: z.number(),
   finishedAt: z.number().optional(),
   fsOps: z.array(fsOpRecordSchema).optional(),
+  // Added with inline GitHub activity: the run's cards live in the live ledger,
+  // so a reloaded conversation simply has no scope to look them up by.
+  githubScope: z.string().optional(),
   // A stored roadmap report that fails validation is dropped on its own. It
   // must never take the surrounding conversation down with it: the whole
   // conversation list is discarded when any one message fails to parse.
