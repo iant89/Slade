@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Message } from '../../types'
 import { FAILURE_LABEL } from '../../types'
 import { useChat } from '../../store/chat'
-import { useSettings } from '../../store/settings'
+import { useSettings, modelShowsThoughts } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { copyText } from '../../lib/clipboard'
 import { formatCount, formatTime } from '../../lib/format'
@@ -10,7 +10,79 @@ import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
-import { IconBranch, IconCheck, IconCopy, IconGithub, IconPencil, IconRefresh, IconTrash, IconAlert, IconBot, IconSparkles } from '../icons'
+import {
+  IconBranch,
+  IconBrain,
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconCopy,
+  IconGithub,
+  IconLoader,
+  IconPencil,
+  IconRefresh,
+  IconTrash,
+  IconAlert,
+  IconBot,
+  IconSparkles,
+} from '../icons'
+
+/* ------------------------------------------------------------------ */
+/* Expandable thinking & reasoning block                               */
+/* ------------------------------------------------------------------ */
+
+export function ThinkingBlock({
+  reasoning,
+  streaming = false,
+  label = 'Thought process',
+}: {
+  reasoning?: string
+  streaming?: boolean
+  label?: string
+}) {
+  const [userToggled, setUserToggled] = useState<boolean | null>(null)
+  const isExpanded = userToggled !== null ? userToggled : (streaming ? true : false)
+
+  if (!reasoning?.trim() && !streaming) return null
+
+  const trimmed = reasoning?.trim() ?? ''
+  const wordCount = trimmed ? trimmed.split(/\s+/).length : 0
+
+  return (
+    <div className={`thought-block${streaming ? ' streaming' : ''}${isExpanded ? ' open' : ' closed'}`}>
+      <button
+        type="button"
+        className="thought-head"
+        onClick={() => setUserToggled(!isExpanded)}
+        aria-expanded={isExpanded}
+        title={isExpanded ? 'Collapse thinking process' : 'Expand thinking process'}
+      >
+        <span className="thought-icon" aria-hidden="true">
+          {streaming ? <IconLoader size={12} className="spin" /> : <IconBrain size={12} />}
+        </span>
+        <span className="thought-title">
+          {streaming && !trimmed ? 'Thinking…' : streaming ? 'Thinking…' : label}
+        </span>
+        {trimmed && !streaming && (
+          <span className="thought-meta">
+            {wordCount} {wordCount === 1 ? 'word' : 'words'}
+          </span>
+        )}
+        <span className="thought-chevron" aria-hidden="true">
+          {isExpanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+        </span>
+      </button>
+      {isExpanded && (
+        <div className="thought-body">
+          <div className="thought-text">
+            {trimmed || (streaming ? 'Thinking in progress…' : '')}
+            {streaming && <StreamCursor />}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 /* ------------------------------------------------------------------ */
 /* Typing indicator                                                    */
@@ -251,9 +323,11 @@ function AssistantBody({
   message: Message
   labelOf: (id: string | undefined) => string
 }) {
+  const settings = useSettings((s) => s.s)
   const streaming = message.status === 'streaming'
   const pending = message.status === 'pending'
-  const typingOn = useSettings((s) => s.s.defaults.typingIndicator)
+  const typingOn = settings.defaults.typingIndicator
+  const showThoughts = modelShowsThoughts(settings, message.modelId ?? message.chain?.[0])
   const error = message.status === 'error'
   const cancelled = message.status === 'cancelled'
 
@@ -285,6 +359,13 @@ function AssistantBody({
       {message.agent && !message.content.trim() && (pending || streaming) && message.agent.steps.length === 0 && (
         <TypingIndicator label={typingOn ? 'The orchestrator is working…' : ''} />
       )}
+      {showThoughts && (message.reasoning || (streaming && !message.content.trim())) ? (
+        <ThinkingBlock
+          reasoning={message.reasoning}
+          streaming={streaming && !message.content.trim()}
+          label="Thought process"
+        />
+      ) : null}
       {segments.map((seg, i) => (
         <div key={i}>
           {seg.handoffTo ? (

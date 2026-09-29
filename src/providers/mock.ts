@@ -335,6 +335,19 @@ export class MockAdapter implements ProviderAdapter {
       throw new ProviderError('timeout', 'Stream stalled — simulated timeout.', true)
     }
 
+    // Stream mock reasoning for pro models
+    if (model.id.includes('pro') || model.apiModel.includes('pro')) {
+      const thoughts = cfg.systemPrompt.includes(ORCHESTRATOR_PLAN_MARKER)
+        ? `Analyzing user request: "${lastText.slice(0, 50)}..."\nEvaluating task scope and model capabilities.\nFormulating multi-step execution plan.`
+        : `Analyzing goal and user context.\nSynthesizing requirements and structuring clear response.\nValidating response fidelity.`
+      const thoughtTokens = thoughts.match(/\s*\S+/g) ?? [thoughts]
+      for (const tok of thoughtTokens) {
+        if (signal.aborted) throw new ProviderError('aborted', 'Cancelled.', false)
+        onEvent({ type: 'reasoning', text: tok })
+        await sleep(2 + Math.random() * 5)
+      }
+    }
+
     // Stream word-blobs with jittered cadence.
     const tokens = reply.match(/\s*\S+/g) ?? [reply]
     for (const tok of tokens) {

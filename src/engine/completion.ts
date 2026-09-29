@@ -13,11 +13,12 @@
  */
 
 import type { AttemptFailure, ChatTurn, FailureClass, ModelDef, ProviderDef, Settings, StreamEvent, Usage } from '../types'
-import { useHealth } from '../store/health'
+import { useHealth, getEligibleTokens, isTokenRoutable } from '../store/health'
 import { useUI } from '../store/ui'
 import { adapterFor } from '../providers/registry'
 import { ProviderError } from '../providers/base'
 import { modelHasKey, routeCandidates } from './strategy'
+import { providerTokens } from '../lib/providerCatalog'
 
 export interface CompletionRequest {
   /** Human label for toasts/diagnostics, e.g. "worker step 2". */
@@ -36,6 +37,8 @@ export interface CompletionRequest {
   signal: AbortSignal
   /** Observe text as it arrives (used to stream the synthesis phase live). */
   onDelta?: (text: string) => void
+  /** Observe reasoning/thinking text as it arrives. */
+  onReasoning?: (text: string) => void
   /** Suppress the failure toast (the agent UI surfaces step errors itself). */
   silent?: boolean
 }
@@ -52,6 +55,8 @@ export interface CompletionResult {
   usage?: Usage
   /** True when the provider stopped at the output cap instead of finishing. */
   truncated?: boolean
+  /** Full reasoning / thinking text produced by the model. */
+  reasoning?: string
 }
 
 /** One automatic retry with a raised output cap (see `escalateTokens`). */
@@ -163,6 +168,7 @@ export async function runCompletion(req: CompletionRequest): Promise<CompletionR
     // next candidate starts from scratch; only models that *completed* keep
     // their text. Partial pre-handoff text is preserved in `attempts` only.
     let attemptContent = ''
+    let attemptReasoning = ''
     let truncated = false
 
     try {
@@ -176,6 +182,10 @@ export async function runCompletion(req: CompletionRequest): Promise<CompletionR
         onDelta: (t) => {
           attemptContent += t
           req.onDelta?.(t)
+        },
+        onReasoning: (t) => {
+          attemptReasoning += t
+          req.onReasoning?.(t)
         },
         onUsage: (u) => {
           usage = mergeUsage(usage, u)
@@ -213,6 +223,7 @@ export async function runCompletion(req: CompletionRequest): Promise<CompletionR
         attempts: [...attempts],
         usage,
         truncated,
+        reasoning: attemptReasoning.trim() || undefined,
       }
       return result
     } catch (err) {
@@ -288,6 +299,7 @@ async function driveAdapter(args: {
   signal: AbortSignal
   maxTokens: number
   onDelta: (text: string) => void
+  onReasoning?: (text: string) => void
   onUsage: (u: Usage) => void
   onBudgetRetry?: (retry: BudgetRetry) => void
 }): Promise<{ truncated: boolean }> {
@@ -296,49 +308,89 @@ async function driveAdapter(args: {
   if (!provider) {
     throw new ProviderError('unknown', `Provider "${model.provider}" no longer exists — re-add it in Settings → Providers.`, false)
   }
-  const apiKey = provider.apiKey
-  if (provider.kind !== 'mock' && !apiKey.trim()) {
+
+  const allTokens = provider.kind === 'mock'
+    ? [{ id: `${provider.id}-mock`, key: '', label: 'Built-in', enabled: true }]
+    : providerTokens(provider).filter((t) => t.enabled !== false && t.key.trim())
+
+  if (allTokens.length === 0) {
     throw new ProviderError('auth', `No API key configured for ${provider.label}.`, false)
   }
 
   let budget = args.maxTokens
   let escalated = false
 
-  for (;;) {
-    const startedAt = performance.now()
-    const observed: ObservedAttempt = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
-    try {
-      await driveOnce({ ...args, provider, maxTokens: budget, apiKey, observed })
-      if (observed.usage) args.onUsage(observed.usage)
-      useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
-      return { truncated: observed.truncated }
-    } catch (err) {
-      if (signal.aborted) throw new ProviderError('aborted', 'Cancelled.', false)
-      const pe =
-        err instanceof ProviderError
-          ? err
-          : new ProviderError('unknown', err instanceof Error ? err.message : String(err), true)
+  const healthByToken = useHealth.getState().byToken
+  const eligibleTokens = provider.kind === 'mock' ? allTokens : getEligibleTokens(provider, healthByToken)
+  const tokensToTry = eligibleTokens.length > 0 ? eligibleTokens : allTokens
 
-      // Nothing was streamed, so re-issuing cannot duplicate text or double-
-      // bill an answer the user already has.
-      if (!escalated && pe.failure === 'token_budget' && observed.contentChars === 0) {
-        const next = escalateTokens(budget, model.contextWindow)
-        if (next > budget) {
-          escalated = true
-          useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
-          onBudgetRetry?.({
-            fromTokens: budget,
-            toTokens: next,
-            message: pe.message,
-            elapsedMs: Math.round(performance.now() - startedAt),
-          })
-          budget = next
-          continue
+  // Check if all tokens are actively cooling down
+  if (provider.kind !== 'mock' && allTokens.length > 0 && allTokens.every((t) => !isTokenRoutable(t, healthByToken[t.id]))) {
+    const minCooldown = Math.min(...allTokens.map((t) => healthByToken[t.id]?.cooldownUntil ?? 0))
+    const waitSecs = Math.max(1, Math.round((minCooldown - Date.now()) / 1000))
+    throw new ProviderError(
+      'soft_rate_limit',
+      `All ${allTokens.length} API keys for ${provider.label} are cooling down — next key ready in ~${waitSecs}s.`,
+      true,
+    )
+  }
+
+  let lastError: ProviderError | null = null
+
+  for (let tIdx = 0; tIdx < tokensToTry.length; tIdx++) {
+    const token = tokensToTry[tIdx]!
+    const isLastToken = tIdx === tokensToTry.length - 1
+
+    for (;;) {
+      const startedAt = performance.now()
+      const observed: ObservedAttempt = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
+      try {
+        await driveOnce({ ...args, provider, maxTokens: budget, apiKey: token.key, observed })
+        if (observed.usage) args.onUsage(observed.usage)
+        useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
+        if (token.id) useHealth.getState().recordTokenSuccess(token.id)
+        return { truncated: observed.truncated }
+      } catch (err) {
+        if (signal.aborted) throw new ProviderError('aborted', 'Cancelled.', false)
+        const pe =
+          err instanceof ProviderError
+            ? err
+            : new ProviderError('unknown', err instanceof Error ? err.message : String(err), true)
+
+        lastError = pe
+        if (token.id && provider.kind !== 'mock') {
+          useHealth.getState().recordTokenFailure(token.id, pe.failure, pe.message)
         }
+
+        // Nothing was streamed, so re-issuing cannot duplicate text or double-
+        // bill an answer the user already has.
+        if (!escalated && pe.failure === 'token_budget' && observed.contentChars === 0) {
+          const next = escalateTokens(budget, model.contextWindow)
+          if (next > budget) {
+            escalated = true
+            useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
+            onBudgetRetry?.({
+              fromTokens: budget,
+              toTokens: next,
+              message: pe.message,
+              elapsedMs: Math.round(performance.now() - startedAt),
+            })
+            budget = next
+            continue
+          }
+        }
+
+        // Rotate to next token if available and nothing was streamed
+        if (!isLastToken && observed.contentChars === 0 && pe.failure !== 'bad_request') {
+          break
+        }
+
+        throw pe
       }
-      throw pe
     }
   }
+
+  throw lastError ?? new ProviderError('unknown', 'All tokens for provider failed.', true)
 }
 
 /**
@@ -360,8 +412,9 @@ async function driveOnce(args: {
   apiKey: string
   observed: ObservedAttempt
   onDelta: (text: string) => void
+  onReasoning?: (text: string) => void
 }): Promise<void> {
-  const { model, turns, systemPrompt, settings, signal, maxTokens, provider, apiKey, observed, onDelta } = args
+  const { model, turns, systemPrompt, settings, signal, maxTokens, provider, apiKey, observed, onDelta, onReasoning } = args
   const adapter = adapterFor(provider.kind)
   const modelOverride = model.overrides
   const attemptController = new AbortController()
@@ -390,6 +443,7 @@ async function driveOnce(args: {
         break
       case 'reasoning':
         observed.reasoningChars += ev.text.length
+        onReasoning?.(ev.text)
         arm('stalled', settings.defaults.requestTimeoutMs)
         break
       case 'usage':

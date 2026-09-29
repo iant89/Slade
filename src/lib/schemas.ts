@@ -17,6 +17,7 @@ export const modelDefSchema = z.object({
   apiModel: z.string().min(1),
   baseURL: z.string().optional(),
   enabled: z.boolean(),
+  showThoughts: z.boolean().optional(),
   costPer1kIn: z.number().nonnegative().optional(),
   costPer1kOut: z.number().nonnegative().optional(),
   contextWindow: z.number().positive().optional(),
@@ -25,9 +26,18 @@ export const modelDefSchema = z.object({
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().positive().optional(),
       systemPrompt: z.string().optional(),
+      showThoughts: z.boolean().optional(),
     })
     .optional(),
   simulate: mockSimulateSchema.optional(),
+})
+
+export const apiTokenDefSchema = z.object({
+  id: z.string().min(1),
+  key: z.string(),
+  label: z.string().optional(),
+  enabled: z.boolean().optional(),
+  createdAt: z.number().optional(),
 })
 
 /**
@@ -40,7 +50,8 @@ export const providerDefSchema = z
     id: z.string().min(1),
     kind: providerIdSchema.optional(),
     label: z.string().optional(),
-    apiKey: z.string(),
+    apiKey: z.string().optional().default(''),
+    apiKeys: z.array(apiTokenDefSchema).optional(),
     baseURL: z.string().optional(),
   })
   .transform(normalizeProviderDef)
@@ -61,6 +72,7 @@ export const settingsSchema = z.object({
     systemPrompt: z.string(),
     stream: z.boolean(),
     typingIndicator: z.boolean(),
+    showThoughts: z.boolean().default(true).optional(),
     autoScroll: z.enum(['smooth', 'instant', 'off']),
     failoverStrategy: z.enum(['priority', 'fastest', 'cheapest']),
     requestTimeoutMs: z.number().int().min(5_000).max(600_000),
@@ -148,6 +160,7 @@ export const agentStepSchema = z.object({
   modelLabel: z.string(),
   status: z.enum(['pending', 'running', 'complete', 'error', 'skipped']),
   result: z.string().optional(),
+  reasoning: z.string().optional(),
   error: z.string().optional(),
   attempts: z.array(attemptFailureSchema),
   failedChain: z.array(z.string()),
@@ -161,6 +174,7 @@ export const agentRunSchema = z.object({
   goal: z.string(),
   orchestratorModelId: z.string(),
   steps: z.array(agentStepSchema),
+  planningReasoning: z.string().optional(),
   strategy: z.string().optional(),
   note: z.string().optional(),
   error: z.string().optional(),
@@ -174,6 +188,7 @@ export const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   conversationId: z.string(),
   content: z.string(),
+  reasoning: z.string().optional(),
   createdAt: z.number(),
   status: z.enum(['pending', 'streaming', 'complete', 'error', 'cancelled']),
   modelId: z.string().optional(),

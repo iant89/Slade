@@ -1,7 +1,7 @@
 import type { AttemptFailure, FailureClass, Handoff, ModelDef, ProviderDef, Settings, StreamEvent, Usage } from '../types'
 import { useChat, titleFromPrompt } from '../store/chat'
 import { useSettings, effectiveParams } from '../store/settings'
-import { useHealth } from '../store/health'
+import { useHealth, getEligibleTokens, isTokenRoutable } from '../store/health'
 import { useUI } from '../store/ui'
 import { adapterFor } from '../providers/registry'
 import { ProviderError } from '../providers/base'
@@ -12,6 +12,7 @@ import { finishRun, getRun, registerRun, stopGeneration, isGenerating, type Acti
 import { applyAgentOutputWithGit, prepareAgentWorkspaceContext, runAgentTurn } from './agent'
 import { uid } from '../lib/id'
 import { announceResponse, currentAnnouncement, setAnnouncer } from './announce'
+import { providerTokens } from '../lib/providerCatalog'
 
 export { stopGeneration, isGenerating, setAnnouncer, announceResponse, currentAnnouncement }
 
@@ -89,6 +90,7 @@ function dispatchTurn(
 
 interface ChainState {
   content: string
+  reasoning?: string
   chain: string[]
   failedChain: string[]
   handoffs: Handoff[]
@@ -136,6 +138,7 @@ async function runChain(
 
   const state: ChainState = {
     content: '',
+    reasoning: '',
     chain: [],
     failedChain: [],
     handoffs: [],
@@ -185,6 +188,7 @@ async function runChain(
           failedChain: [...state.failedChain],
           handoffs: [...state.handoffs],
           usage: state.usage,
+          reasoning: state.reasoning || undefined,
           truncated: outcome.truncated || undefined,
           error: undefined,
           errorClass: undefined,
@@ -333,6 +337,7 @@ function finalize(
     failedChain?: string[]
     handoffs?: Handoff[]
     usage?: Usage
+    reasoning?: string
     truncated?: boolean
     error?: string
     errorClass?: FailureClass | undefined
@@ -354,6 +359,7 @@ function finalizeCancelled(assistantMessageId: string, state: ChainState, keep: 
     failedChain: [...state.failedChain],
     handoffs: [...state.handoffs],
     usage: state.usage,
+    reasoning: state.reasoning || undefined,
   })
 }
 
@@ -394,8 +400,12 @@ async function attemptModel(args: {
   if (!provider) {
     throw new ProviderError('unknown', `Provider "${model.provider}" no longer exists — re-add it in Settings → Providers.`, false)
   }
-  const apiKey = provider.apiKey
-  if (provider.kind !== 'mock' && !apiKey) {
+
+  const allTokens = provider.kind === 'mock'
+    ? [{ id: `${provider.id}-mock`, key: '', label: 'Built-in', enabled: true }]
+    : providerTokens(provider).filter((t) => t.enabled !== false && t.key.trim())
+
+  if (allTokens.length === 0) {
     throw new ProviderError('auth', `No API key configured for ${provider.label}.`, false)
   }
 
@@ -403,41 +413,84 @@ async function attemptModel(args: {
   let budget = params.maxTokens
   let escalated = false
 
-  for (;;) {
-    const startedAt = performance.now()
-    const observed: ObservedTurn = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
-    const contentBefore = state.content.length
-    try {
-      await attemptOnce({ ...args, provider, maxTokens: budget, apiKey, observed })
-      if (observed.usage) state.usage = mergeUsage(state.usage, observed.usage)
-      useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
-      announce(`Response from ${model.label}.`)
-      return { truncated: observed.truncated, maxTokensUsed: budget }
-    } catch (err) {
-      if (attempt.userAborted || controller.signal.aborted) {
-        throw new ProviderError('aborted', 'Cancelled.', false)
-      }
-      const pe =
-        err instanceof ProviderError ? err : new ProviderError('unknown', err instanceof Error ? err.message : String(err), true)
+  const healthByToken = useHealth.getState().byToken
+  const eligibleTokens = provider.kind === 'mock' ? allTokens : getEligibleTokens(provider, healthByToken)
+  const tokensToTry = eligibleTokens.length > 0 ? eligibleTokens : allTokens
 
-      // Nothing was streamed, so re-issuing cannot duplicate text.
-      if (!escalated && pe.failure === 'token_budget' && state.content.length === contentBefore) {
-        const next = escalateTokens(budget, model.contextWindow)
-        if (next > budget) {
-          escalated = true
-          useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
-          useUI.getState().toast({
-            kind: 'warn',
-            title: `${model.label} ran out of output budget`,
-            detail: `${pe.message} Retrying the same model with ${next.toLocaleString('en-US')} output tokens.`,
-          })
-          budget = next
-          continue
+  // Check if all configured tokens are actively cooling down
+  if (provider.kind !== 'mock' && allTokens.length > 0 && allTokens.every((t) => !isTokenRoutable(t, healthByToken[t.id]))) {
+    const minCooldown = Math.min(...allTokens.map((t) => healthByToken[t.id]?.cooldownUntil ?? 0))
+    const waitSecs = Math.max(1, Math.round((minCooldown - Date.now()) / 1000))
+    throw new ProviderError(
+      'soft_rate_limit',
+      `All ${allTokens.length} API keys for ${provider.label} are cooling down — next key ready in ~${waitSecs}s.`,
+      true,
+    )
+  }
+
+  let lastError: ProviderError | null = null
+
+  for (let tIdx = 0; tIdx < tokensToTry.length; tIdx++) {
+    const token = tokensToTry[tIdx]!
+    const isLastToken = tIdx === tokensToTry.length - 1
+
+    for (;;) {
+      const startedAt = performance.now()
+      const observed: ObservedTurn = { contentChars: 0, reasoningChars: 0, truncated: false, timedOut: null }
+      const contentBefore = state.content.length
+      try {
+        await attemptOnce({ ...args, provider, maxTokens: budget, apiKey: token.key, observed })
+        if (observed.usage) state.usage = mergeUsage(state.usage, observed.usage)
+        useHealth.getState().recordSuccess(model.id, Math.round(performance.now() - startedAt), observed.usage)
+        if (token.id) useHealth.getState().recordTokenSuccess(token.id)
+        announce(`Response from ${model.label}.`)
+        return { truncated: observed.truncated, maxTokensUsed: budget }
+      } catch (err) {
+        if (attempt.userAborted || controller.signal.aborted) {
+          throw new ProviderError('aborted', 'Cancelled.', false)
         }
+        const pe =
+          err instanceof ProviderError ? err : new ProviderError('unknown', err instanceof Error ? err.message : String(err), true)
+
+        lastError = pe
+        if (token.id && provider.kind !== 'mock') {
+          useHealth.getState().recordTokenFailure(token.id, pe.failure, pe.message)
+        }
+
+        // Nothing was streamed, so re-issuing cannot duplicate text.
+        if (!escalated && pe.failure === 'token_budget' && state.content.length === contentBefore) {
+          const next = escalateTokens(budget, model.contextWindow)
+          if (next > budget) {
+            escalated = true
+            useHealth.getState().recordFailure(model.id, pe.failure, pe.message)
+            useUI.getState().toast({
+              kind: 'warn',
+              title: `${model.label} ran out of output budget`,
+              detail: `${pe.message} Retrying the same model with ${next.toLocaleString('en-US')} output tokens.`,
+            })
+            budget = next
+            continue
+          }
+        }
+
+        // If this token failed before generating content and another token is available in the pool,
+        // rotate to the next token on the same model.
+        if (!isLastToken && state.content.length === contentBefore && pe.failure !== 'bad_request') {
+          const nextTok = tokensToTry[tIdx + 1]!
+          useUI.getState().toast({
+            kind: 'info',
+            title: `${provider.label} token rotated`,
+            detail: `Key "${token.label || token.id}" hit ${shortFailure(pe)}. Rotating to "${nextTok.label || nextTok.id}"...`,
+          })
+          break
+        }
+
+        throw pe
       }
-      throw pe
     }
   }
+
+  throw lastError ?? new ProviderError('unknown', 'All tokens for provider failed.', true)
 }
 
 /**
@@ -504,10 +557,16 @@ async function attemptOnce(args: {
         break
       }
       case 'reasoning':
-        // Thinking is not answer text and never reaches the transcript, but it
-        // is proof the model is alive: swap the first-token budget for the
-        // idle budget so a long thought is not mistaken for a dead stream.
+        // Thinking is streamed live into message.reasoning so users can observe
+        // reasoning inline as it is generated. It also counts as proof of liveness.
         observed.reasoningChars += ev.text.length
+        state.reasoning = (state.reasoning ?? '') + ev.text
+        useChat.getState().mutateMessage(assistantMessageId, (m) => ({
+          ...m,
+          status: 'streaming',
+          modelId: model.id,
+          reasoning: state.reasoning,
+        }))
         arm('stalled', settings.defaults.requestTimeoutMs)
         break
       case 'usage':

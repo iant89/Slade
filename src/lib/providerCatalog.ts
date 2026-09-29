@@ -1,4 +1,4 @@
-import type { ProviderDef, ProviderId } from '../types'
+import type { ApiTokenDef, ProviderDef, ProviderId } from '../types'
 
 /**
  * The set of provider kinds Slade can talk to, with everything the UI needs
@@ -75,6 +75,27 @@ export function isProviderId(value: string): value is ProviderId {
 }
 
 /**
+ * Extract all active and available API tokens for a provider.
+ * Supports legacy single `apiKey` as well as multi-token `apiKeys` pool.
+ */
+export function providerTokens(provider: ProviderDef): ApiTokenDef[] {
+  if (provider.apiKeys && provider.apiKeys.length > 0) {
+    return provider.apiKeys
+  }
+  if (provider.apiKey && provider.apiKey.trim()) {
+    return [
+      {
+        id: `${provider.id}-primary`,
+        key: provider.apiKey.trim(),
+        label: 'Primary token',
+        enabled: true,
+      },
+    ]
+  }
+  return []
+}
+
+/**
  * Fill in the derived fields of a persisted provider entry. Entries saved
  * before providers became user-managed carry only `apiKey`/`baseURL` (they
  * were a record keyed by kind): their kind is the record key itself.
@@ -84,14 +105,39 @@ export function normalizeProviderDef(raw: {
   kind?: ProviderId
   label?: string
   apiKey?: string
+  apiKeys?: ApiTokenDef[]
   baseURL?: string
 }): ProviderDef {
   const kind: ProviderId = raw.kind ?? (isProviderId(raw.id) ? raw.id : 'openai-compatible')
+  const apiKeys = (raw.apiKeys ?? []).filter((k) => k && typeof k.key === 'string' && k.key.trim())
+  const apiKey = raw.apiKey?.trim() || (apiKeys.length > 0 ? apiKeys[0]!.key : '')
+  const normalizedTokens: ApiTokenDef[] =
+    apiKeys.length > 0
+      ? apiKeys.map((k, i) => ({
+          id: k.id || `${raw.id}-token-${i + 1}`,
+          key: k.key.trim(),
+          label: k.label?.trim() || (i === 0 ? 'Primary token' : `Token ${i + 1}`),
+          enabled: k.enabled !== false,
+          createdAt: k.createdAt || Date.now(),
+        }))
+      : apiKey
+      ? [
+          {
+            id: `${raw.id}-primary`,
+            key: apiKey,
+            label: 'Primary token',
+            enabled: true,
+            createdAt: Date.now(),
+          },
+        ]
+      : []
+
   return {
     id: raw.id,
     kind,
     label: raw.label?.trim() || supportedProvider(kind)?.label || raw.id,
-    apiKey: raw.apiKey ?? '',
+    apiKey,
+    apiKeys: normalizedTokens.length > 0 ? normalizedTokens : undefined,
     baseURL: raw.baseURL,
   }
 }

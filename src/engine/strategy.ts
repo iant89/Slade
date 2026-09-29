@@ -2,6 +2,7 @@ import type { FailoverStrategy, FailureClass, Handoff, Message, ModelDef, Settin
 import { FAILURE_LABEL } from '../types'
 import type { ModelHealth } from '../types'
 import { isRoutable } from '../store/health'
+import { providerTokens } from '../lib/providerCatalog'
 
 /** One enabled model that routing skipped, and why. */
 export interface SkippedModel {
@@ -19,7 +20,9 @@ export interface SkippedModel {
 export function modelHasKey(settings: Settings, m: ModelDef): boolean {
   const provider = settings.providers.find((p) => p.id === m.provider)
   if (!provider) return false
-  return provider.kind === 'mock' || Boolean(provider.apiKey.trim())
+  if (provider.kind === 'mock') return true
+  const tokens = providerTokens(provider).filter((t) => t.enabled !== false && t.key.trim())
+  return tokens.length > 0
 }
 
 /**
