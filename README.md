@@ -85,6 +85,12 @@ orchestration, and everything is persisted with the message.
 - Simulators play along: with no API keys, agent mode is fully demoable — the
   built-in models produce plans, worker deliverables, and synthesis.
 
+For software-repository tasks, the orchestrator can use conversation history and files
+attached from GitHub as context, then return model-generated code/file artifacts. It does
+not have local filesystem, shell, Git, or test-runner access, and it cannot apply changes
+to a checkout or independently verify worker claims. Treat generated changes as proposals
+until you apply and test them in the target repository.
+
 ### Configuring it (Settings → Agent)
 
 - **Orchestrator model** — chain top by default, or pin any enabled model.
