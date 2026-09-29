@@ -34,6 +34,7 @@ import {
   createBranch,
   createGist,
   createIssue,
+  createRepo,
   encodePath,
   extOf as ghExtOf,
   fileSha,
@@ -51,6 +52,7 @@ import {
   lastRateInfo,
   listBranches,
   listRepos,
+  mergeBranch,
   mimeForPath,
   parseRepoInput,
   readFile,
@@ -1546,6 +1548,7 @@ async function testGitHubClient() {
   }
   const utilText = 'export const answer = 42\n'
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64')
+  let mergeCalls = 0
 
   const fake = await startFakeGitHub({
     '/user': () => ({
@@ -1553,12 +1556,42 @@ async function testGitHubClient() {
       json: { id: 7, login: 'octo', name: 'Octo', avatar_url: 'https://avatars.example/octo.png', html_url: 'https://github.com/octo' },
       headers: { 'x-oauth-scopes': 'repo, gist, read:user', 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '4993', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 600) },
     }),
-    '/user/repos': () => ({
-      status: 200,
-      json: [
-        { id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: true, fork: false, archived: false, description: 'demo repo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: new Date().toISOString(), updated_at: new Date().toISOString(), language: 'TypeScript', stargazers_count: 3, permissions: { admin: true, push: true, pull: true } },
-      ],
-    }),
+    '/user/repos': (body, meta) =>
+      meta.method === 'POST'
+        ? {
+            status: 201,
+            json: {
+              id: 9,
+              name: String(body.name),
+              full_name: `octo/${String(body.name)}`,
+              owner: { login: 'octo', avatar_url: '' },
+              private: Boolean(body.private),
+              fork: false,
+              archived: false,
+              description: body.description ?? null,
+              default_branch: 'main',
+              html_url: `https://github.com/octo/${String(body.name)}`,
+              pushed_at: null,
+              updated_at: null,
+              language: null,
+              stargazers_count: 0,
+            },
+          }
+        : {
+            status: 200,
+            json: [
+              { id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: true, fork: false, archived: false, description: 'demo repo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: new Date().toISOString(), updated_at: new Date().toISOString(), language: 'TypeScript', stargazers_count: 3, permissions: { admin: true, push: true, pull: true } },
+            ],
+          },
+    // First merge creates a merge commit (201); the same merge again is a 204
+    // no-content "already up to date".
+    '/repos/octo/demo/merges': () => {
+      mergeCalls++
+      return mergeCalls === 1
+        ? { status: 201, json: { sha: 'mergesha1', html_url: 'https://github.com/octo/demo/commit/mergesha1' } }
+        : { status: 204 }
+    },
+    '/repos/octo/clash/merges': () => ({ status: 409, json: { message: 'Merge conflict' } }),
     '/repos/octo/demo/git/trees/main': () => ({ status: 200, json: tree }),
     '/repos/octo/demo/contents/src/lib/util.ts': () => ({
       status: 200,
@@ -1677,6 +1710,54 @@ async function testGitHubClient() {
 
     const repo = await getRepo('octo/demo', api)
     check('repo metadata reads the default branch', repo.default_branch === 'main', repo.default_branch)
+
+    /* --- repository creation --- */
+
+    const fresh = await createRepo({ ...api, name: 'fresh-repo', description: 'brand new', private: true, autoInit: true })
+    check('repo creation returns the new repository', fresh.full_name === 'octo/fresh-repo', fresh.full_name)
+    check('repo creation reports privacy', fresh.private === true, String(fresh.private))
+    const createCall = fake.seen.filter((r) => r.method === 'POST' && r.url === '/user/repos').pop()
+    check('repo creation posts name, privacy and auto_init', createCall?.body.name === 'fresh-repo' && createCall?.body.private === true && createCall?.body.auto_init === true, JSON.stringify(createCall?.body))
+    check('repo creation carries the description', createCall?.body.description === 'brand new', String(createCall?.body.description))
+
+    let badName: unknown = null
+    try {
+      await createRepo({ ...api, name: 'not a repo!!' })
+    } catch (err) {
+      badName = err
+    }
+    check('an invalid repo name is refused client-side', isGitHubError(badName) && badName.kind === 'validation' && /only contain/i.test(badName.message), String(badName))
+    check('the invalid name never reached the API', !fake.seen.some((r) => r.method === 'POST' && r.url === '/user/repos' && r.body.name === 'not a repo!!'))
+
+    /* --- branch merging --- */
+
+    const merged = await mergeBranch('octo/demo', { ...api, base: 'main', head: 'dev', commitMessage: 'fold dev in' })
+    check('a merge reports the merge commit', merged.merged === true && merged.sha === 'mergesha1', JSON.stringify(merged))
+    check('the merge link points at the commit', merged.htmlUrl.endsWith('/commit/mergesha1'), merged.htmlUrl)
+    const mergeCall = fake.seen.find((r) => r.url === '/repos/octo/demo/merges')
+    check('merge sends base, head and message', mergeCall?.body.base === 'main' && mergeCall?.body.head === 'dev' && mergeCall?.body.commit_message === 'fold dev in', JSON.stringify(mergeCall?.body))
+
+    const again = await mergeBranch('octo/demo', { ...api, base: 'main', head: 'dev' })
+    check('merging an already-contained branch is a no-op, not an error', again.merged === false && /nothing to merge/i.test(again.message), JSON.stringify(again))
+    check('the no-op merge links to the target branch', again.htmlUrl.endsWith('/tree/main'), again.htmlUrl)
+
+    let conflict: unknown = null
+    try {
+      await mergeBranch('octo/clash', { ...api, base: 'main', head: 'dev' })
+    } catch (err) {
+      conflict = err
+    }
+    check('a merge conflict is explained in merge terms', isGitHubError(conflict) && conflict.kind === 'conflict' && /merge conflict/i.test(conflict.message), String(conflict))
+    check('the conflict names both branches', isGitHubError(conflict) && /dev cannot be merged into main/.test(conflict.message), String(conflict))
+
+    let sameBranch: unknown = null
+    try {
+      await mergeBranch('octo/demo', { ...api, base: 'main', head: 'main' })
+    } catch (err) {
+      sameBranch = err
+    }
+    check('merging a branch into itself is refused', isGitHubError(sameBranch) && /two different branches/i.test(sameBranch.message), String(sameBranch))
+    check('the self-merge made no API call', fake.seen.filter((r) => r.url === '/repos/octo/demo/merges').length === mergeCalls, String(mergeCalls))
   } finally {
     fake.close()
   }
@@ -2132,7 +2213,41 @@ async function testGitHubStoreAgainstFakeApi() {
   const utilText = 'export const answer = 42\n'
   const fake = await startFakeGitHub({
     '/user': () => ({ status: 200, json: { id: 7, login: 'octo', name: 'Octo', avatar_url: 'https://a.example/o.png', html_url: 'https://github.com/octo' }, headers: { 'x-oauth-scopes': 'repo, gist' } }),
-    '/user/repos': () => ({ status: 200, json: [{ id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 }] }),
+    '/user/repos': (body, meta) =>
+      meta.method === 'POST'
+        ? {
+            status: 201,
+            json: {
+              id: 2,
+              name: String(body.name),
+              full_name: `octo/${String(body.name)}`,
+              owner: { login: 'octo', avatar_url: '' },
+              private: Boolean(body.private),
+              fork: false,
+              archived: false,
+              description: body.description ?? null,
+              default_branch: 'main',
+              html_url: `https://github.com/octo/${String(body.name)}`,
+              pushed_at: null,
+              updated_at: null,
+              language: null,
+              stargazers_count: 0,
+            },
+          }
+        : {
+            status: 200,
+            json: [{ id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 }],
+          },
+    '/repos/octo/demo/merges': () => ({
+      status: 201,
+      json: { sha: 'merge1234567', html_url: 'https://github.com/octo/demo/commit/merge1234567' },
+    }),
+    // A repository created without an initial commit: no tree yet (409).
+    '/repos/octo/blank': () => ({
+      status: 200,
+      json: { id: 3, name: 'blank', full_name: 'octo/blank', owner: { login: 'octo', avatar_url: '' }, private: true, fork: false, archived: false, description: null, default_branch: 'main', html_url: 'https://github.com/octo/blank', pushed_at: null, updated_at: null, language: null, stargazers_count: 0 },
+    }),
+    '/repos/octo/blank/git/trees/main': () => ({ status: 409, json: { message: 'Git Repository is empty.' } }),
     '/repos/octo/demo/git/trees/main': () => ({ status: 200, json: { truncated: false, tree: [{ path: 'src/lib/util.ts', mode: '100644', type: 'blob', sha: 'b1', size: utilText.length }] } }),
     '/repos/octo/demo/contents/src/lib/util.ts': () => ({ status: 200, json: { type: 'file', name: 'util.ts', path: 'src/lib/util.ts', sha: 'b1', size: utilText.length, encoding: 'base64', content: Buffer.from(utilText).toString('base64') } }),
     '/repos/octo/demo/branches': () => ({ status: 200, json: [{ name: 'main', commit: { sha: 's1' } }, { name: 'dev', commit: { sha: 's2' } }] }),
@@ -2142,10 +2257,11 @@ async function testGitHubStoreAgainstFakeApi() {
   })
 
   const realFetch = globalThis.fetch
-  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const toFake = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     return realFetch(url.replace('https://api.github.com', fake.base), init)
   }) as typeof fetch
+  globalThis.fetch = toFake
 
   const gh = useGitHub.getState()
   try {
@@ -2164,6 +2280,29 @@ async function testGitHubStoreAgainstFakeApi() {
     // The branch list is a background nicety — give its promise a tick.
     await new Promise((r) => setTimeout(r, 50))
     check('branches load in the background', useGitHub.getState().branches.map((b) => b.name).join(',') === 'main,dev', JSON.stringify(useGitHub.getState().branches))
+
+    const treeFetchesBefore = fake.seen.filter((r) => r.url.startsWith('/repos/octo/demo/git/trees/')).length
+    const mergeRes = await useGitHub.getState().mergeBranch({ head: 'dev' })
+    check('merging into the open branch returns the merge commit', mergeRes?.merged === true && mergeRes.sha === 'merge1234567', JSON.stringify(mergeRes))
+    const storeMergeCall = fake.seen.find((r) => r.url === '/repos/octo/demo/merges')
+    check('the store merge defaults to the open branch', storeMergeCall?.body.base === 'main' && storeMergeCall?.body.head === 'dev', JSON.stringify(storeMergeCall?.body))
+    await new Promise((r) => setTimeout(r, 50))
+    check('merging refreshes the file tree', fake.seen.filter((r) => r.url.startsWith('/repos/octo/demo/git/trees/')).length > treeFetchesBefore, String(treeFetchesBefore))
+    check('merging clears the busy flag', useGitHub.getState().merging === false)
+
+    const made = await useGitHub.getState().createRepo({ name: 'created', description: 'from the store', private: true, autoInit: true })
+    check('the store creates a repository', made?.full_name === 'octo/created', JSON.stringify(made))
+    check('the new repo joins the repo list', useGitHub.getState().repos.some((r) => r.full_name === 'octo/created'), JSON.stringify(useGitHub.getState().repos.map((r) => r.full_name)))
+    check('the new repo is remembered as recent', useGitHub.getState().recentRepos.includes('octo/created'), JSON.stringify(useGitHub.getState().recentRepos))
+    check('creating clears the busy flag', useGitHub.getState().creatingRepo === false)
+    check('creating reports no error', useGitHub.getState().createRepoError === undefined, String(useGitHub.getState().createRepoError))
+
+    // Merging into itself must be refused before any API call.
+    const mergesBefore = fake.seen.filter((r) => r.url === '/repos/octo/demo/merges').length
+    const selfMerge = await useGitHub.getState().mergeBranch({ head: 'main' })
+    check('a self-merge returns null', selfMerge === null, JSON.stringify(selfMerge))
+    check('a self-merge makes no API call', fake.seen.filter((r) => r.url === '/repos/octo/demo/merges').length === mergesBefore)
+    check('a self-merge says why', /two different branches/i.test(useGitHub.getState().mergeError ?? ''), String(useGitHub.getState().mergeError))
 
     await useGitHub.getState().openFile('src/lib/util.ts')
     check('opening a file previews its text', useGitHub.getState().preview?.text === utilText, String(useGitHub.getState().preview?.text))
@@ -2198,6 +2337,14 @@ async function testGitHubStoreAgainstFakeApi() {
     check('a failing publish returns null and sets an error', failedPublish === null && Boolean(useGitHub.getState().publishError), String(useGitHub.getState().publishError))
     failing.close()
     useGitHub.getState().dismissPublishError()
+
+    // A repository created without an initial commit opens as an empty tree,
+    // not an error — that is the state right after "New repository".
+    globalThis.fetch = toFake
+    const blank = await useGitHub.getState().openRepo('octo/blank')
+    check('an empty repository opens', blank === true, String(blank))
+    check('an empty repository shows an empty tree, not an error', useGitHub.getState().tree?.entries.length === 0 && useGitHub.getState().treeError === undefined, String(useGitHub.getState().treeError))
+    check('an empty repository is the active repo', useGitHub.getState().activeRepo === 'octo/blank', String(useGitHub.getState().activeRepo))
   } finally {
     globalThis.fetch = realFetch
     fake.close()

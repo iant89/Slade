@@ -404,6 +404,124 @@ export function createBranch(fullName: string, branch: string, fromSha: string, 
   })
 }
 
+export interface CreateRepoOptions extends GhRequest {
+  /** Repository name — it is created under the authenticated user (or org token's owner). */
+  name: string
+  description?: string
+  /** true = private repository; false/undefined = public. */
+  private?: boolean
+  /** Seed the repo with an initial README commit so it is not empty. */
+  autoInit?: boolean
+  homepage?: string
+  hasIssues?: boolean
+}
+
+/**
+ * Create a repository (`POST /user/repos`).
+ *
+ * GitHub restricts names to letters, digits, `.`, `-` and `_` (max 100
+ * characters) and answers 422 otherwise — checking here turns that into an
+ * instant explanation instead of a round trip.
+ */
+export async function createRepo(o: CreateRepoOptions): Promise<GitHubRepo> {
+  const name = o.name.trim()
+  if (!name) {
+    throw new GitHubError('validation', 'Give the repository a name.')
+  }
+  if (name.length > 100 || !/^[\w.-]+$/.test(name)) {
+    throw new GitHubError(
+      'validation',
+      'Repository names may only contain letters, numbers, ".", "-" and "_" (up to 100 characters).',
+    )
+  }
+  return ghFetch<GitHubRepo>('/user/repos', {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'POST',
+    body: {
+      name,
+      description: o.description?.trim() || undefined,
+      private: Boolean(o.private),
+      auto_init: Boolean(o.autoInit),
+      homepage: o.homepage?.trim() || undefined,
+      has_issues: o.hasIssues ?? true,
+    },
+  })
+}
+
+export interface MergeResult {
+  /** false when the target branch already contained the source (HTTP 204). */
+  merged: boolean
+  sha?: string
+  message: string
+  htmlUrl: string
+}
+
+export interface MergeBranchOptions extends GhRequest {
+  /** The branch that receives the commits (usually the branch you have open). */
+  base: string
+  /** The branch whose commits are merged in. */
+  head: string
+  commitMessage?: string
+}
+
+/**
+ * Merge `head` into `base` (`POST /repos/{owner}/{repo}/merges`).
+ *
+ * GitHub answers 201 with the merge commit, or 204 when `base` already
+ * contains everything in `head` — that is a success, not an error, so it comes
+ * back as `merged: false` instead of a throw. A real conflict is a 409 and is
+ * re-thrown with a merge-specific sentence.
+ */
+export async function mergeBranch(fullName: string, o: MergeBranchOptions): Promise<MergeResult> {
+  const base = o.base.trim()
+  const head = o.head.trim()
+  if (!base || !head) {
+    throw new GitHubError('validation', 'Pick both a target branch and a branch to merge from.')
+  }
+  if (base === head) {
+    throw new GitHubError('validation', 'Choose two different branches — a branch cannot be merged into itself.')
+  }
+  let res: { sha?: string; html_url?: string } | undefined
+  try {
+    res = await ghFetch<{ sha?: string; html_url?: string }>(`/repos/${fullName}/merges`, {
+      token: o.token,
+      baseUrl: o.baseUrl,
+      signal: o.signal,
+      method: 'POST',
+      body: {
+        base,
+        head,
+        commit_message: o.commitMessage?.trim() || undefined,
+      },
+    })
+  } catch (err) {
+    if (isGitHubError(err) && err.kind === 'conflict') {
+      throw new GitHubError(
+        'conflict',
+        `${head} cannot be merged into ${base} — GitHub reports a merge conflict. Resolve it on GitHub, then try again.`,
+        err.status,
+      )
+    }
+    throw err
+  }
+  if (!res?.sha) {
+    // 204 No Content: base already contains head.
+    return {
+      merged: false,
+      message: `${head} is already contained in ${base} — nothing to merge.`,
+      htmlUrl: `https://github.com/${fullName}/tree/${encodeURIComponent(base)}`,
+    }
+  }
+  return {
+    merged: true,
+    sha: res.sha,
+    message: `Merged ${head} into ${base}.`,
+    htmlUrl: res.html_url ?? `https://github.com/${fullName}/commit/${res.sha}`,
+  }
+}
+
 export interface TreeResult {
   entries: GitHubTreeEntry[]
   truncated: boolean

@@ -258,14 +258,19 @@ Open the workspace with the GitHub button in the header or `Ctrl/Cmd + G`. Two
 halves, both wired into the thread:
 
 - **Repo context** — browse your repositories (or open any public one by URL),
-  read files, search code with GitHub's own index, and attach whatever you find
-  straight into the composer. Attached repo files become artifact cards and fold
-  into the prompt exactly like an upload, with the source recorded.
+  **create a new repository** without leaving the app, read files, search code
+  with GitHub's own index, and attach whatever you find straight into the
+  composer. Attached repo files become artifact cards and fold into the prompt
+  exactly like an upload, with the source recorded.
 - **Publishing** — every artifact card and every message has *Publish to
   GitHub*: create a **gist** (secret by default), **commit a file** into a repo
   (binary files too; existing paths update in place, or commit onto a fresh
   branch with one toggle), or open an **issue** with the content in the body and
   a provenance block underneath.
+- **Merging** — with a repository open, *Merge…* in the Files tab folds one
+  branch into another (the open branch by default) through GitHub's merge
+  endpoint: a real merge reports its commit, an up-to-date branch says so
+  instead of erroring, and a conflict explains itself in merge terms.
 
 ### Signing in: device flow, no secrets
 
@@ -297,7 +302,7 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 
 | Scope | Used for |
 | --- | --- |
-| `repo` | listing repositories, reading trees/blobs, committing published artifacts, opening issues |
+| `repo` | listing repositories, creating repositories, reading trees/blobs, committing published artifacts, merging branches, opening issues |
 | `gist` | publishing an artifact or an answer as a gist |
 | `read:user` | showing which account is connected |
 
@@ -456,8 +461,9 @@ npm run test:smoke # headless engine, provider and GitHub tests (no browser, no 
 fallback, base64 for binaries, every error classification (including
 rate-limit reset times and token redaction), the device-flow state machine
 (pending, slow-down, expired, denied, aborted), the new-branch commit path,
-gist/issue payloads, and the loop that matters most — *attach a repo file →
-its contents appear in the next prompt*.
+repository creation and branch merging (including the 204 already-merged and
+409 conflict paths), gist/issue payloads, and the loop that matters most —
+*attach a repo file → its contents appear in the next prompt*.
 
 ## Layout
 

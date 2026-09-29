@@ -4,6 +4,7 @@ import { formatBytes } from '../../lib/format'
 import { extOf, guessLanguage, type GitHubTreeEntry } from '../../lib/github'
 import { CodeArtifact } from '../artifacts/CodeArtifact'
 import { Markdown } from '../chat/Markdown'
+import { MergeBranchDialog } from './MergeBranchDialog'
 import { GhEmpty, GhError, Spinner } from './bits'
 import {
   IconChevronDown,
@@ -13,6 +14,7 @@ import {
   IconExternal,
   IconFile,
   IconFolder,
+  IconGitMerge,
   IconImage,
   IconPaperclip,
   IconRefresh,
@@ -99,6 +101,7 @@ export function FileBrowser() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [attachBusy, setAttachBusy] = useState<string | null>(null)
   const [pullBusy, setPullBusy] = useState(false)
+  const [merging, setMerging] = useState(false)
 
   const filter = treeFilter.trim().toLowerCase()
   const treeRoot = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree])
@@ -254,6 +257,19 @@ export function FileBrowser() {
         >
           {pullBusy ? <Spinner /> : <IconDownload size={12} />} Pull to Local Files
         </button>
+        <button
+          className="btn ghost small"
+          onClick={() => setMerging(true)}
+          disabled={branches.length < 2}
+          title={
+            branches.length < 2
+              ? 'Merging needs at least one other branch in this repository'
+              : `Merge another branch into ${activeBranch}`
+          }
+          type="button"
+        >
+          <IconGitMerge size={12} /> Merge…
+        </button>
       </div>
 
       <div className="gh-search-inline">
@@ -379,6 +395,7 @@ export function FileBrowser() {
           ) : null}
         </div>
       ) : null}
+      {merging ? <MergeBranchDialog onClose={() => setMerging(false)} /> : null}
     </div>
   )
 }

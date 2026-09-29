@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react'
 import { useGitHub, repoShortName } from '../../store/github'
 import { useUI } from '../../store/ui'
 import { formatCount } from '../../lib/format'
+import { CreateRepoDialog } from './CreateRepoDialog'
 import { GhEmpty, GhError, Spinner } from './bits'
-import { IconGithub, IconLock, IconRefresh, IconRepo, IconSearch, IconStar } from '../icons'
+import { IconGithub, IconLock, IconPlus, IconRefresh, IconRepo, IconSearch, IconStar } from '../icons'
 
 function updatedLabel(iso: string | null): string {
   if (!iso) return ''
@@ -22,6 +23,7 @@ export function RepoBrowser() {
   const loadRepos = useGitHub((s) => s.loadRepos)
   const openRepo = useGitHub((s) => s.openRepo)
   const [manual, setManual] = useState('')
+  const [creating, setCreating] = useState(false)
 
   const filtered = useMemo(() => {
     const q = repoFilter.trim().toLowerCase()
@@ -103,15 +105,26 @@ export function RepoBrowser() {
         <div className="gh-section">
           <div className="gh-section-head">
             <h3>Your repositories</h3>
-            <button
-              className="icon-btn small"
-              onClick={() => void loadRepos({ force: true })}
-              aria-label="Refresh repositories"
-              title="Refresh"
-              type="button"
-            >
-              <IconRefresh size={13} />
-            </button>
+            <div className="gh-head-actions">
+              <button
+                className="icon-btn small"
+                onClick={() => setCreating(true)}
+                aria-label="Create a repository"
+                title="New repository"
+                type="button"
+              >
+                <IconPlus size={13} />
+              </button>
+              <button
+                className="icon-btn small"
+                onClick={() => void loadRepos({ force: true })}
+                aria-label="Refresh repositories"
+                title="Refresh"
+                type="button"
+              >
+                <IconRefresh size={13} />
+              </button>
+            </div>
           </div>
           <div className="gh-search-inline">
             <IconSearch size={13} />
@@ -166,6 +179,7 @@ export function RepoBrowser() {
         </div>
       ) : null}
       {!login && token ? <p className="gh-muted">Using a stored token for {repoShortName(activeRepo)}.</p> : null}
+      {creating ? <CreateRepoDialog onClose={() => setCreating(false)} /> : null}
     </div>
   )
 }

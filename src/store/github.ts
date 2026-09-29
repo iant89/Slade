@@ -17,6 +17,7 @@ import {
 import {
   baseName,
   commitTree,
+  createRepo as createRepoApi,
   GitHubError,
   githubErrorMessage,
   getRepo,
@@ -25,6 +26,7 @@ import {
   isTextualPath,
   listBranches,
   listRepos,
+  mergeBranch as mergeBranchApi,
   mimeForPath,
   onRateInfo,
   parseRepoInput,
@@ -37,6 +39,7 @@ import {
   type GitHubRepo,
   type GitHubSearchHit,
   type GitHubTreeEntry,
+  type MergeResult,
   type RemoteFile,
 } from '../lib/github'
 import { executePublish, publishErrorMessage, type PublishRequest, type PublishResult, type PublishTarget } from '../lib/github-publish'
@@ -184,6 +187,14 @@ export interface GitHubState {
   searchLoading: boolean
   searchError?: string
 
+  /* repository creation */
+  creatingRepo: boolean
+  createRepoError?: string
+
+  /* branch merging */
+  merging: boolean
+  mergeError?: string
+
   /* publishing */
   publishDefaults: PublishDefaults
   publishing: boolean
@@ -201,8 +212,17 @@ export interface GitHubState {
   connectWithToken: (token: string) => Promise<boolean>
   loadRepos: (opts?: { force?: boolean }) => Promise<void>
   setRepoFilter: (v: string) => void
+  /** Create a repository under the signed-in account and remember it. */
+  createRepo: (input: {
+    name: string
+    description?: string
+    private?: boolean
+    autoInit?: boolean
+  }) => Promise<GitHubRepo | null>
   openRepo: (input: string, opts?: { branch?: string }) => Promise<boolean>
   setBranch: (branch: string) => Promise<void>
+  /** Re-read the branch list (and their head commits) for the active repo. */
+  refreshBranches: () => Promise<void>
   setTreeFilter: (v: string) => void
   refreshTree: () => Promise<void>
   openFile: (path: string) => Promise<void>
@@ -227,6 +247,8 @@ export interface GitHubState {
   runSearch: (query: string) => Promise<void>
   clearSearch: () => void
   attachHit: (hit: GitHubSearchHit) => Promise<Artifact | null>
+  /** Merge one branch of the active repository into another (default: the open branch). */
+  mergeBranch: (opts: { head: string; base?: string; message?: string }) => Promise<MergeResult | null>
   setPublishDefaults: (patch: Partial<PublishDefaults>) => void
   publish: (req: PublishRequest) => Promise<PublishResult | null>
   dismissPublishError: () => void
@@ -321,6 +343,8 @@ export const useGitHub = create<GitHubState>((set, get) => {
     previewLoading: false,
     search: null,
     searchLoading: false,
+    creatingRepo: false,
+    merging: false,
 
     publishDefaults: persisted.publish,
     publishing: false,
@@ -448,6 +472,50 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
     setRepoFilter: (v) => set({ repoFilter: v }),
 
+    createRepo: async (input) => {
+      const token = get().token
+      if (!token) {
+        const msg = 'Connect GitHub first (Settings → GitHub).'
+        set({ createRepoError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Not connected to GitHub', detail: msg })
+        return null
+      }
+      const name = input.name.trim()
+      if (!name) {
+        const msg = 'Give the repository a name.'
+        set({ createRepoError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Name required', detail: msg })
+        return null
+      }
+      set({ creatingRepo: true, createRepoError: undefined })
+      try {
+        const repo = await createRepoApi({
+          token,
+          name,
+          description: input.description,
+          private: input.private,
+          autoInit: input.autoInit,
+        })
+        const fullName = repo.full_name || `${repo.owner?.login ?? get().login ?? ''}/${repo.name}`.replace(/^\//, '')
+        rememberRepo(fullName)
+        set((s) => ({
+          creatingRepo: false,
+          repos: [repo, ...s.repos.filter((r) => r.full_name !== repo.full_name)],
+        }))
+        useUI.getState().toast({
+          kind: 'success',
+          title: `Created ${fullName}`,
+          detail: repo.private ? 'Private repository' : 'Public repository',
+        })
+        return repo
+      } catch (err) {
+        const msg = textOf(err)
+        set({ creatingRepo: false, createRepoError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Could not create the repository', detail: msg })
+        return null
+      }
+    },
+
     openRepo: async (input, opts) => {
       const owner = get().login
       const parsed = parseRepoInput(input, owner)
@@ -460,10 +528,11 @@ export const useGitHub = create<GitHubState>((set, get) => {
         return false
       }
       const fullName = parsed.fullName
+      let branch = opts?.branch
       set({ treeLoading: true, treeError: undefined, preview: undefined, search: null })
       try {
         const repo = await getRepo(fullName, { token: get().token || undefined })
-        const branch = opts?.branch ?? repo.default_branch
+        branch = branch ?? repo.default_branch
         set({ activeRepo: fullName, activeBranch: branch, branchesLoading: true })
         rememberRepo(fullName)
         const tree = await getTree(fullName, branch, { token: get().token || undefined })
@@ -472,13 +541,35 @@ export const useGitHub = create<GitHubState>((set, get) => {
           treeLoading: false,
         })
         // Branch list is a nicety; never let it block the browser.
-        void listBranches(fullName, { token: get().token || undefined })
-          .then((branches) => set({ branches, branchesLoading: false }))
-          .catch(() => set({ branches: [], branchesLoading: false }))
+        void get().refreshBranches()
         return true
       } catch (err) {
+        // A repository created without an initial commit has no tree yet — an
+        // empty file list is the honest answer, not an error.
+        if (branch && isGitHubError(err) && err.kind === 'conflict' && /empty/i.test(err.message)) {
+          set({
+            tree: { repo: fullName, ref: branch, entries: [], truncated: false, at: Date.now() },
+            treeLoading: false,
+            treeError: undefined,
+            branches: [],
+            branchesLoading: false,
+          })
+          return true
+        }
         set({ treeLoading: false, treeError: textOf(err), tree: undefined, branchesLoading: false })
         return false
+      }
+    },
+
+    refreshBranches: async () => {
+      const fullName = get().activeRepo
+      if (!fullName) return
+      set({ branchesLoading: true })
+      try {
+        const branches = await listBranches(fullName, { token: get().token || undefined })
+        set({ branches, branchesLoading: false })
+      } catch {
+        set({ branches: [], branchesLoading: false })
       }
     },
 
@@ -492,6 +583,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
           tree: { repo, ref: branch, entries: tree.entries, truncated: tree.truncated, at: Date.now() },
           treeLoading: false,
         })
+        void get().refreshBranches()
         persist()
       } catch (err) {
         set({ treeLoading: false, treeError: textOf(err) })
@@ -821,6 +913,60 @@ export const useGitHub = create<GitHubState>((set, get) => {
       const artifact = await get().attachFile(hit.path)
       if (repo && repo !== current) set({ activeRepo: current })
       return artifact
+    },
+
+    mergeBranch: async (opts) => {
+      const token = get().token
+      if (!token) {
+        const msg = 'Connect GitHub first (Settings → GitHub).'
+        set({ mergeError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Not connected to GitHub', detail: msg })
+        return null
+      }
+      const repo = (get().activeRepo ?? '').trim()
+      if (!repo) {
+        const msg = 'Open a repository first.'
+        set({ mergeError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'No repository open', detail: msg })
+        return null
+      }
+      const base = (opts.base ?? get().activeBranch ?? '').trim()
+      const head = opts.head.trim()
+      if (!base || !head) {
+        const msg = 'Pick the branch to merge into and the branch to merge from.'
+        set({ mergeError: msg })
+        return null
+      }
+      if (base === head) {
+        const msg = 'Choose two different branches — a branch cannot be merged into itself.'
+        set({ mergeError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Same branch', detail: msg })
+        return null
+      }
+      set({ merging: true, mergeError: undefined })
+      try {
+        const res = await mergeBranchApi(repo, { token, base, head, commitMessage: opts.message })
+        set({ merging: false })
+        if (res.merged) {
+          // Heads moved: refresh what the workspace shows. The tree always
+          // follows activeBranch, so only refresh it when that is the target.
+          if (base === get().activeBranch) void get().refreshTree()
+          void get().refreshBranches()
+          useUI.getState().toast({
+            kind: 'success',
+            title: `Merged ${head} into ${base}`,
+            detail: res.sha ? res.sha.slice(0, 7) : undefined,
+          })
+        } else {
+          useUI.getState().toast({ kind: 'info', title: 'Nothing to merge', detail: res.message })
+        }
+        return res
+      } catch (err) {
+        const msg = textOf(err)
+        set({ merging: false, mergeError: msg })
+        useUI.getState().toast({ kind: 'error', title: 'Merge failed', detail: msg })
+        return null
+      }
     },
 
     /* ---------------- publishing ---------------- */

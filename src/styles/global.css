@@ -2292,6 +2292,28 @@ input[type='range']::-moz-range-thumb {
 .publish-result-line { display: flex; align-items: center; gap: 9px; font-size: 0.88em; color: var(--ok); }
 .publish-result-line em { color: var(--text-muted); font-style: normal; }
 
+/* ---------- Repo / merge dialogs (same shell as publish) ---------- */
+
+.modal-panel:has(.gh-dialog) { width: min(520px, 100%); }
+.gh-dialog { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.gh-dialog-head { padding: 18px 20px 8px; }
+.gh-dialog-head h2 {
+  margin: 0; display: flex; align-items: center; gap: 8px;
+  font-size: 1.02em;
+}
+.gh-dialog-head .gh-muted { margin: 4px 0 0; }
+.gh-dialog-body { padding: 6px 20px 4px; overflow-y: auto; min-height: 0; }
+.gh-dialog-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.gh-dialog-foot .btn:first-child { margin-right: auto; }
+.gh-merge-sha { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
+.gh-merge-sha code { font-family: var(--font-mono); }
+.gh-head-actions { display: flex; align-items: center; gap: 4px; }
+
 /* ---------- Responsive ---------- */
 
 @media (max-width: 900px) {
