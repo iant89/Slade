@@ -169,6 +169,40 @@ export const agentStepSchema = z.object({
   fsOps: z.array(fsOpRecordSchema).optional(),
 })
 
+const roadmapStatusSchema = z.enum(['done', 'active', 'todo'])
+
+const roadmapTimelineStepSchema = z.object({
+  index: z.number().int().positive(),
+  label: z.string(),
+  status: roadmapStatusSchema,
+  group: z.string().optional(),
+  changed: z.boolean().optional(),
+})
+
+const roadmapProgressSchema = z.object({
+  done: z.number().int().nonnegative(),
+  active: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  percent: z.number().min(0).max(100),
+})
+
+export const roadmapReportSchema = z.object({
+  path: z.string(),
+  title: z.string().optional(),
+  previous: roadmapTimelineStepSchema.optional(),
+  current: roadmapTimelineStepSchema.optional(),
+  next: roadmapTimelineStepSchema.optional(),
+  progress: roadmapProgressSchema,
+  before: roadmapProgressSchema.optional(),
+  changes: z.array(
+    z.object({
+      label: z.string(),
+      from: z.enum(['done', 'active', 'todo', 'new']),
+      to: z.enum(['done', 'active', 'todo', 'removed']),
+    }),
+  ),
+})
+
 export const agentRunSchema = z.object({
   phase: z.enum(['planning', 'executing', 'synthesizing', 'complete', 'error']),
   goal: z.string(),
@@ -181,6 +215,10 @@ export const agentRunSchema = z.object({
   startedAt: z.number(),
   finishedAt: z.number().optional(),
   fsOps: z.array(fsOpRecordSchema).optional(),
+  // A stored roadmap report that fails validation is dropped on its own. It
+  // must never take the surrounding conversation down with it: the whole
+  // conversation list is discarded when any one message fails to parse.
+  roadmap: roadmapReportSchema.optional().catch(undefined),
 })
 
 export const messageSchema = z.object({

@@ -12,7 +12,7 @@
  * tracking and stop/cancel behave exactly like the plain chain.
  */
 
-import type { AgentRun, AgentStep, AttemptFailure, ChatTurn, FsOpRecord, Message, ModelDef, Settings, Usage } from '../types'
+import type { AgentRun, AgentStep, AttemptFailure, ChatTurn, FsOpRecord, Message, ModelDef, RoadmapReport, Settings, Usage } from '../types'
 import { z } from 'zod'
 import { useChat } from '../store/chat'
 import { useSettings } from '../store/settings'
@@ -20,6 +20,7 @@ import { useUI } from '../store/ui'
 import { useFs } from '../store/fs'
 import { useGitHub } from '../store/github'
 import { extractFsActions, formatFsContextForAgent, formatGitHubTreeForAgent } from '../lib/fs'
+import { buildRoadmapReport, describeRoadmapReport, snapshotRoadmapFiles, type RoadmapFileSnapshot } from '../lib/roadmap'
 import { buildTurns } from './turns'
 import { modelHasKey, newAssistantPlaceholder } from './strategy'
 import { announceResponse } from './announce'
@@ -84,6 +85,7 @@ Planning rules:
 - Parallel subtasks must not write to the same file paths concurrently.
 - When the task benefits from independent perspectives, use distinct available models when practical.
 - If files are involved, ask the worker to return complete, clearly named fenced file blocks (\`\`\`lang:path/to/file.ext) so Slade stores them in the local file system.
+- If the local file system holds a roadmap or milestone file (ROADMAP.md, MILESTONES.md, docs/roadmap.md, or similar), read it first and tie the plan to the step or steps it advances. Do not assign roadmap edits to workers: you update the roadmap yourself in the final synthesis, once the results are known.
 
 Worker roster:
 ${roster || '(no workers configured — answer directly)'}${fsContext ? `\n\n${fsContext}` : ''}`
@@ -96,17 +98,24 @@ SLADE AGENT-MODE FINAL SYNTHESIS CONTRACT
 
 This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. In this Slade runtime you have access to Slade's persistent local file system (where worker file blocks were stored), but you do not have shell, git, or test-runner tools. Do not claim that tests/builds were run or a Git checkout diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
 
-For a software-development task, provide a concise final report with these headings:
+For a software-development task, provide a concise final report with these headings, in this order:
 
+SUMMARY
+ISSUES
 IMPLEMENTED
 FILES CHANGED
 TESTING
 ARCHITECTURE
 DOCUMENTATION
+ROADMAP
 REMAINING
 STATUS
 
+SUMMARY is two to four plain sentences on what was done and the outcome; lead with it. ISSUES lists everything the user should be made aware of — failed, skipped, or unrunnable tests and builds; acceptance criteria you could not verify; worker steps that failed or were cut off; assumptions you made; risky, breaking, or destructive changes; manual actions the user must take; problems you noticed but did not fix — each with its impact and your recommended next step. Include ISSUES only when there is something real to report, and never pad it. ROADMAP appears only when a roadmap or milestone file was used (see ROADMAP UPDATE below).
+
 Describe files stored in the local file system accurately. Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. Preserve useful worker file blocks with their filename tags (\`\`\`lang:path/to/file.ext) so Slade renders them as artifacts and keeps the local file system up to date. If a worker failed or returned unusable output, say so and continue with the usable results.
+
+ROADMAP UPDATE. If the local file system holds a roadmap or milestone file (ROADMAP.md, MILESTONES.md, docs/roadmap.md, or similar), you own it. When this run advanced or changed any of its steps, emit the COMPLETE updated file exactly once, as a fenced block tagged with its exact path (\`\`\`markdown:ROADMAP.md), so Slade stores it. Mark a step [x] only when the conversation or files give evidence that its acceptance criteria are met; mark partly finished work [~]; leave every other line exactly as it was — same order, wording, and format — and add newly discovered work as new [ ] steps. If a worker already updated the roadmap, check it against the results and correct it only where it is wrong. Do not create a roadmap when none exists unless the user asked for one, and do not touch it when the work did not advance it. If the roadmap is shown as truncated, never rewrite it — the file you emit would replace the whole roadmap and delete the part you cannot see; say in ROADMAP and ISSUES which steps need updating instead. Slade reads the file after the run and renders the previous, current, and next step and the overall completion progress itself, so do not draw a timeline or progress bar; the ROADMAP section only says which steps changed and why.
 
 ${SYNTH_MARKER}${fsContext ? `\n\n${fsContext}` : ''}`
 }
@@ -120,7 +129,8 @@ Slade mounts a persistent local file system:
 - To pull a file from the connected GitHub repository into the local file system, use \`\`\`fs:pull:path/to/file.ext.
 - To append to an existing file, use \`\`\`fs:append:path/to/file.ext.
 - To move or rename a file, use \`\`\`fs:move:old/path.ext -> new/path.ext.
-- To delete a file, use \`\`\`fs:delete:path/to/file.ext.${fsContext ? `\n\n${fsContext}` : ''}`
+- To delete a file, use \`\`\`fs:delete:path/to/file.ext.
+- Do not edit roadmap or milestone files (ROADMAP.md, MILESTONES.md and similar) unless your task explicitly says to; the orchestrator keeps them up to date.${fsContext ? `\n\n${fsContext}` : ''}`
 }
 
 export async function prepareAgentWorkspaceContext(queryHint: string): Promise<string> {
@@ -223,17 +233,25 @@ type PlannerReply = z.infer<typeof plannerReplySchema>
 
 /**
  * Pull the JSON object out of a planner response. Real models wrap JSON in
- * prose or fences no matter how hard the prompt forbids it, so: strip fences,
- * then try the outermost braces, then a string-aware balanced scan.
+ * prose or fences no matter how hard the prompt forbids it, so: try the reply
+ * as written, then with the wrapping fences stripped. Each attempt tries the
+ * outermost braces, then a string-aware balanced scan.
+ *
+ * The reply is tried as written FIRST because a direct `answer` can contain
+ * code blocks and file blocks of its own; stripping every triple-backtick up
+ * front would delete their fences (and with them any file the answer writes).
  */
 export function extractJsonObject(text: string): unknown | undefined {
-  const stripped = text.replace(/```(?:json)?/gi, '')
-  const start = stripped.indexOf('{')
+  return scanJsonObject(text) ?? scanJsonObject(text.replace(/```(?:json)?/gi, ''))
+}
+
+function scanJsonObject(source: string): unknown | undefined {
+  const start = source.indexOf('{')
   if (start < 0) return undefined
-  const end = stripped.lastIndexOf('}')
+  const end = source.lastIndexOf('}')
   if (end > start) {
     try {
-      return JSON.parse(stripped.slice(start, end + 1))
+      return JSON.parse(source.slice(start, end + 1))
     } catch {
       /* fall through to the balanced scan */
     }
@@ -241,8 +259,8 @@ export function extractJsonObject(text: string): unknown | undefined {
   let depth = 0
   let inString = false
   let escaped = false
-  for (let i = start; i < stripped.length; i++) {
-    const ch = stripped[i]
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]
     if (inString) {
       if (escaped) escaped = false
       else if (ch === '\\') escaped = true
@@ -255,7 +273,7 @@ export function extractJsonObject(text: string): unknown | undefined {
       depth--
       if (depth === 0) {
         try {
-          return JSON.parse(stripped.slice(start, i + 1))
+          return JSON.parse(source.slice(start, i + 1))
         } catch {
           return undefined
         }
@@ -367,6 +385,24 @@ export async function runAgentTurn(
   }
   const useLocalFs = settings.agent.useLocalFs ?? true
 
+  // The roadmap files as this run found them — snapshotted once the workspace
+  // is prepared and before anything is written — so the completion timeline
+  // can show what the run changed.
+  let roadmapBefore: RoadmapFileSnapshot[] = []
+  /** Roadmap timeline as of now. Tracking must never be able to fail a run. */
+  const roadmapReport = (delegated: boolean): RoadmapReport | undefined => {
+    if (!useLocalFs) return undefined
+    try {
+      return buildRoadmapReport({
+        before: roadmapBefore,
+        after: snapshotRoadmapFiles(useFs.getState().listFiles()),
+        delegated,
+      })
+    } catch {
+      return undefined
+    }
+  }
+
   try {
     /* ---------------- planning ---------------- */
 
@@ -376,6 +412,7 @@ export async function runAgentTurn(
     )
     const planTurns: ChatTurn[] = [...historyTurns]
     const planFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
+    if (useLocalFs) roadmapBefore = snapshotRoadmapFiles(useFs.getState().listFiles())
     let planReasoning = ''
     const planResult = await runCompletion({
       purpose: 'Planning',
@@ -442,6 +479,7 @@ export async function runAgentTurn(
             messageId: assistantMessageId,
           })
         : []
+      const directRoadmap = roadmapReport(false)
       finalize(assistantMessageId, {
         status: 'complete',
         content: answer,
@@ -458,9 +496,10 @@ export async function runAgentTurn(
           orchestratorModelId: planResult.model.id,
           finishedAt: Date.now(),
           fsOps: directFsOps.length ? directFsOps : undefined,
+          roadmap: directRoadmap,
         },
       })
-      announceResponse(`Response from ${directLabel}.`)
+      announceResponse(`Response from ${directLabel}.${directRoadmap ? ` ${describeRoadmapReport(directRoadmap)}` : ''}`)
       return
     }
 
@@ -689,6 +728,7 @@ export async function runAgentTurn(
       note = `${note ? `${note} ` : ''}${cutOff.length === 1 ? `One worker step was` : `${cutOff.length} worker steps were`} cut off at the output token cap, so ${cutOff.length === 1 ? 'its' : 'their'} deliverable may be incomplete — raise “Max tokens per step” in Settings → Agent.`
     }
 
+    const roadmap = roadmapReport(true)
     finalize(assistantMessageId, {
       status: 'complete',
       content,
@@ -705,10 +745,11 @@ export async function runAgentTurn(
         note,
         finishedAt: Date.now(),
         fsOps: allFsOps.length ? allFsOps : undefined,
+        roadmap,
       },
     })
     announceResponse(
-      `Orchestrator finished: ${succeeded} of ${steps.length} steps completed${hadFailures ? ', some steps failed' : ''}.`,
+      `Orchestrator finished: ${succeeded} of ${steps.length} steps completed${hadFailures ? ', some steps failed' : ''}.${roadmap ? ` ${describeRoadmapReport(roadmap)}` : ''}`,
     )
   } catch (err) {
     const aborted = (err instanceof ProviderError && err.failure === 'aborted') || attempt.userAborted

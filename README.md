@@ -50,7 +50,9 @@ you can watch the failover engine work.
    [GitHub (repo context & publishing)](#github-repo-context--publishing).
 8. Flip the **Agent** chip in the composer and describe a whole *task* — the orchestrator
    model plans it, delegates the steps to your other models, and assembles the answer.
-   See [The orchestrator (agent mode)](#the-orchestrator-agent-mode).
+   See [The orchestrator (agent mode)](#the-orchestrator-agent-mode). Put a `ROADMAP.md`
+   in Local Files first and the finished run ends with a
+   [roadmap timeline](#completion-report--roadmap-tracking).
 
 ## The orchestrator (agent mode)
 
@@ -91,6 +93,75 @@ history, files attached from GitHub, and Slade's persistent **Local File System*
 automatically stored in Local Files. The runtime does not execute OS shell commands, Git
 checkouts, or test runners, so it cannot independently execute tests or builds against a
 local checkout.
+
+### Completion report & roadmap tracking
+
+When the orchestrator finishes a software task it reports back in a fixed shape:
+
+| Section | What it is |
+| --- | --- |
+| **SUMMARY** | Two to four plain sentences: what was done and the outcome. Always first. |
+| **ISSUES** | Everything you should be made aware of — failed, skipped or unrunnable tests and builds, criteria it could not verify, worker steps that failed or were cut off, assumptions it made, risky changes, manual actions needed, problems it noticed but did not fix. **Only present when there is something real to report**; never padding. |
+| IMPLEMENTED · FILES CHANGED · TESTING · ARCHITECTURE · DOCUMENTATION | The detail. |
+| **ROADMAP** | Only when a roadmap was used: which steps changed status and why. |
+| REMAINING · STATUS | Limits and follow-ups, then an honest `VERIFIED / COMPLETE`-style status. |
+
+If the workspace holds a roadmap or milestone file, that is the source of truth for
+planned work and the run also ends with a **timeline card** under the report:
+
+- **Previous → current → next step**, plus **overall completion** (a progress bar,
+  `done / total`, and how far this run moved it — e.g. `+1 step this run · was 43%`).
+  Steps the run changed are flagged, and the card lists what changed.
+- **The numbers come from the file, not from a model.** Slade snapshots the roadmap
+  after preparing the workspace and before anything is written, then diffs it against the
+  file after the run. The card therefore can't claim more than the roadmap says.
+- **Current** is the step the run just completed (else the one it started, else the one
+  it otherwise touched). If the run didn't change the roadmap it is simply where the
+  roadmap stands — the step in progress, else the first not started — and the card says
+  *"No step changed status in this run"*, which is your cue if a task should have
+  ticked something off. **Next** skips steps that are already done.
+- **The orchestrator owns the roadmap.** Its instructions say to update the file as part
+  of finishing the task; to mark a step done only when its acceptance criteria are
+  verified (partly finished work is marked in progress); to keep the file's structure,
+  wording and order; to add newly discovered work as new steps; and not to invent a
+  roadmap you didn't ask for. Workers are told not to touch it. The update is a normal
+  path-tagged file block, so it appears as an artifact and, if the file came from GitHub,
+  as a pending change you can commit from the plan card.
+- **No card when it isn't relevant:** a greeting or quick answer that leaves the roadmap
+  alone produces none, and neither does a workspace without a roadmap.
+
+**Which files count.** `ROADMAP.md`, `MILESTONES.md`, `docs/roadmap.md`,
+`product-roadmap.txt`… — any `.md` / `.markdown` / `.mdx` / `.txt` (or extensionless)
+file whose name contains *roadmap* or *milestone* as a word. If several exist, the one
+the run changed wins, then the shallowest, then `ROADMAP` before `MILESTONES`. Roadmap
+files go into the agent's workspace context first — ahead of recently touched files, and
+with a larger per-file allowance (30,000 characters instead of 12,000), because the
+orchestrator updates a roadmap by rewriting the whole file. If one is bigger than that it
+is flagged as truncated and the orchestrator is told never to rewrite it (it lists the
+steps that need updating instead), so a partial view can't delete the tail. When a GitHub
+repository is open, Slade pulls its roadmap in automatically — you don't have to name it
+in the prompt.
+
+**Formats Slade reads** (`src/lib/roadmap.ts`; a step is one leaf line with a status):
+
+```md
+## Milestone 2 — Providers          <- headings become each step's milestone
+- [x] Supported-providers dialog    <- done
+- [~] Delete-provider flow          <- in progress
+- [ ] Per-provider key testing      <- not started
+```
+
+Also understood: status markers on bullets, headings and table rows (`✅ 🚧 ⏳`,
+`(done)`, `— in progress`, `**Status:** Done`, a *Status* column), and status-named
+sections whose plain bullets inherit the status (`## Done` / `## In progress` /
+`## Planned`, or `## Now` / `## Next` / `## Later`). Fenced code, ~~struck-through~~
+items and prose are ignored; a file with no status markers yields no steps, so no card.
+When the orchestrator creates a roadmap it uses the checkbox notation above.
+
+**Try it with no keys:** open Local Files (`Ctrl/Cmd + E`), create `ROADMAP.md` with a
+few `- [ ]` lines, turn on **Agent** and give it a task. The built-in simulators tick the
+first open step and emit the updated file, exactly as a real orchestrator is instructed
+to, and the card appears under the answer.
 
 ### Configuring it (Settings → Agent)
 
@@ -388,8 +459,10 @@ src/
   engine/       failover chain walk, routing strategies, turn builder
   providers/    openai · anthropic · google · openrouter · openai-compatible · built-in mock
   store/        zustand stores + persistence + cooldown policy
-  components/   chat, artifacts, settings, layout, github, common
+  components/   chat (incl. the orchestrator plan card and roadmap timeline), artifacts,
+                settings, layout, github, common
   lib/          mime classification, csv, clipboard, schemas, storage,
+                roadmap (parse · diff · timeline), local file system,
                 github (REST client, device flow, publish payloads)
 scripts/
   smoke.ts                  headless test suite

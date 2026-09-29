@@ -274,6 +274,65 @@ export interface AgentRun {
   finishedAt?: number
   /** Aggregate local file system operations performed across this run. */
   fsOps?: FsOpRecord[]
+  /**
+   * Where the project's roadmap / milestone file stands after this run:
+   * previous, current and next step plus overall progress. Present only when
+   * a roadmap was actually used (see `src/lib/roadmap.ts`).
+   */
+  roadmap?: RoadmapReport
+}
+
+/* ------------------------------------------------------------------ */
+/* Roadmap tracking (orchestrator completion report)                   */
+/* ------------------------------------------------------------------ */
+
+export type RoadmapStatus = 'done' | 'active' | 'todo'
+
+/** One roadmap step as it appears on the completion timeline. */
+export interface RoadmapTimelineStep {
+  /** 1-based position among all of the roadmap's steps. */
+  index: number
+  label: string
+  status: RoadmapStatus
+  /** Enclosing milestone / section heading, when the roadmap has one. */
+  group?: string
+  /** True when this step's status changed during the run. */
+  changed?: boolean
+}
+
+/** A step whose status moved during the run (or that was added / removed). */
+export interface RoadmapChange {
+  label: string
+  from: RoadmapStatus | 'new'
+  to: RoadmapStatus | 'removed'
+}
+
+export interface RoadmapProgress {
+  done: number
+  active: number
+  total: number
+  /** Whole-number completion, `round(done / total * 100)`. */
+  percent: number
+}
+
+/**
+ * The completion timeline Slade shows under an orchestrated run's final
+ * answer. Derived by diffing the roadmap file before and after the run — never
+ * from a model's own claim about it — and persisted with the message.
+ */
+export interface RoadmapReport {
+  /** Local file system path of the roadmap that was used, e.g. `ROADMAP.md`. */
+  path: string
+  title?: string
+  previous?: RoadmapTimelineStep
+  current?: RoadmapTimelineStep
+  next?: RoadmapTimelineStep
+  /** Overall completion after the run. */
+  progress: RoadmapProgress
+  /** Completion when the run started; absent when the roadmap was created by the run. */
+  before?: RoadmapProgress
+  /** Status transitions this run made to the roadmap, in roadmap order. */
+  changes: RoadmapChange[]
 }
 
 /* ------------------------------------------------------------------ */

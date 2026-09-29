@@ -6,6 +6,7 @@
 import type { FsFile, FsOpRecord } from '../types'
 import { formatBytes } from './format'
 import { extOf, kindLabel } from './mime'
+import { isRoadmapPath } from './roadmap'
 
 /* ------------------------------------------------------------------ */
 /* Errors                                                              */
@@ -497,6 +498,9 @@ export function formatGitHubTreeForAgent(
   ].join('\n')
 }
 
+const DEFAULT_FILE_CONTEXT_CHARS = 12_000
+const ROADMAP_CONTEXT_CHARS = 30_000
+
 /**
  * Build the Local File System context block injected into system prompts so
  * agents can inspect the file tree and read existing file contents.
@@ -511,19 +515,22 @@ export function formatFsContextForAgent(
 ): string {
   if (files.length === 0) return ''
   const maxTotal = opts?.maxTotalChars ?? 32_000
-  const maxFile = opts?.maxFileChars ?? 12_000
   const hint = (opts?.queryHint ?? '').toLowerCase()
+  // A roadmap is updated by rewriting the whole file, so the agent has to see
+  // all of it: a truncated view would tempt it to emit a "complete" file that
+  // silently drops the tail. Roadmaps therefore get a bigger per-file allowance
+  // unless the caller set an explicit cap.
+  const capFor = (f: FsFile): number => opts?.maxFileChars ?? (isRoadmapPath(f.path) ? ROADMAP_CONTEXT_CHARS : DEFAULT_FILE_CONTEXT_CHARS)
 
   const manifest = formatFsManifest(files)
 
-  // Prioritize files mentioned in queryHint (by path or basename), then most
+  // Prioritize files mentioned in queryHint (by path or basename), then
+  // roadmap / milestone files — small, and the agent must never miss them
+  // just because busier files were touched more recently — then most
   // recently updated first.
-  const prioritized = [...files].sort((a, b) => {
-    const aMentioned = hint && (hint.includes(a.path.toLowerCase()) || hint.includes(a.name.toLowerCase())) ? 1 : 0
-    const bMentioned = hint && (hint.includes(b.path.toLowerCase()) || hint.includes(b.name.toLowerCase())) ? 1 : 0
-    if (aMentioned !== bMentioned) return bMentioned - aMentioned
-    return b.updatedAt - a.updatedAt
-  })
+  const rank = (f: FsFile): number =>
+    hint && (hint.includes(f.path.toLowerCase()) || hint.includes(f.name.toLowerCase())) ? 2 : isRoadmapPath(f.path) ? 1 : 0
+  const prioritized = [...files].sort((a, b) => rank(b) - rank(a) || b.updatedAt - a.updatedAt)
 
   let budget = maxTotal
   const fileBlocks: string[] = []
@@ -536,7 +543,7 @@ export function formatFsContextForAgent(
       budget -= note.length
       continue
     }
-    const slice = f.content.slice(0, Math.min(maxFile, budget))
+    const slice = f.content.slice(0, Math.min(capFor(f), budget))
     const truncated = slice.length < f.content.length
     budget -= slice.length
     fileBlocks.push(

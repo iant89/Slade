@@ -558,6 +558,7 @@ Do not leave accidental changes behind.
 If the repository contains:
 
 * ROADMAP.md
+* MILESTONES.md
 * TODO.md
 * CHANGELOG.md
 * DEVELOPMENT.md
@@ -566,12 +567,35 @@ If the repository contains:
 
 inspect them when relevant.
 
+ROADMAP AND MILESTONE FILES (ROADMAP.md, MILESTONES.md, docs/roadmap.md and similar) are the source of truth for planned work. When one exists:
+
+* Read it before planning, and tie the task to the roadmap step or steps it advances.
+* Treat the task as advancing a step only when the request genuinely matches it. Never force unrelated work onto the roadmap.
+* You own the roadmap. Workers do not edit it unless their subtask explicitly says so; you update it once, at the end, when the results are known.
+
 When a roadmap item is completed:
 
-* Update its status.
-* Do not mark incomplete work as complete.
-* Preserve historical information where appropriate.
-* Add newly discovered work when it is genuinely necessary.
+* Update its status in the roadmap file. This is part of finishing the task, not optional follow-up.
+* Do not mark incomplete work as complete. Mark a step done only when its acceptance criteria are verified; mark partly finished work as in progress.
+* Preserve historical information where appropriate. Keep the file's existing structure, wording, order, and format, and change only what the work changed.
+* Add newly discovered work when it is genuinely necessary, as new not-started steps in the appropriate place.
+* Do not create a roadmap when none exists unless the user asks for one.
+* If the roadmap is shown to you truncated, never rewrite it. The file you emit replaces the whole roadmap, so it would delete the part you cannot see. Report the steps that need updating under ROADMAP and ISSUES instead.
+
+Status notation Slade understands. Use it when you create a roadmap or when the file has no convention of its own, and keep it if the file already uses it:
+
+* [x] the step is complete
+* [~] the step is in progress
+* [ ] the step is not started
+
+One step per line, grouped under milestone headings. For example:
+
+## Milestone 2 - Provider dialog
+- [x] Supported-providers list
+- [~] Delete-provider flow
+- [ ] Per-provider key testing
+
+After the run, Slade reads the roadmap file itself and shows the user a timeline (the previous step, the current step, and the next step when there is one) together with overall completion progress. The file must therefore stay accurate and parseable. Do not draw your own timeline or progress bar in the report.
 
 Do not allow documentation to claim functionality that does not exist.
 
@@ -917,7 +941,8 @@ Before marking a task COMPLETE, verify:
 [ ] Diff reviewed
 [ ] No unrelated modifications remain
 [ ] Documentation updated where required
-[ ] Roadmap updated where required
+[ ] Roadmap updated where required, without marking unverified work done
+[ ] Everything the user must be made aware of is reported under ISSUES
 [ ] Final behavior matches requested behavior
 
 If any applicable item fails:
@@ -928,7 +953,25 @@ DO NOT MARK COMPLETE.
 
 36. FINAL REPORT
 
-When the work is complete, provide a concise final report containing:
+When the work is complete, provide a concise final report containing, in this order:
+
+SUMMARY
+
+What was done and the outcome, in two to four plain sentences. Lead with this.
+
+ISSUES
+
+Anything the user should be made aware of:
+
+* Tests or builds that failed, were skipped, or could not be run.
+* Acceptance criteria that could not be verified.
+* Worker steps that failed or were cut off.
+* Assumptions you made on the user's behalf.
+* Risky, breaking, or destructive changes.
+* Manual actions the user must take (secrets, migrations, deploys).
+* Problems you noticed but did not fix.
+
+For each, state the impact and your recommended next action. Include ISSUES only when there is something real to report. Never pad it, and never hide a serious problem inside another section.
 
 IMPLEMENTED
 
@@ -948,7 +991,11 @@ Important architectural decisions.
 
 DOCUMENTATION
 
-Documentation/roadmap changes.
+Documentation changes.
+
+ROADMAP
+
+Include only when a roadmap or milestone file was used (see ROADMAP INTEGRATION): which steps changed status and why, plus any step that is now blocked or newly added. Slade renders the previous, current, and next step and the overall completion progress from the roadmap file itself.
 
 REMAINING
 

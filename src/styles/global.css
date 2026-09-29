@@ -2814,3 +2814,180 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 }
 .agent-fs-chip.op-delete .agent-fs-op { color: var(--danger); }
 
+/* Roadmap timeline ---------------------------------------------------
+   The completion footer of an orchestrated run: overall progress plus the
+   previous / current / next roadmap step. Built on the same tokens as the
+   plan card. Sizes are relative to the message font so density settings
+   apply; the timeline turns vertical when the chat column is narrow. */
+
+.roadmap-card {
+  container-type: inline-size;
+  margin: 14px 0 2px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-raised) 65%, transparent);
+}
+.roadmap-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  margin-bottom: 9px;
+}
+.roadmap-title {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0;
+  font-size: 0.76em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.roadmap-title svg { flex: none; }
+.roadmap-title-text { min-width: 0; overflow-wrap: anywhere; }
+.roadmap-path {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 7px; border-radius: 999px;
+  font-family: var(--font-mono); font-size: 0.95em; font-weight: 500;
+  text-transform: none; letter-spacing: 0;
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+}
+.roadmap-open { flex: none; }
+
+.roadmap-bar {
+  height: 7px; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--border-strong) 70%, transparent);
+}
+.roadmap-bar-fill {
+  display: block; height: 100%;
+  width: var(--roadmap-to, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  animation: roadmap-fill 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.roadmap-card.is-complete .roadmap-bar-fill { background: var(--ok); }
+@keyframes roadmap-fill {
+  from { width: var(--roadmap-from, 0%); }
+  to   { width: var(--roadmap-to, 0%); }
+}
+
+.roadmap-progress {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px;
+  margin-top: 6px;
+  font-size: 0.8em; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.roadmap-progress-main strong { color: var(--text); font-weight: 700; }
+.roadmap-progress-delta { color: var(--ok); font-weight: 600; }
+.roadmap-progress-delta.is-negative { color: var(--warn); }
+
+/* previous — current — next */
+.roadmap-timeline {
+  list-style: none; margin: 14px 0 0; padding: 0;
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+}
+.roadmap-node {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  min-width: 0; padding: 0 6px;
+  text-align: center;
+}
+.roadmap-dot {
+  position: relative; z-index: 1;
+  width: 22px; height: 22px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  border: 2px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-faint);
+}
+.roadmap-node.status-done .roadmap-dot {
+  border-color: var(--ok); color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, var(--bg-panel));
+}
+.roadmap-node.status-active .roadmap-dot { border-color: var(--accent); color: var(--accent-ink); }
+.roadmap-node.slot-current .roadmap-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.roadmap-node.slot-current.status-done .roadmap-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 20%, transparent);
+}
+/* "in progress": a half-filled disc */
+.roadmap-dot-half {
+  width: 10px; height: 10px; border-radius: 999px;
+  border: 1.5px solid currentColor;
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+/* Connector from a node's dot to the next node's dot. It belongs to the node
+   before it, so in the stacked layout it can run the full height of that
+   node's text. Solid once travelled, dashed while ahead. */
+.roadmap-link {
+  position: absolute; top: 10px;
+  left: calc(50% + 17px); right: calc(-50% + 17px);
+  height: 0;
+  border-top: 2px solid var(--border-strong);
+}
+.roadmap-link.is-travelled { border-top-color: var(--ok); }
+.roadmap-link.is-ahead { border-top-style: dashed; }
+
+.roadmap-node-body {
+  display: flex; flex-direction: column; gap: 1px;
+  width: 100%; min-width: 0; margin-top: 8px;
+}
+.roadmap-slot {
+  font-size: 0.66em; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.roadmap-node.slot-current .roadmap-slot { color: var(--accent-ink); }
+.roadmap-label {
+  font-size: 0.88em; line-height: 1.3; color: var(--text);
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.roadmap-node.status-todo .roadmap-label { color: var(--text-muted); }
+.roadmap-node.slot-current .roadmap-label { font-weight: 600; }
+.roadmap-group {
+  font-size: 0.72em; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roadmap-status { margin-top: 1px; font-size: 0.74em; color: var(--text-faint); }
+.roadmap-node.status-done .roadmap-status { color: var(--ok); }
+.roadmap-node.status-active .roadmap-status { color: var(--accent-ink); }
+
+/* what this run changed */
+.roadmap-changes {
+  list-style: none; margin: 12px 0 0; padding: 9px 0 0;
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.roadmap-change { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 0.8em; }
+.roadmap-change-verb {
+  flex: none; min-width: 5.6em;
+  font-size: 0.86em; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--text-faint);
+}
+.roadmap-change.to-done .roadmap-change-verb { color: var(--ok); }
+.roadmap-change.to-active .roadmap-change-verb { color: var(--accent-ink); }
+.roadmap-change.to-removed .roadmap-change-verb { color: var(--danger); }
+.roadmap-change-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.roadmap-more { color: var(--text-faint); }
+.roadmap-note {
+  margin: 12px 0 0; padding-top: 9px;
+  border-top: 1px solid var(--border);
+  font-size: 0.8em; color: var(--text-muted);
+}
+.roadmap-note.is-done { margin-top: 10px; color: var(--ok); }
+.roadmap-note.is-done + .roadmap-note { margin-top: 0; border-top: 0; padding-top: 4px; }
+
+/* narrow chat column: stack the timeline top to bottom */
+@container (max-width: 470px) {
+  .roadmap-timeline { grid-auto-flow: row; gap: 12px; }
+  .roadmap-node { flex-direction: row; align-items: flex-start; gap: 10px; padding: 0; text-align: left; }
+  .roadmap-node-body { margin-top: 0; }
+  .roadmap-link {
+    top: 26px; bottom: -8px; left: 10px; right: auto;
+    width: 0; height: auto;
+    border-top: 0; border-left: 2px solid var(--border-strong);
+  }
+  .roadmap-link.is-travelled { border-left-color: var(--ok); }
+  .roadmap-link.is-ahead { border-left-style: dashed; }
+}
