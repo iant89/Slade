@@ -2635,6 +2635,38 @@ function testModelPicker() {
   check('formatCtx renders millions compactly', formatCtx(1_048_576) === '1M' && formatCtx(1_000_000) === '1M', `${formatCtx(1_048_576)}/${formatCtx(1_000_000)}`)
   check('formatCtx renders kilos compactly', formatCtx(262_144) === '262K' && formatCtx(400_000) === '400K', `${formatCtx(262_144)}/${formatCtx(400_000)}`)
   check('formatPrice hides unknowns and trims zeros', formatPrice(undefined) === '—' && formatPrice(0.03) === '$0.03' && formatPrice(0.0005) === '$0.0005', `${formatPrice(undefined)}/${formatPrice(0.03)}/${formatPrice(0.0005)}`)
+  check(
+    'formatPrice keeps cheap models truthful instead of rounding them up',
+    formatPrice(0.00008) === '$0.00008' && formatPrice(0.00045) === '$0.00045' && formatPrice(0.00087) === '$0.00087',
+    `${formatPrice(0.00008)}/${formatPrice(0.00045)}/${formatPrice(0.00087)}`,
+  )
+
+  // NVIDIA Nemotron 3 Super: curated on both routes a user can take — the
+  // OpenRouter slug (262K served context, $0.08/$0.45 per million) and NVIDIA's
+  // own OpenAI-compatible endpoint, which the form prefills.
+  const nemotron = MODEL_CATALOG.filter((m) => m.apiModel === 'nvidia/nemotron-3-super-120b-a12b')
+  check(
+    'Nemotron 3 Super is catalogued for OpenRouter and NVIDIA NIM',
+    nemotron.length === 2 && new Set(nemotron.map((m) => m.provider)).size === 2,
+    JSON.stringify(nemotron.map((m) => m.provider)),
+  )
+  const orNemotron = nemotron.find((m) => m.provider === 'openrouter')
+  check(
+    '…the OpenRouter entry carries the 262K context and real per-1k pricing',
+    orNemotron?.contextWindow === 262_144 && orNemotron.costPer1kIn === 0.00008 && orNemotron.costPer1kOut === 0.00045,
+    JSON.stringify(orNemotron),
+  )
+  const nimNemotron = nemotron.find((m) => m.provider === 'openai-compatible')
+  check(
+    '…and the NIM entry prefills NVIDIA’s OpenAI-compatible endpoint',
+    nimNemotron?.baseURL === 'https://integrate.api.nvidia.com/v1',
+    String(nimNemotron?.baseURL),
+  )
+  check(
+    'agentic models qualify for the catalogue',
+    (orNemotron?.strengths.includes('agents') && nimNemotron?.strengths.includes('agents')) === true,
+    JSON.stringify(nemotron.map((m) => m.strengths)),
+  )
 
   // SSR: the picker table for OpenAI. Default sort is context, descending,
   // so the 1M-context GPTs lead and the 400K mini trails.
@@ -2665,6 +2697,17 @@ function testModelPicker() {
   const orTable = renderToString(createElement(ModelPickerTable, { provider: 'openrouter', onPick: () => {} }))
   check('provider swap re-scopes the table to OpenRouter slugs', orTable.includes('deepseek/deepseek-v4-pro') && !orTable.includes('gpt-5.5'), orTable.match(/\d+ of \d+/)?.[0])
   check('openrouter rows keep vendor-prefixed IDs', orTable.includes('z-ai/glm-5.2') && orTable.includes('moonshotai/kimi-k2.7-code'))
+  check(
+    'the OpenRouter table lists Nemotron 3 Super with its context and price intact',
+    orTable.includes('nvidia/nemotron-3-super-120b-a12b') && orTable.includes('262K') && orTable.includes('$0.00008') && orTable.includes('$0.00045'),
+    orTable.includes('nvidia/nemotron-3-super-120b-a12b') ? 'row present, price cell rendered' : 'row missing',
+  )
+  const compatTable = renderToString(createElement(ModelPickerTable, { provider: 'openai-compatible', onPick: () => {} }))
+  check(
+    'the OpenAI-compatible table lists the NIM endpoint too',
+    compatTable.includes('nvidia/nemotron-3-super-120b-a12b') && compatTable.includes('build.nvidia.com'),
+    compatTable.match(/1M/)?.[0] ?? 'no context chip',
+  )
 }
 
 /**
