@@ -582,6 +582,8 @@ kbd {
 
 .thought-block.streaming .thought-icon {
   opacity: 1;
+  /* The brain keeps its shape while thinking — only its emphasis breathes. */
+  animation: pulse 1.4s ease-in-out infinite;
 }
 
 .thought-title {
@@ -2237,6 +2239,236 @@ input[type='range']::-moz-range-thumb {
   color: var(--text-muted);
   white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 140px; overflow: auto;
+}
+
+/* ---------- GitHub action cards (live API activity) ----------
+
+   One card per GitHub API call, docked above the composer. A card is a
+   read-only row — icon, action title, the path it touched, a status glyph.
+   It is deliberately *not* expandable: the whole point is that you can read
+   what happened without opening anything. The list itself scrolls. */
+
+.gh-activity {
+  flex: none;
+  width: 100%;
+  padding: 8px clamp(14px, 4vw, 40px) 0;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.gh-activity-head,
+.gh-activity-list {
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.gh-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px 6px;
+}
+
+.gh-activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 6px 2px 2px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.74em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.gh-activity-toggle:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+}
+
+.gh-activity-toggle svg {
+  flex: none;
+}
+
+.gh-activity-summary {
+  white-space: nowrap;
+}
+
+.gh-activity-tail {
+  color: var(--text-faint);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gh-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 176px;
+  overflow-y: auto;
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+}
+
+.gh-action-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+  animation: gh-action-in 0.16s ease-out;
+  user-select: none;
+}
+
+@keyframes gh-action-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.gh-action-card.status-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-raised));
+}
+
+.gh-action-card.status-running {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-raised));
+}
+
+.gh-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.gh-action-card.status-running .gh-action-icon {
+  color: var(--accent-ink);
+}
+
+.gh-action-lines {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.gh-action-title {
+  font-size: 0.78em;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.gh-action-subject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72em;
+  color: var(--text-muted);
+}
+
+.gh-action-subject code {
+  font-family: var(--font-mono);
+}
+
+.gh-action-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+}
+
+.gh-action-time {
+  font-family: var(--font-mono);
+  font-size: 0.68em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.gh-action-error {
+  font-size: 0.7em;
+  color: var(--danger);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-action-target {
+  font-family: var(--font-mono);
+  font-size: 0.68em;
+  color: var(--text-faint);
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-action-repeat {
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 0.68em;
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.gh-action-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: var(--text-faint);
+}
+
+.gh-action-status.done {
+  color: var(--ok);
+}
+
+.gh-action-status.error {
+  color: var(--danger);
+}
+
+.gh-action-status.running {
+  color: var(--accent-ink);
+}
+
+.gh-action-card .gh-action-status.running svg {
+  animation: spin 0.9s linear infinite;
+}
+
+@media (max-width: 720px) {
+  .gh-action-lines {
+    flex-direction: column;
+    gap: 1px;
+  }
+  .gh-action-target {
+    display: none;
+  }
+  .gh-activity-list {
+    max-height: 140px;
+  }
 }
 
 /* ---------- Settings → GitHub ---------- */

@@ -233,9 +233,9 @@ function ModelsTab() {
                     />
                   </FieldRow>
                   <Toggle
-                    label="Show thought process"
+                    label="Show Thoughts"
                     checked={Boolean(m.showThoughts ?? m.overrides?.showThoughts ?? settings.defaults.showThoughts ?? true)}
-                    hint="Display expandable model thinking / reasoning when available"
+                    hint="Show each model's expandable Thoughts card (its reasoning) when available"
                     onChange={(checked) =>
                       setModel(m.id, {
                         showThoughts: checked,
@@ -478,7 +478,7 @@ function DefaultsTab() {
 
       <SectionTitle>Streaming & feel</SectionTitle>
       <Toggle checked={defaults.stream} onChange={(v) => set({ stream: v })} label="Stream responses" hint="Token-by-token rendering" />
-      <Toggle checked={Boolean(defaults.showThoughts ?? true)} onChange={(v) => set({ showThoughts: v })} label="Show thought process" hint="Display expandable model reasoning and inline agent thoughts" />
+      <Toggle checked={Boolean(defaults.showThoughts ?? true)} onChange={(v) => set({ showThoughts: v })} label="Show Thoughts" hint="Show the expandable Thoughts card (model reasoning) in replies and agent steps" />
       <Toggle checked={defaults.typingIndicator} onChange={(v) => set({ typingIndicator: v })} label="Typing indicator" hint="Animated dots while waiting for the first token" />
       <SelectRow
         label="Auto-scroll"

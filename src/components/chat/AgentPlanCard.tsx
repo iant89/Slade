@@ -69,11 +69,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
           <p className="agent-plan-strategy">Delegating the work…</p>
           {showPlanningThoughts && run.planningReasoning ? (
             <div style={{ marginTop: '0.5rem' }}>
-              <ThinkingBlock
-                reasoning={run.planningReasoning}
-                streaming={true}
-                label="Orchestrator reasoning"
-              />
+              <ThinkingBlock reasoning={run.planningReasoning} streaming={true} />
             </div>
           ) : null}
         </>
@@ -83,10 +79,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       )}
       {run.phase !== 'planning' && showPlanningThoughts && run.planningReasoning ? (
         <div style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
-          <ThinkingBlock
-            reasoning={run.planningReasoning}
-            label="Planning reasoning"
-          />
+          <ThinkingBlock reasoning={run.planningReasoning} />
         </div>
       ) : null}
       {run.note && <p className="agent-plan-note">{run.note}</p>}
@@ -254,7 +247,6 @@ function StepRow({
               <ThinkingBlock
                 reasoning={step.reasoning}
                 streaming={step.status === 'running' && !step.result}
-                label={`${step.modelLabel || 'Worker'} thought process`}
               />
             </div>
           ) : null}

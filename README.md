@@ -293,6 +293,28 @@ Create the OAuth app once — GitHub → Settings → Developer settings → OAu
 copy the **Client ID** into **Settings → GitHub**. A deployment can ship that ID
 as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 
+### Every GitHub call, as a card
+
+Every request Slade sends to `api.github.com` — plus the GitHub actions that go
+somewhere else (the OAuth device flow, signing out, cloning a repo's files into
+Local Files) — shows up as a **GitHub Action card** in the strip above the
+composer: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
+the thing it touched (`/src/lib/util.ts`) on the second line, with the
+`owner/repo@branch` it ran against and a status glyph.
+
+- **It never expands.** There is nothing to open: what happened, and to what, is
+  the whole card. Failures keep GitHub's own sentence in the row's tooltip.
+- The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
+  reading/creating/updating/deleting files, branches and refs, commits and trees,
+  pull requests (create, merge, fetch), code search, repository and branch lists,
+  gists, issues, token checks, rate-limit checks, sign-in, sign-out, cloning.
+  Anything unmapped still gets a card with its path, so no call can slip past
+  unlogged.
+- Identical calls in a burst (pulling 25 files) fold into one card with a `×25`
+  counter instead of burying the list, the strip keeps the last 60, and a request
+  cancelled mid-flight (a search you typed over) drops its card rather than
+  showing a failure.
+
 ### What the token is used for
 
 | Scope | Used for |
@@ -317,6 +339,10 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 - Full history persisted across sessions (localStorage, zod-validated on load)
 - Virtualized message list with smart auto-scroll that yields the moment you scroll up
   (with a "jump to latest" affordance)
+- **Thoughts** — a model's internal reasoning arrives in an expandable *Thoughts* card
+  (brain icon, word count, `thinking…` while it streams), inline in the reply and inside every
+  agent step. It is labelled as reasoning, never blended into the answer, and can be turned off
+  globally (Settings → Defaults) or per model (Settings → Models)
 - Message actions: copy, regenerate, **edit-and-resend**, delete, **branch-from-here**
 - Composer: auto-grow input, Enter/Shift-Enter (configurable), char/token counter,
   drag-and-drop & paste-to-attach, slash shortcuts (`/system`, `/model`, `/agent`,

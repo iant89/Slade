@@ -13,6 +13,7 @@
  */
 
 import { redactSecrets } from '../providers/base'
+import type { GitHubCallLike } from './github-actions'
 
 export const GITHUB_API = 'https://api.github.com'
 export const GITHUB_API_VERSION = '2022-11-28'
@@ -133,6 +134,57 @@ export function onRateInfo(fn: (r: GitHubRateInfo) => void): () => void {
 
 export function lastRateInfo(): GitHubRateInfo {
   return lastRate
+}
+
+/* ------------------------------------------------------------------ */
+/* Call observers — one event per GitHub API call                      */
+/*                                                                     */
+/* `ghFetch` is the single funnel every request goes through, so hook- */
+/* ing here means *every* GitHub call is observable: repo browsing,    */
+/* file reads, commits, search, publishing. Subscribers get a `start`  */
+/* and a matching `end` (paired by `callId`) and turn them into the    */
+/* GitHub action cards the UI shows. A listener that throws can never  */
+/* break a request, so each notification is wrapped.                   */
+/* ------------------------------------------------------------------ */
+
+export interface GitHubCallEvent extends GitHubCallLike {
+  /** Monotonic id; the `start` and `end` of one request share it. */
+  callId: number
+  phase: 'start' | 'end'
+  /** Epoch ms when this event fired. */
+  at: number
+  /** `end` only: wall-clock ms the request took. */
+  elapsedMs?: number
+  /** `end` only: HTTP status when GitHub answered. */
+  status?: number
+  /** `end` only: false when the call failed or was cancelled. */
+  ok?: boolean
+  /** `end` only: the redacted, humanized failure sentence. */
+  error?: string
+  /** `end` only: Slade cancelled this request (a superseded search, a sign-in abort). */
+  aborted?: boolean
+}
+
+type GitHubCallListener = (event: GitHubCallEvent) => void
+
+const callListeners = new Set<GitHubCallListener>()
+
+/** Subscribe to every GitHub REST call. Returns an unsubscribe function. */
+export function onGitHubCall(fn: GitHubCallListener): () => void {
+  callListeners.add(fn)
+  return () => callListeners.delete(fn)
+}
+
+let callSeq = 0
+
+function emitCall(event: GitHubCallEvent): void {
+  for (const fn of callListeners) {
+    try {
+      fn(event)
+    } catch {
+      /* observers are cosmetic — a broken listener must not fail a request */
+    }
+  }
 }
 
 function publishRate(headers: Headers): void {
@@ -257,6 +309,7 @@ function classify(res: Response, body: string): GitHubError {
 
 async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
   const base = opts.baseUrl ?? GITHUB_API
+  const method = opts.method ?? (opts.body !== undefined ? 'POST' : 'GET')
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': GITHUB_API_VERSION,
@@ -265,33 +318,68 @@ async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
 
+  // Observability: one start/end pair per call, which is what renders the
+  // GitHub action cards. Only the URL and the (already-parsed) body object are
+  // handed over — never the token, never the file payload.
+  const callId = ++callSeq
+  const startedAt = Date.now()
+  emitCall({ callId, phase: 'start', at: startedAt, method, path, query: opts.query, body: opts.body })
+  const finish = (end: { ok: boolean; status?: number; error?: string; aborted?: boolean }) =>
+    emitCall({
+      callId,
+      phase: 'end',
+      at: Date.now(),
+      method,
+      path,
+      query: opts.query,
+      body: opts.body,
+      elapsedMs: Date.now() - startedAt,
+      ...end,
+    })
+
   let res: Response
   try {
     res = await fetch(buildUrl(base, path, opts.query), {
-      method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+      method,
       headers,
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       signal: opts.signal,
     })
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') throw err
-    throw new GitHubError(
-      'network',
-      'Could not reach api.github.com — check your connection, an ad blocker, or a proxy blocking the request.',
-    )
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      finish({ ok: false, aborted: true, error: 'cancelled' })
+      throw err
+    }
+    const message = 'Could not reach api.github.com — check your connection, an ad blocker, or a proxy blocking the request.'
+    finish({ ok: false, error: message })
+    throw new GitHubError('network', message)
   }
 
   publishRate(res.headers)
 
-  if (res.status === 204) return undefined as T
+  if (res.status === 204) {
+    finish({ ok: true, status: res.status })
+    return undefined as T
+  }
 
   const text = await res.text()
-  if (!res.ok) throw classify(res, text)
-  if (!text) return undefined as T
+  if (!res.ok) {
+    const err = classify(res, text)
+    finish({ ok: false, status: res.status, error: err.message })
+    throw err
+  }
+  if (!text) {
+    finish({ ok: true, status: res.status })
+    return undefined as T
+  }
   try {
-    return JSON.parse(text) as T
+    const parsed = JSON.parse(text) as T
+    finish({ ok: true, status: res.status })
+    return parsed
   } catch {
-    throw new GitHubError('unknown', 'GitHub returned a response Slade could not parse.')
+    const message = 'GitHub returned a response Slade could not parse.'
+    finish({ ok: false, status: res.status, error: message })
+    throw new GitHubError('unknown', message)
   }
 }
 

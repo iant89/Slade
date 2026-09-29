@@ -9,6 +9,7 @@ import { ChatView } from './components/chat/ChatView'
 import { Composer } from './components/chat/Composer'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { GitHubPanel } from './components/github/GitHubPanel'
+import { GitHubActivityFeed } from './components/github/GitHubActivity'
 import { FilesPanel } from './components/fs/FilesPanel'
 import { PublishDialog } from './components/github/PublishDialog'
 import { Lightbox } from './components/artifacts/Lightbox'
@@ -130,6 +131,8 @@ export default function App() {
       <main className="main">
         <Header />
         <ChatView />
+        {/* One card per GitHub API call, as it happens. */}
+        <GitHubActivityFeed />
         <Composer />
       </main>
       <ModelRail />
