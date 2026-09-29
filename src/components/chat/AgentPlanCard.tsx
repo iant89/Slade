@@ -7,6 +7,7 @@ import { useUI } from '../../store/ui'
 import { formatFsOpSummary } from '../../lib/fs'
 import { Markdown } from './Markdown'
 import { ThinkingBlock } from './MessageBubble'
+import { GitHubRunActivity } from '../github/GitHubActivity'
 import {
   IconAlert,
   IconBot,
@@ -74,6 +75,12 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
           ) : null}
         </>
       )}
+      {run.goal.trim() ? (
+        <p className="agent-plan-goal" title={run.goal}>
+          <span className="agent-plan-goal-label">Task</span>
+          {run.goal}
+        </p>
+      ) : null}
       {run.strategy && run.phase !== 'planning' && (
         <p className="agent-plan-strategy">{run.strategy}</p>
       )}
@@ -105,6 +112,9 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       )}
 
       {run.fsOps && run.fsOps.length > 0 && <FsOpsStrip ops={run.fsOps} />}
+
+      {/* The GitHub calls this run made, inline with the work that caused them. */}
+      <GitHubRunActivity scope={run.githubScope} />
     </div>
   )
 }
@@ -195,7 +205,10 @@ function StepRow({
   const settings = useSettings((s) => s.s)
   const showThoughts = modelShowsThoughts(settings, step.modelId)
   const hasThoughts = Boolean(showThoughts && (step.reasoning || (step.status === 'running' && !step.result)))
-  const hasBody = Boolean((step.result && step.result.trim()) || step.error || hasThoughts)
+  const brief = step.prompt?.trim() ?? ''
+  // The brief is part of the body: the plan card is where you read what each
+  // step was actually asked to do, running or done.
+  const hasBody = Boolean(brief || (step.result && step.result.trim()) || step.error || hasThoughts)
   const model = labelOf(step.modelId) || step.modelLabel
   const fellBackFrom = (step.failedChain ?? []).filter((id) => id !== step.modelId)
 
@@ -242,6 +255,12 @@ function StepRow({
       </button>
       {expanded && hasBody && (
         <div className="agent-step-body">
+          {brief ? (
+            <div className="agent-step-brief">
+              <span className="agent-step-brief-label">Brief</span>
+              <pre>{brief}</pre>
+            </div>
+          ) : null}
           {showThoughts && (step.reasoning || (step.status === 'running' && !step.result)) ? (
             <div style={{ marginBottom: step.result ? '0.5rem' : '0' }}>
               <ThinkingBlock

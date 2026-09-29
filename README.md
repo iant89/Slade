@@ -73,10 +73,14 @@ changes shape: you stop picking models entirely. Every message goes to an
    conflicts, and streams one final answer. Files workers produced (CSV, code…) land as
    artifact cards inside their step, and again in the final answer.
 
-You watch all of it live on a **plan card** in the thread: each step shows its title,
-which model ran it, a spinner/check/cross, elapsed time, and an expandable worker
-output. Stop works mid-run (partial plans are kept), retry re-runs the whole
-orchestration, and everything is persisted with the message.
+You watch all of it live on a **plan card** in the thread. It carries the actual
+plan, not just the outcome: the **task** the run is working on, the orchestrator's
+one-line strategy, and each step with its **brief** — the self-contained
+instruction the worker was given, verbatim — alongside which model ran it, a
+spinner/check/cross, elapsed time, and its output. If a run touched GitHub, its
+[calls are listed right there](#every-github-call-as-a-card) too. Stop works
+mid-run (partial plans are kept), retry re-runs the whole orchestration, and
+everything is persisted with the message.
 
 - You only ever talk to the orchestrator; it talks to the models.
 - Workers are real chain members: cooldowns, health tracking and usage counters apply.
@@ -300,13 +304,23 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 
 Every request Slade sends to `api.github.com` — plus the GitHub actions that go
 somewhere else (the OAuth device flow, signing out, cloning a repo's files into
-Local Files) — shows up as a **GitHub Action card** in the strip above the
-composer: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
-the thing it touched (`/src/lib/util.ts`) on the second line, with the
-`owner/repo@branch` it ran against and a status glyph.
+Local Files) — shows up as a **GitHub Action card**: the GitHub mark, the action
+("`GitHub Action: Get File Contents`"), and the thing it touched
+(`/src/lib/util.ts`) on the second line, with the `owner/repo@branch` it ran
+against and a status glyph.
 
-- **It never expands.** There is nothing to open: what happened, and to what, is
-  the whole card. Failures keep GitHub's own sentence in the row's tooltip.
+- **A run's calls go inline with the run.** When the orchestrator makes GitHub
+  calls — pulling mentioned files into Local Files, reading a repo's tree — its
+  cards render inside that run's plan card, under the steps they served, so the
+  work and the calls that did it sit together. Calls *you* make (browsing the
+  drawer, searching, publishing, signing in) land in the strip above the
+  composer, which lists only your own activity.
+- **The list folds to its count line when nothing is running.** Either block
+  opens itself while calls are in flight and collapses to `12 GitHub actions`
+  the moment the last one lands; clicking the line opens it again, and a
+  finished run keeps its calls one click away.
+- **A card never expands.** There is nothing to open: what happened, and to what,
+  is the whole card. Failures keep GitHub's own sentence in the row's tooltip.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,

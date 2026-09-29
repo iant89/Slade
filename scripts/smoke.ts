@@ -122,8 +122,8 @@ import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
-import { GitHubActionCard, GitHubActivityFeed } from '../src/components/github/GitHubActivity'
-import { useGitHubActivity, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
+import { GitHubActionCard, GitHubActivityFeed, GitHubRunActivity } from '../src/components/github/GitHubActivity'
+import { useGitHubActivity, logGitHubAction, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
 import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
@@ -2394,7 +2394,7 @@ async function testGitHubActionCards() {
 
   const observed: string[] = []
   const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
-  useGitHubActivity.setState({ entries: [], total: 0, collapsed: false })
+  useGitHubActivity.setState({ entries: [], total: 0, scopes: [] })
   try {
     useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo', 'gist'], repos: [], tree: undefined, preview: undefined })
 
@@ -2486,13 +2486,74 @@ async function testGitHubActionCards() {
     const activityInit = useGitHubActivity.getInitialState() as unknown as {
       entries: ReturnType<typeof useGitHubActivity.getState>['entries']
     }
-    activityInit.entries = useGitHubActivity.getState().entries
-    const feed = renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
-    check('the feed lists every card', feed.includes('gh-activity-list') && feed.includes('GitHub Action: Signed out'), feed.slice(0, 200))
-    check('the feed counts the actions', /\d+ GitHub actions/.test(feed), feed.slice(0, 300))
-    // Exactly two buttons in the whole feed: collapse + clear. A card is never
-    // a button, because a card is never expandable.
-    check('the feed offers clearing, and nothing expands', (feed.match(/<button/g) ?? []).length === 2 && feed.includes('Clear'), String((feed.match(/<button/g) ?? []).length))
+    // SSR renders from the store's *initial* snapshot, so every render below
+    // has to be seeded with the ledger as it stands right now.
+    const seed = () => {
+      activityInit.entries = useGitHubActivity.getState().entries
+    }
+    const feedHtml = () => {
+      seed()
+      return renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
+    }
+    const runHtml = (scope: string) => {
+      seed()
+      return renderToString(createElement(GitHubRunActivity, { scope })).replace(/<!-- -->/g, '')
+    }
+
+    // Idle: the ledger folds to its count line (the calls are over), and the
+    // strip stays one line tall instead of holding a column of cards open all
+    // session. Exactly two buttons either way: toggle + Clear.
+    const idleFeed = feedHtml()
+    check(
+      'an idle ledger folds to its count line',
+      !idleFeed.includes('gh-activity-list') && /\d+ GitHub actions/.test(idleFeed) && idleFeed.includes('Clear'),
+      idleFeed.slice(0, 240),
+    )
+    check('…with just the toggle and Clear', (idleFeed.match(/<button/g) ?? []).length === 2, String((idleFeed.match(/<button/g) ?? []).length))
+
+    // In flight: it opens itself, and lists the cards.
+    const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
+    const liveFeed = feedHtml()
+    check(
+      'a call in flight opens the list',
+      liveFeed.includes('gh-activity-list') && liveFeed.includes('/live.ts') && liveFeed.includes('1 running'),
+      liveFeed.slice(0, 300),
+    )
+    check('…and a card is still not a button', !/gh-action-card[^>]*>\s*<button/.test(liveFeed), liveFeed.slice(0, 200))
+    finishGitHubAction(liveId, { status: 'done' })
+
+    /* ---- run-scoped cards render inline, not in the strip ---- */
+    useGitHubActivity.getState().enterScope('scope_run_1')
+    const inRun = logGitHubAction({ kind: 'get-file', subject: '/src/math.ts', repo: 'octo/demo', ref: 'main' })
+    const runCards = useGitHubActivity.getState().entries.filter((e) => e.id === inRun)
+    check('a card logged during a run carries the scope', runCards[0]?.scope === 'scope_run_1', JSON.stringify(runCards))
+
+    const inlineLive = runHtml('scope_run_1')
+    check(
+      'a run’s calls render inline, in the run’s own block',
+      inlineLive.includes('GitHub activity · 1 call') &&
+        inlineLive.includes('gh-activity-list') &&
+        inlineLive.includes('/src/math.ts') &&
+        !inlineLive.includes('/live.ts'),
+      inlineLive.slice(0, 300),
+    )
+    finishGitHubAction(inRun, { status: 'done' })
+    useGitHubActivity.getState().exitScope('scope_run_1')
+    check('the scope stack is released again', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
+    const inlineFolded = runHtml('scope_run_1')
+    check(
+      '…and fold to the count line once the run goes quiet',
+      inlineFolded.includes('GitHub activity · 1 call') && !inlineFolded.includes('gh-activity-list'),
+      inlineFolded.slice(0, 200),
+    )
+
+    const afterRunFeed = feedHtml()
+    check(
+      'the strip does not also show the run’s cards',
+      !afterRunFeed.includes('/src/math.ts'),
+      afterRunFeed.slice(0, 300),
+    )
+    check('a scope with no calls renders nothing', runHtml('scope_nothing') === '')
 
     useGitHubActivity.getState().clear()
     activityInit.entries = []
@@ -3160,6 +3221,7 @@ function testLocalFsUiRenders() {
       status: 'complete' as const,
       agent: {
         phase: 'complete' as const,
+        goal: 'write the runner module',
         orchestratorId: 'sim-pro',
         strategy: 'Write the runner module.',
         steps: [
@@ -3432,6 +3494,43 @@ async function testGitLocalFsReadWriteAcross() {
         useFs.getState().readFile('src/math.test.ts')?.remote?.repo === 'octo/demo' &&
         Object.keys(useFs.getState().deletedRemotes).length === 0,
     )
+
+    /* ---- the run's GitHub calls are attributed to its message ---- */
+
+    const runMsg = useChat.getState().conversations[useChat.getState().currentId]!.messages.find(
+      (m) => m.agent?.githubScope,
+    )
+    const scope = runMsg?.agent?.githubScope
+    check('the agent run stamped a GitHub scope on its message', typeof scope === 'string' && scope.length > 0, String(scope))
+    check('the run released its scope when it finished', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
+    const scoped = useGitHubActivity.getState().entries.filter((e) => e.scope === scope)
+    check(
+      'the files the run pulled from GitHub are logged under that scope',
+      scoped.some((e) => e.kind === 'get-file' && e.subject === '/src/math.ts'),
+      JSON.stringify(scoped.map((e) => `${e.title} ${e.subject}`)),
+    )
+    check(
+      'the commit the button triggered afterwards is NOT part of the run',
+      useGitHubActivity.getState().entries.some((e) => !e.scope && e.kind === 'create-commit') &&
+        !useGitHubActivity.getState().entries.some((e) => e.scope === scope && e.kind === 'create-commit'),
+      JSON.stringify(useGitHubActivity.getState().entries.map((e) => `${e.kind}:${e.scope ? 'run' : 'manual'}`)),
+    )
+    // SSR hands React each store's *initial* snapshot, so seed the ledger the
+    // way the live session would have it before rendering the message.
+    const activityInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
+    activityInit.entries = useGitHubActivity.getState().entries
+    const inlineRun = renderToString(createElement(MessageBubble, { message: runMsg! })).replace(/<!-- -->/g, '')
+    check(
+      'the run’s message carries its GitHub calls inline, folded to the count',
+      inlineRun.includes('gh-activity is-inline') &&
+        inlineRun.includes('GitHub activity · 1 call') &&
+        !inlineRun.includes('gh-activity is-inline collapsed aria-hidden'),
+      inlineRun.slice(Math.max(0, inlineRun.indexOf('gh-activity')), inlineRun.indexOf('gh-activity') + 300),
+    )
+    check(
+      '…and the strip above the composer does not repeat them',
+      !renderToString(createElement(GitHubActivityFeed)).includes('/src/math.ts'),
+    )
   } finally {
     globalThis.fetch = realFetch
     settings.removeModel('openrouter-test')
@@ -3504,6 +3603,7 @@ function testInlineThoughtsRendering() {
     modelId: 'mock-pro',
     agent: {
       phase: 'complete' as const,
+      goal: 'ship the widget',
       orchestratorModelId: 'mock-pro',
       strategy: 'Divide into frontend and backend tasks',
       planningReasoning: 'Decomposing task requirements into modular subcomponents',
@@ -3536,6 +3636,60 @@ function testInlineThoughtsRendering() {
   check('agent steps render the same Thoughts card', stepBodyAt >= 0 && agentHtml.slice(stepBodyAt).includes('thought-title\">Thoughts<'), agentHtml.slice(0, 600))
   check('thinking bodies stay collapsed until opened', !agentHtml.includes('Analyzing state requirements and rendering logic'), 'step reasoning should be behind the card')
   check('agent cards never label thoughts per-model', !agentHtml.includes('thought process') && !agentHtml.includes('Planning reasoning'), agentHtml.slice(0, 500))
+
+  // The card is called "Task plan": it must show the plan — the task it is
+  // executing and what each step was actually asked to do — not just outcomes.
+  check(
+    'the plan card names the task it is planning',
+    agentHtml.includes('agent-plan-goal') && agentHtml.includes('ship the widget'),
+    agentHtml.slice(0, 400),
+  )
+  check(
+    '…and each step shows the brief the orchestrator wrote for it',
+    agentHtml.includes('agent-step-brief') && agentHtml.includes('Brief') && agentHtml.includes('Write component'),
+    agentHtml.slice(stepBodyAt, stepBodyAt + 600),
+  )
+
+  // With step results collapsed by default, a step is still a real disclosure:
+  // the row opens onto the brief, so the plan is readable before any result.
+  settingsInit.s = { ...origSettings, agent: { ...origSettings.agent, expandStepResults: false } }
+  const collapsedSteps = renderToString(createElement(MessageBubble, { message: msgWithAgentThoughts })).replace(/<!-- -->/g, '')
+  const headOf = (html: string) => html.slice(html.indexOf('agent-step-head'), html.indexOf('agent-step-head') + 300)
+  check(
+    'a collapsed step row still offers its brief',
+    !collapsedSteps.includes('agent-step-body') &&
+      /aria-expanded="false"/.test(headOf(collapsedSteps)) &&
+      !/disabled/.test(headOf(collapsedSteps)),
+    headOf(collapsedSteps),
+  )
+
+  // …and a step that has not produced anything yet is not a dead row either.
+  settingsInit.s = origSettings
+  const pendingBrief = {
+    ...msgWithAgentThoughts,
+    agent: {
+      ...msgWithAgentThoughts.agent,
+      phase: 'executing' as const,
+      steps: [
+        {
+          id: 'step_pending',
+          title: 'Queued work',
+          prompt: 'Do the queued thing',
+          modelId: 'mock-pro',
+          modelLabel: 'Simulacron Pro',
+          status: 'pending' as const,
+          attempts: [],
+          failedChain: [],
+        },
+      ],
+    },
+  }
+  const pendingHtml = renderToString(createElement(MessageBubble, { message: pendingBrief })).replace(/<!-- -->/g, '')
+  check(
+    'a queued step can still be opened to read its brief',
+    /aria-expanded="false"/.test(headOf(pendingHtml)) && !/disabled/.test(headOf(pendingHtml)),
+    headOf(pendingHtml),
+  )
   settingsInit.s = origSettings
 }
 

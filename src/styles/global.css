@@ -2256,6 +2256,18 @@ input[type='range']::-moz-range-thumb {
   backdrop-filter: blur(8px);
 }
 
+/* A run's own cards, inside its answer on the plan card: no page-level
+   background of its own, and it sits under a rule like the file-op strip. */
+.gh-activity.is-inline {
+  padding: 0;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  background: none;
+  backdrop-filter: none;
+}
+.gh-activity.is-inline .gh-activity-head { padding: 6px 2px 4px; }
+.gh-activity.is-inline .gh-activity-list { max-height: 200px; }
+
 .gh-activity-head,
 .gh-activity-list {
   max-width: 820px;
@@ -2893,6 +2905,16 @@ input[type='range']::-moz-range-thumb {
 .agent-phase.phase-complete { border-color: color-mix(in srgb, var(--ok) 45%, transparent); color: var(--ok); }
 .agent-phase.phase-error { border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); }
 
+.agent-plan-goal {
+  display: flex; align-items: baseline; gap: 7px;
+  font-size: 0.82em; color: var(--text-muted); margin: 2px 0 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent-plan-goal-label {
+  flex: none;
+  font-size: 0.86em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-faint);
+}
 .agent-plan-strategy { font-size: 0.86em; color: var(--text-muted); font-style: italic; margin: 2px 0 6px; }
 .agent-plan-note {
   font-size: 0.8em; color: var(--warn);
@@ -2961,6 +2983,29 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 .agent-step-body > .md > *:first-child { margin-top: 0; }
 .agent-step-body > .md > *:last-child { margin-bottom: 0; }
 .agent-step-error { color: var(--danger); font-size: 0.95em; }
+
+/* What the orchestrator asked this step to do — the plan, in its own words. */
+.agent-step-brief {
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  padding: 2px 0 2px 8px;
+  margin: 0 0 8px;
+}
+.agent-step-brief-label {
+  display: block;
+  font-size: 0.8em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+.agent-step-brief pre {
+  margin: 0;
+  font-family: inherit;
+  font-size: 0.98em;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
 
 .spin { animation: agent-spin 0.9s linear infinite; }
 @keyframes agent-spin { to { transform: rotate(360deg); } }

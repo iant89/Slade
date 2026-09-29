@@ -19,6 +19,7 @@ import { useSettings } from '../store/settings'
 import { useUI } from '../store/ui'
 import { useFs } from '../store/fs'
 import { useGitHub } from '../store/github'
+import { useGitHubActivity } from '../store/githubActivity'
 import { extractFsActions, formatFsContextForAgent, formatGitHubTreeForAgent } from '../lib/fs'
 import { buildRoadmapReport, describeRoadmapReport, snapshotRoadmapFiles, type RoadmapFileSnapshot } from '../lib/roadmap'
 import { buildTurns } from './turns'
@@ -484,12 +485,21 @@ export async function runAgentTurn(
   const attempt = registerRun(conversationId, controller)
   const signal = controller.signal
 
+  /**
+   * Every GitHub call this run makes is tagged with this scope, so the cards
+   * render inline with the run's answer (the plan card) rather than in the
+   * strip above the composer, which is left to the calls you make yourself.
+   * Entered inside the try so the finally below always releases it.
+   */
+  const githubScope = uid('ghs')
+
   const baseRun: AgentRun = {
     phase: 'planning',
     goal,
     orchestratorModelId: orchestrator.id,
     steps: [],
     startedAt: Date.now(),
+    githubScope,
   }
   finalize(assistantMessageId, {
     status: 'streaming',
@@ -524,6 +534,8 @@ export async function runAgentTurn(
   }
 
   try {
+    useGitHubActivity.getState().enterScope(githubScope)
+
     /* ---------------- planning ---------------- */
 
     const historyTurns = await buildTurns(
@@ -907,6 +919,9 @@ export async function runAgentTurn(
     })
     useUI.getState().toast({ kind: 'error', title: 'The orchestrated run failed', detail: message })
   } finally {
+    // Release the scope: anything the chat or the drawer does after the run is
+    // its own activity again.
+    useGitHubActivity.getState().exitScope(githubScope)
     finishRun(conversationId)
   }
 }
