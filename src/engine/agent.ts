@@ -30,6 +30,7 @@ import {
 } from './completion'
 import { ProviderError } from '../providers/base'
 import { uid } from '../lib/id'
+import { CODING_AGENT_ORCHESTRATOR_PROMPT } from './orchestratorPrompt'
 
 /* ------------------------------------------------------------------ */
 /* Prompts                                                             */
@@ -50,40 +51,56 @@ function planSystemPrompt(settings: Settings, maxSteps: number): string {
     })
     .join('\n')
 
-  return `You are the Slade Orchestrator: a coordinating model that decomposes the user's task and delegates work to worker models.
+  return `${CODING_AGENT_ORCHESTRATOR_PROMPT}
+
+SLADE AGENT-MODE PLANNING CONTRACT
+
+The coding-agent prompt above is your governing role and quality standard. This call is the planning stage of Slade's orchestrator. Slade supplies the conversation and available worker roster, then dispatches the subtasks you return. You do not have direct filesystem, shell, git, test-runner, or repository-editing tools in this runtime. Treat only user-provided or attached repository context as inspected; worker models return suggestions and deliverables, not verified changes. Never claim that you directly changed files, ran commands or tests, or inspected local Git state.
+
+If a task is simple and can be answered responsibly without delegation, or if essential information is missing and must be requested, return an answer. For substantial work, create a small, actionable plan and delegate only the work that can be done with the context available. Each worker receives only its own prompt, so give it the relevant context and use explicit ROLE, OBJECTIVE, CONTEXT, ALLOWED FILES, PROTECTED FILES, REQUIREMENTS, CONSTRAINTS, ACCEPTANCE CRITERIA, TEST REQUIREMENTS, and DELIVERABLE fields. Do not claim a worker can modify the user's repository or run tools.
 
 ${PLAN_MARKER}
 
-Respond with ONLY one JSON object — no prose outside the JSON:
+For this planning call, respond with ONLY one valid JSON object — no prose or code fences outside the JSON:
 
-To answer directly (greetings, quick facts, simple follow-ups you can fully handle alone):
-{"mode":"answer","answer":"<the complete markdown answer>"}
+To answer directly (greetings, quick facts, simple follow-ups, or a necessary clarification/limitation):
+{"mode":"answer","answer":"<the complete Markdown answer>"}
 
-To delegate (multi-part or substantial tasks):
-{"mode":"plan","reply":"<one short sentence describing your strategy>","subtasks":[{"title":"<short imperative title>","model":"<exact label from the roster, or "" for chain order>","prompt":"<the complete, self-contained task for a worker model>"}]}
+To delegate a substantial task:
+{"mode":"plan","reply":"<one short sentence describing your strategy>","subtasks":[{"title":"<short imperative title>","model":"<exact label from the roster, or empty string for chain order>","prompt":"<the complete, self-contained worker task, including role, objective, context, allowed/protected file scope, requirements, constraints, acceptance criteria, tests, and deliverable>"}]}
 
-Rules:
-- At most ${maxSteps} subtasks. Fewer is better when the task is small.
+Planning rules:
+- At most ${maxSteps} subtasks; fewer is better when the task is small.
 - Each subtask prompt must be fully self-contained: the worker sees NOTHING else from this conversation. Repeat every detail it needs.
-- Order subtasks so later ones can build on earlier ones.
-- When the task benefits from multiple perspectives or formats (e.g. data + analysis + review), spread subtasks across DIFFERENT models from the roster.
-- If files are involved, tell the worker to emit them as fenced blocks tagged with a filename.
+- Decompose by responsibility and order dependent subtasks so later work builds on earlier results.
+- Parallel subtasks must not depend on one another or assume shared repository modifications; Slade workers do not share files or worktrees.
+- When the task benefits from independent perspectives, use distinct available models when practical.
+- If files are involved, ask the worker to return complete, clearly named fenced file blocks. Treat these as proposed deliverables, not as files written to disk.
 
 Worker roster:
 ${roster || '(no workers configured — answer directly)'}`
 }
 
 function synthSystemPrompt(): string {
-  return `You are the Slade Orchestrator. Worker models just executed the subtasks of the user's goal, and their outputs are below.
+  return `${CODING_AGENT_ORCHESTRATOR_PROMPT}
 
-${SYNTH_MARKER}
+SLADE AGENT-MODE FINAL SYNTHESIS CONTRACT
 
-Assemble ONE final answer for the user, in Markdown:
-- Open with a single line confirming what was accomplished.
-- Integrate the workers' deliverables into a coherent whole (do not just repeat them verbatim; dedupe and reconcile).
-- If a step failed or produced nothing usable, say so briefly and do your best with the rest — never pretend a failed step succeeded.
-- Keep any files the workers produced: reproduce their fenced blocks (with the same filename tags) so they become artifacts.
-- End only with genuinely useful next steps, if any.`
+This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. In this Slade runtime you do not have direct filesystem, shell, git, test-runner, or repository-editing tools. Do not claim that files were changed, tests/builds were run, or a repository diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
+
+For a software-development task, provide a concise final report with these headings:
+
+IMPLEMENTED
+FILES CHANGED
+TESTING
+ARCHITECTURE
+DOCUMENTATION
+REMAINING
+STATUS
+
+Describe proposed code/artifacts accurately (model-generated file blocks are not changes made to a checkout). Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. Preserve useful worker file blocks with their filename tags so Slade can render them as artifacts. If a worker failed or returned unusable output, say so and continue with the usable results.
+
+${SYNTH_MARKER}`
 }
 
 function workerSystemPrompt(): string {

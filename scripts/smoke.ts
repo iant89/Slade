@@ -90,6 +90,7 @@ import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
 import { buildTurns } from '../src/engine/turns'
 import { parsePlannerReply, resolveWorkerModel } from '../src/engine/agent'
+import { CODING_AGENT_ORCHESTRATOR_PROMPT } from '../src/engine/orchestratorPrompt'
 import { z } from 'zod'
 import { conversationSchema } from '../src/lib/schemas'
 import type { Artifact } from '../src/types'
@@ -390,6 +391,15 @@ function freshAgentConversation(): string {
   const convId = useChat.getState().newConversation()
   useChat.getState().setConversationAgent(convId, true)
   return convId
+}
+
+function testOrchestratorPrompt() {
+  console.log('coding-agent orchestrator prompt:')
+  check('uses the requested lead-engineer role', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('lead software-engineering orchestrator'))
+  check('includes the full development lifecycle', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('UNDERSTAND\n↓\nINSPECT\n↓\nPLAN\n↓\nDECOMPOSE'))
+  check('includes the no-false-completion quality gate', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('DO NOT MARK COMPLETE.'))
+  check('includes the required final-report sections', ['IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'REMAINING', 'STATUS'].every((section) => CODING_AGENT_ORCHESTRATOR_PROMPT.includes(section)))
+  check('includes the final orchestrator responsibility', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('The work is verified and complete.'))
 }
 
 function testPlannerParsing() {
@@ -2297,6 +2307,7 @@ async function main() {
   await testReasoningBudgetRetry()
   await testAgentReasoningBudget()
   await testStop()
+  testOrchestratorPrompt()
   testPlannerParsing()
   testWorkerResolution()
   await testAgentMode()
