@@ -40,6 +40,7 @@ import {
   type RemoteFile,
 } from '../lib/github'
 import { executePublish, publishErrorMessage, type PublishRequest, type PublishResult, type PublishTarget } from '../lib/github-publish'
+import { finishGitHubAction, logGitHubAction, logGitHubActionDone } from './githubActivity'
 
 /* ------------------------------------------------------------------ */
 /* Persisted slice                                                     */
@@ -349,6 +350,9 @@ export const useGitHub = create<GitHubState>((set, get) => {
       set({ authStatus: 'connecting', authError: undefined, device: undefined })
 
       const { clientId, relayUrl, scope } = get()
+      // Sign-in does not go through api.github.com (the relay does), so its card
+      // is logged here rather than by the REST observer.
+      const cardId = logGitHubAction({ kind: 'sign-in', subject: 'waiting for device authorization…' })
       try {
         const { token } = await runDeviceFlow({
           clientId,
@@ -362,13 +366,16 @@ export const useGitHub = create<GitHubState>((set, get) => {
         })
         const check = await verifyToken(token, { signal: controller.signal })
         adopt(token, check.user, check.scopes)
+        finishGitHubAction(cardId, { status: 'done', subject: `@${check.user.login}` })
         useUI.getState().toast({ kind: 'success', title: `Connected to GitHub as @${check.user.login}` })
         void get().loadRepos({ force: true })
       } catch (err) {
         if (isAbort(err)) {
+          finishGitHubAction(cardId, { status: 'error', subject: 'sign-in cancelled', error: 'Cancelled' })
           set({ authStatus: get().token ? 'authorized' : 'anonymous', device: undefined })
         } else {
           const message = err instanceof DeviceFlowError ? err.message : githubErrorMessage(err)
+          finishGitHubAction(cardId, { status: 'error', subject: 'sign-in failed', error: message })
           set({ authStatus: get().token ? 'authorized' : 'anonymous', authError: message, device: undefined })
         }
       } finally {
@@ -386,6 +393,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
       signInController?.abort()
       signInController = null
       if (!opts?.keepConfig) {
+        logGitHubActionDone({ kind: 'sign-out', subject: get().login ? `@${get().login}` : 'token removed from this browser' })
         set({
           token: '',
           login: undefined,
@@ -637,11 +645,28 @@ export const useGitHub = create<GitHubState>((set, get) => {
         targets = candidates.slice(0, maxFiles).map((e) => e.path)
       }
 
+      // Cloning is not one API call, so its card is logged here and closed out
+      // with the outcome; each file read inside it logs its own card too.
+      const cloneCard = logGitHubAction({
+        kind: 'clone-repo',
+        subject: `pulling ${targets.length} file${targets.length === 1 ? '' : 's'} into Local Files`,
+        repo: activeRepo,
+        ref: activeBranch,
+      })
       const pulled: FsFile[] = []
       for (const p of targets) {
         const saved = await get().pullFileToFs(p, { repo: activeRepo, ref: activeBranch, silent: true })
         if (saved) pulled.push(saved)
       }
+      const cloneFailed = targets.length > 0 && pulled.length === 0
+      finishGitHubAction(cloneCard, {
+        status: cloneFailed ? 'error' : 'done',
+        subject:
+          targets.length === 0
+            ? 'no text files matched that path'
+            : `${pulled.length} of ${targets.length} file${pulled.length === 1 ? '' : 's'} in Local Files`,
+        ...(cloneFailed ? { error: 'GitHub returned none of these files' } : {}),
+      })
 
       if (!opts?.silent) {
         if (pulled.length > 0) {

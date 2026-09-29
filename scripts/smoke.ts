@@ -122,6 +122,10 @@ import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
+import { GitHubActionCard, GitHubActivityFeed } from '../src/components/github/GitHubActivity'
+import { useGitHubActivity, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
+import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
+import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
@@ -2216,6 +2220,222 @@ async function testGitHubStoreAgainstFakeApi() {
  * path produces. Effects do not run — this is about the paths that would throw
  * or silently render nothing.
  */
+/**
+ * GitHub action cards: one card per API call, titled and sub-titled, never
+ * expandable. Covers the vocabulary, the live log (through a fake
+ * api.github.com), the non-REST actions, and the rendered card.
+ */
+async function testGitHubActionCards() {
+  console.log('github action cards:')
+
+  /* ---- the vocabulary every card title comes from ---- */
+  const REQUIRED: [keyof typeof GITHUB_ACTION_TITLE, string][] = [
+    ['get-file', 'Get File Contents'],
+    ['delete-file', 'Deleted File'],
+    ['create-file', 'Created File'],
+    ['create-branch', 'Created Branch'],
+    ['delete-branch', 'Removed Branch'],
+    ['create-pr', 'Create Pull-Request'],
+    ['merge-pr', 'Merge Pull-Request'],
+    ['get-branch', 'Fetching Branch'],
+    ['search-code', 'Performed Code Search'],
+    ['clone-repo', 'Cloning Repository'],
+    ['list-repos', 'Refreshing Repository List'],
+    ['sign-in', 'Signed in using OAuth'],
+    ['sign-out', 'Signed out'],
+    ['test-token', 'Testing API Token'],
+  ]
+  for (const [kind, phrase] of REQUIRED) {
+    check(`vocabulary covers "${phrase}"`, GITHUB_ACTION_TITLE[kind] === phrase, String(GITHUB_ACTION_TITLE[kind]))
+    check(`"${phrase}" is prefixed on the card`, githubActionTitle(kind) === `GitHub Action: ${phrase}`)
+  }
+  check(
+    'no action kind is titled with an empty phrase',
+    Object.values(GITHUB_ACTION_TITLE).every((t) => t.trim().length > 0),
+    JSON.stringify(Object.entries(GITHUB_ACTION_TITLE).filter(([, t]) => !t.trim())),
+  )
+
+  const describe = (call: { method: string; path: string; query?: Record<string, string>; body?: unknown }) =>
+    describeGitHubCall(call)
+  const read = describe({ method: 'GET', path: '/repos/octo/demo/contents/src/lib/util.ts', query: { ref: 'main' } })
+  check('a contents read reads as Get File Contents', read.title === 'GitHub Action: Get File Contents', read.title)
+  check('its sub-title is the path', read.subject === '/src/lib/util.ts', read.subject)
+  check('the card remembers the repo and ref', read.repo === 'octo/demo' && read.ref === 'main', `${read.repo}@${read.ref}`)
+  const created = describe({ method: 'PUT', path: '/repos/octo/demo/contents/docs/a.md', body: { message: 'add', content: 'eA==' } })
+  check('a PUT without a sha is a creation', created.title === 'GitHub Action: Created File', created.title)
+  const updated = describe({ method: 'PUT', path: '/repos/octo/demo/contents/docs/a.md', body: { message: 'upd', sha: 'b1' } })
+  check('a PUT with a sha is an update', updated.title === 'GitHub Action: Updated File', updated.title)
+  check('a file body never leaks into the card', !JSON.stringify(updated).includes('eA=='), JSON.stringify(updated))
+  const branch = describe({ method: 'POST', path: '/repos/octo/demo/git/refs', body: { ref: 'refs/heads/slade/new', sha: 'abc' } })
+  check('creating a ref reads as Created Branch', branch.title === 'GitHub Action: Created Branch' && branch.subject === 'slade/new', `${branch.title} ${branch.subject}`)
+  const removed = describe({ method: 'DELETE', path: '/repos/octo/demo/git/refs/heads/slade%2Fold' })
+  check('deleting a ref reads as Removed Branch', removed.title === 'GitHub Action: Removed Branch' && removed.subject === 'slade/old', `${removed.title} ${removed.subject}`)
+  const moved = describe({ method: 'PATCH', path: '/repos/octo/demo/git/refs/heads/main', body: { sha: 'c0ffee1234' } })
+  check('a ref patch reads as moving the branch', moved.title === 'GitHub Action: Moved Branch' && moved.subject === 'main → c0ffee1', moved.subject)
+  const pr = describe({ method: 'POST', path: '/repos/octo/demo/pulls', body: { title: 'Add the thing', head: 'a', base: 'main' } })
+  check('opening a pull request is titled', pr.title === 'GitHub Action: Create Pull-Request' && pr.subject === 'Add the thing', `${pr.title} ${pr.subject}`)
+  const merge = describe({ method: 'POST', path: '/repos/octo/demo/pulls/42/merge', body: {} })
+  check('merging a pull request is titled', merge.title === 'GitHub Action: Merge Pull-Request' && merge.subject === '#42', `${merge.title} ${merge.subject}`)
+  const search = describe({ method: 'GET', path: '/search/code', query: { q: 'answer repo:octo/demo' } })
+  check('a code search is titled with its query', search.title === 'GitHub Action: Performed Code Search' && search.subject === 'answer repo:octo/demo', search.subject)
+  const commit = describe({ method: 'POST', path: '/repos/octo/demo/git/commits', body: { message: 'Apply agent changes (3 files)\n\nbody' } })
+  check('a commit is titled with its subject line', commit.subject === 'Apply agent changes (3 files)', commit.subject)
+  const gist = describe({ method: 'POST', path: '/gists', body: { description: 'Answer', files: { 'answer.md': { content: 'x' } } } })
+  check('a gist is titled with its description', gist.title === 'GitHub Action: Created Gist' && gist.subject === 'Answer', `${gist.title} ${gist.subject}`)
+  const issue = describe({ method: 'POST', path: '/repos/octo/demo/issues', body: { title: 'Bug: cards' } })
+  check('an issue is titled with its own action', issue.title === 'GitHub Action: Created Issue' && issue.subject === 'Bug: cards', `${issue.title} ${issue.subject}`)
+  const blob = describe({ method: 'POST', path: '/repos/octo/demo/git/blobs', body: { content: 'AAEC', encoding: 'base64' } })
+  check('a blob upload is titled', blob.title === 'GitHub Action: Uploaded File Blob', blob.title)
+  const budget = describe({ method: 'GET', path: '/rate_limit' })
+  check('the rate-limit probe is titled', budget.title === 'GitHub Action: Checking API Budget', budget.title)
+  const listing = describe({ method: 'GET', path: '/repos/octo/demo/contents/docs' })
+  check('a directory read names the directory', listing.subject === '/docs', listing.subject)
+  const unknown = describe({ method: 'GET', path: '/emojis' })
+  check('an unmapped call still gets a card', unknown.title === 'GitHub Action: Performed API Request' && unknown.subject === '/emojis', `${unknown.title} ${unknown.subject}`)
+
+  /* ---- the log, driven through the real REST client ---- */
+  const token = 'ghp_' + 'c'.repeat(24)
+  const utilText = 'export const answer = 42\n'
+  const fake = await startFakeGitHub({
+    '/user': () => ({ status: 200, json: { id: 7, login: 'octo', name: 'Octo', avatar_url: 'https://a.example/o.png', html_url: 'https://github.com/octo' } }),
+    '/user/repos': () => ({ status: 200, json: [{ id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 }] }),
+    '/repos/octo/demo/git/trees/main': () => ({ status: 200, json: { truncated: false, tree: [{ path: 'src/lib/util.ts', mode: '100644', type: 'blob', sha: 'b1', size: utilText.length }] } }),
+    '/repos/octo/demo/contents/src/lib/util.ts': () => ({ status: 200, json: { type: 'file', name: 'util.ts', path: 'src/lib/util.ts', sha: 'b1', size: utilText.length, encoding: 'base64', content: Buffer.from(utilText).toString('base64') } }),
+    '/repos/octo/demo/contents/docs/answer.md': (body, meta) =>
+      meta.method === 'PUT'
+        ? { status: 201, json: { content: { path: 'docs/answer.md', sha: 'n1', html_url: 'https://github.com/octo/demo/blob/main/docs/answer.md' }, commit: { sha: 'c0ffee1234', html_url: 'https://github.com/octo/demo/commit/c0ffee1234' } } }
+        : { status: 404, json: { message: 'Not Found' } },
+    '/repos/octo/demo/branches': () => ({ status: 200, json: [{ name: 'main', commit: { sha: 's1' } }] }),
+    '/repos/octo/demo/git/ref/heads/main': () => ({ status: 200, json: { object: { sha: 'c0ffee1234' } } }),
+    '/repos/octo/demo/git/commits/c0ffee1234': () => ({ status: 200, json: { sha: 'c0ffee1234', tree: { sha: 'tree-base' } } }),
+    '/repos/octo/demo/git/trees': () => ({ status: 201, json: { sha: 'tree-new', tree: [{ path: 'docs/answer.md', sha: 'blob1' }] } }),
+    '/repos/octo/demo/git/commits': () => ({ status: 201, json: { sha: 'c0ffee9999', html_url: 'https://github.com/octo/demo/commit/c0ffee9999' } }),
+    '/repos/octo/demo/git/refs': () => ({ status: 201, json: { ref: 'refs/heads/main', object: { sha: 'c0ffee9999' } } }),
+    '/repos/octo/demo': () => ({ status: 200, json: { id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 } }),
+  })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    return realFetch(url.replace('https://api.github.com', fake.base), init)
+  }) as typeof fetch
+
+  const observed: string[] = []
+  const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
+  useGitHubActivity.setState({ entries: [], total: 0, collapsed: false })
+  try {
+    useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo', 'gist'], repos: [], tree: undefined, preview: undefined })
+
+    await useGitHub.getState().loadRepos({ force: true })
+    await useGitHub.getState().openRepo('octo/demo')
+    await useGitHub.getState().openFile('src/lib/util.ts')
+    const published = await useGitHub.getState().publish({
+      target: 'file',
+      name: 'answer.md',
+      text: '# answer',
+      repo: 'octo/demo',
+      branch: 'main',
+      path: 'docs/answer.md',
+    })
+    check('the file publish went through', published?.label === 'added docs/answer.md', JSON.stringify(published))
+
+    // A multi-file commit goes through the Git Data API, which is five calls —
+    // each one gets its own card.
+    useFs.getState().writeFile('docs/roadmap.md', '# roadmap\n', { source: { origin: 'user' } })
+    await useGitHub.getState().commitFsToGitHub({ paths: ['docs/roadmap.md'], repo: 'octo/demo', branch: 'main', message: 'Apply agent changes (1 file)', silent: true })
+    // The branch list and the tree refresh are background calls: let them land.
+    await new Promise((r) => setTimeout(r, 120))
+
+    // Cloning files into Local Files is a store action, not one API call, so it
+    // logs its own card on top of the reads it performs.
+    const pulled = await useGitHub.getState().pullTreeToFs({ paths: ['src/lib/util.ts'], silent: true })
+    check('pulling files lands them in Local Files', pulled.length === 1 && pulled[0]?.path === 'src/lib/util.ts', JSON.stringify(pulled.map((f) => f.path)))
+
+    const titles = () => useGitHubActivity.getState().entries.map((e) => `${e.title} ${e.subject}`)
+    check('a clone gets its own card', titles().some((t) => t === 'GitHub Action: Cloning Repository 1 of 1 file in Local Files'), JSON.stringify(titles()))
+    check('listing repos logs a card', titles().some((t) => t === 'GitHub Action: Refreshing Repository List your repositories'), JSON.stringify(titles()))
+    check('opening a repo logs a card', titles().some((t) => t === 'GitHub Action: Fetching Repository octo/demo'), JSON.stringify(titles()))
+    check('reading the tree logs a card', titles().some((t) => t.startsWith('GitHub Action: Read Repository Tree')), JSON.stringify(titles()))
+    check('reading a file logs it with its path', titles().some((t) => t === 'GitHub Action: Get File Contents /src/lib/util.ts'), JSON.stringify(titles()))
+    check('a missing file logs a read that failed', titles().some((t) => t === 'GitHub Action: Get File Contents /docs/answer.md'), JSON.stringify(titles()))
+    const failed = useGitHubActivity.getState().entries.find((e) => e.subject === '/docs/answer.md' && e.status === 'error')
+    check('the failed read is marked as an error, not hidden', Boolean(failed), JSON.stringify(failed))
+    check('a git commit is logged with its message', titles().some((t) => t === 'GitHub Action: Created Commit Apply agent changes (1 file)'), JSON.stringify(titles()))
+    check('the commit tree is logged with its file count', titles().some((t) => t === 'GitHub Action: Created Commit Tree 1 file staged'), JSON.stringify(titles()))
+    check('the ref move is logged', titles().some((t) => t.startsWith('GitHub Action: Moved Branch main')), JSON.stringify(titles()))
+    check('the parent commit read is logged', titles().some((t) => t === 'GitHub Action: Fetching Commit c0ffee1'), JSON.stringify(titles()))
+    check('every logged call is closed out', useGitHubActivity.getState().entries.every((e) => e.status !== 'running'), JSON.stringify(useGitHubActivity.getState().entries.map((e) => e.status)))
+    check('calls are timed', useGitHubActivity.getState().entries.every((e) => e.elapsedMs != null), JSON.stringify(useGitHubActivity.getState().entries.map((e) => e.elapsedMs)))
+    const handLogged = useGitHubActivity
+      .getState()
+      .entries.filter((e) => e.kind === 'clone-repo' || e.kind === 'sign-in' || e.kind === 'sign-out').length
+    check(
+      'the log counts every api call once',
+      useGitHubActivity.getState().total === fake.seen.length + handLogged,
+      `${useGitHubActivity.getState().total} vs ${fake.seen.length}+${handLogged}`,
+    )
+    check(
+      'the observer pairs every start with an end',
+      observed.filter((o) => o.startsWith('start:')).length === observed.filter((o) => o.startsWith('end:')).length,
+      JSON.stringify(observed.slice(0, 4)),
+    )
+    check('the log never grows past its cap', useGitHubActivity.getState().entries.length <= 60)
+
+    // GitHub actions that are not api.github.com calls are logged by hand.
+    const signOutLogin = useGitHub.getState().login
+    useGitHub.getState().signOut()
+    check(
+      'signing out logs its own card',
+      useGitHubActivity.getState().entries.some((e) => e.title === 'GitHub Action: Signed out' && e.subject === `@${signOutLogin}`),
+      JSON.stringify(useGitHubActivity.getState().entries.slice(-2).map((e) => `${e.title} ${e.subject}`)),
+    )
+    const manual = logGitHubActionDone({ kind: 'sign-in', subject: '@octo' })
+    check(
+      'a hand-logged card starts finished',
+      useGitHubActivity.getState().entries.find((e) => e.id === manual)?.status === 'done',
+      manual,
+    )
+    const openId = logGitHubActionDone({ kind: 'clone-repo', subject: 'octo/demo @ main', repo: 'octo/demo', ref: 'main' })
+    finishGitHubAction(openId, { status: 'error', error: 'GitHub unreachable' })
+    const errored = useGitHubActivity.getState().entries.find((e) => e.id === openId)
+    check('a hand-closed card carries its failure', errored?.status === 'error' && errored.error === 'GitHub unreachable', JSON.stringify(errored))
+
+    /* ---- the rendered card ---- */
+    const entry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.subject === '/src/lib/util.ts')
+    check('the read card is in the log', Boolean(entry), JSON.stringify(titles()))
+    const card = renderToString(createElement(GitHubActionCard, { entry: entry! })).replace(/<!-- -->/g, '')
+    check('the card shows the github mark', card.includes('viewBox="0 0 16 16"'), card.slice(0, 160))
+    check('the card title is the action', card.includes('GitHub Action: Get File Contents'), card.slice(0, 240))
+    check('the card sub-title is the path', card.includes('gh-action-subject') && card.includes('/src/lib/util.ts'), card.slice(0, 320))
+    check('the card says which repo it touched', card.includes('octo/demo@main'), card.slice(0, 320))
+    check('the card is NOT expandable', !card.includes('aria-expanded') && !card.includes('<button') && !card.includes('chevron'), card.slice(0, 240))
+    check('the card is a div, not a disclosure', card.includes('gh-action-card status-done'), card.slice(0, 120))
+
+    const activityInit = useGitHubActivity.getInitialState() as unknown as {
+      entries: ReturnType<typeof useGitHubActivity.getState>['entries']
+    }
+    activityInit.entries = useGitHubActivity.getState().entries
+    const feed = renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
+    check('the feed lists every card', feed.includes('gh-activity-list') && feed.includes('GitHub Action: Signed out'), feed.slice(0, 200))
+    check('the feed counts the actions', /\d+ GitHub actions/.test(feed), feed.slice(0, 300))
+    // Exactly two buttons in the whole feed: collapse + clear. A card is never
+    // a button, because a card is never expandable.
+    check('the feed offers clearing, and nothing expands', (feed.match(/<button/g) ?? []).length === 2 && feed.includes('Clear'), String((feed.match(/<button/g) ?? []).length))
+
+    useGitHubActivity.getState().clear()
+    activityInit.entries = []
+    check('clearing empties the feed', renderToString(createElement(GitHubActivityFeed)) === '')
+    check('the card title escapes nothing weird', card.includes('octo/demo@main'))
+  } finally {
+    off()
+    globalThis.fetch = realFetch
+    fake.close()
+    useGitHub.getState().setPublishDefaults({ repo: undefined, branch: undefined, prefix: '' })
+    useGitHubActivity.getState().clear()
+    useFs.getState().deleteFile('docs/roadmap.md')
+    useFs.getState().deleteFile('src/lib/util.ts')
+  }
+}
+
 function testGitHubUiRenders() {
   console.log('github ui renders:')
 
@@ -3130,8 +3350,12 @@ function testInlineThoughtsRendering() {
 
   // 1. Assistant message with reasoning renders .thought-block
   const html = renderToString(createElement(MessageBubble, { message: msgWithReasoning })).replace(/<!-- -->/g, '')
-  check('thought block renders into assistant message', html.includes('thought-block') && html.includes('Thought process'), html.slice(0, 300))
-  check('thought block calculates word count badge', html.includes('11 words'), html.slice(0, 400))
+  check('thought card renders into assistant message', html.includes('thought-block') && html.includes('Thoughts'), html.slice(0, 300))
+  check('thought card is titled "Thoughts", not "Thought process"', html.includes('thought-title\">Thoughts<'), html.slice(0, 400))
+  check('thought card uses the brain icon', html.includes('M9.5 2A2.5 2.5'), html.slice(0, 300))
+  check('thought card never wears a spinner', !html.includes('M12 3v3.5M12 17.5V21'), html.slice(0, 300))
+  check('thought card keeps its word count badge', html.includes('11 words'), html.slice(0, 400))
+  check('no call site renames the card', !html.includes('Thought process'), html.slice(0, 300))
 
   // 1b. Streaming message renders open thought block with live content
   const streamingMsg = {
@@ -3141,6 +3365,8 @@ function testInlineThoughtsRendering() {
   }
   const streamHtml = renderToString(createElement(MessageBubble, { message: streamingMsg })).replace(/<!-- -->/g, '')
   check('streaming message renders open thought body with reasoning text', streamHtml.includes('thought-block') && streamHtml.includes('streaming') && streamHtml.includes('First consider step A'), streamHtml.slice(0, 400))
+  check('streaming thought card is still called Thoughts', streamHtml.includes('thought-title\">Thoughts<') && streamHtml.includes('thinking…'), streamHtml.slice(0, 400))
+  check('streaming thought card keeps the brain icon', streamHtml.includes('M9.5 2A2.5 2.5') && !streamHtml.includes('M12 3v3.5M12 17.5V21'), streamHtml.slice(0, 300))
 
   // 2. Disabling showThoughts on the model suppresses the thought block
   settingsInit.s = {
@@ -3189,8 +3415,11 @@ function testInlineThoughtsRendering() {
     },
   }
   const agentHtml = renderToString(createElement(MessageBubble, { message: msgWithAgentThoughts })).replace(/<!-- -->/g, '')
-  check('agent plan card renders planning reasoning block', agentHtml.includes('Planning reasoning') && agentHtml.includes('6 words'), agentHtml.slice(0, 500))
-  check('agent step renders worker thought process block', agentHtml.includes('Simulacron Pro thought process'), agentHtml.slice(0, 600))
+  check('agent plan card renders planning reasoning block', (agentHtml.match(/thought-title\">Thoughts</g) ?? []).length === 2 && agentHtml.includes('6 words'), agentHtml.slice(0, 500))
+  const stepBodyAt = agentHtml.indexOf('agent-step-body')
+  check('agent steps render the same Thoughts card', stepBodyAt >= 0 && agentHtml.slice(stepBodyAt).includes('thought-title\">Thoughts<'), agentHtml.slice(0, 600))
+  check('thinking bodies stay collapsed until opened', !agentHtml.includes('Analyzing state requirements and rendering logic'), 'step reasoning should be behind the card')
+  check('agent cards never label thoughts per-model', !agentHtml.includes('thought process') && !agentHtml.includes('Planning reasoning'), agentHtml.slice(0, 500))
   settingsInit.s = origSettings
 }
 
@@ -4385,6 +4614,7 @@ async function main() {
   await testRepoContextEndToEnd()
   await testGitHubStoreAgainstFakeApi()
   testGitHubStore()
+  await testGitHubActionCards()
   testGitHubUiRenders()
   testModelPicker()
   testProviderManagement()

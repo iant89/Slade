@@ -19,7 +19,6 @@ import {
   IconChevronRight,
   IconCopy,
   IconGithub,
-  IconLoader,
   IconPencil,
   IconRefresh,
   IconTrash,
@@ -29,17 +28,18 @@ import {
 } from '../icons'
 
 /* ------------------------------------------------------------------ */
-/* Expandable thinking & reasoning block                               */
+/* Expandable "Thoughts" card                                          */
 /* ------------------------------------------------------------------ */
+
+/** The card is always called "Thoughts" — and always wears the brain icon. */
+export const THOUGHTS_LABEL = 'Thoughts'
 
 export function ThinkingBlock({
   reasoning,
   streaming = false,
-  label = 'Thought process',
 }: {
   reasoning?: string
   streaming?: boolean
-  label?: string
 }) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
   const isExpanded = userToggled !== null ? userToggled : (streaming ? true : false)
@@ -56,19 +56,17 @@ export function ThinkingBlock({
         className="thought-head"
         onClick={() => setUserToggled(!isExpanded)}
         aria-expanded={isExpanded}
-        title={isExpanded ? 'Collapse thinking process' : 'Expand thinking process'}
+        title={isExpanded ? 'Collapse thoughts' : 'Expand thoughts'}
       >
         <span className="thought-icon" aria-hidden="true">
-          {streaming ? <IconLoader size={12} className="spin" /> : <IconBrain size={12} />}
+          <IconBrain size={12} />
         </span>
-        <span className="thought-title">
-          {streaming && !trimmed ? 'Thinking…' : streaming ? 'Thinking…' : label}
-        </span>
-        {trimmed && !streaming && (
+        <span className="thought-title">{THOUGHTS_LABEL}</span>
+        {trimmed || streaming ? (
           <span className="thought-meta">
-            {wordCount} {wordCount === 1 ? 'word' : 'words'}
+            {streaming ? 'thinking…' : `${wordCount} ${wordCount === 1 ? 'word' : 'words'}`}
           </span>
-        )}
+        ) : null}
         <span className="thought-chevron" aria-hidden="true">
           {isExpanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
         </span>
@@ -364,7 +362,6 @@ function AssistantBody({
         <ThinkingBlock
           reasoning={message.reasoning}
           streaming={streaming && !message.content.trim()}
-          label="Thought process"
         />
       ) : null}
       {segments.map((seg, i) => (
