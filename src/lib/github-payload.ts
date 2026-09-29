@@ -222,3 +222,38 @@ export function messageIssueBody(text: string, p: Provenance): string {
 export function branchNameFor(prefix = 'slade', label: string): string {
   return `${slugify(prefix)}/${slugify(label, 'publish')}`
 }
+
+/* ------------------------------------------------------------------ */
+/* Pull requests                                                       */
+/* ------------------------------------------------------------------ */
+
+/** PR title for a text artifact: its own first line, else a plain one. */
+export function pullRequestTitleFor(a: Artifact): string {
+  if (a.text) {
+    const t = titleFromText(a.text, 72)
+    if (t !== 'Slade artifact') return t
+  }
+  return `Publish ${a.name} (via Slade)`
+}
+
+/** PR body for a text artifact: a summary, the content, provenance. */
+export function artifactPullRequestBody(a: Artifact, p: Provenance): string {
+  const lang = guessLanguage(a.name)
+  const body = a.text ?? ''
+  return [
+    '## Summary',
+    '',
+    `Publishes **${a.name}**${a.mime ? ` (${a.mime}, ${a.size} bytes)` : ''} from Slade.`,
+    '',
+    '## Contents',
+    '',
+    fenced(body.length > 60_000 ? `${body.slice(0, 60_000)}\n… (truncated by Slade)` : body, lang),
+    '',
+    provenanceBlock(p),
+  ].join('\n')
+}
+
+/** PR body for a chat message. */
+export function messagePullRequestBody(text: string, p: Provenance): string {
+  return ['## Summary', '', text, '', '---', provenanceBlock(p)].join('\n')
+}

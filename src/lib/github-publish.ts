@@ -10,6 +10,7 @@ import {
   createBranch,
   createGist,
   createIssue,
+  createPullRequest,
   fileSha,
   getBranchSha,
   GitHubError,
@@ -17,7 +18,7 @@ import {
   writeFile,
 } from './github'
 
-export type PublishTarget = 'gist' | 'file' | 'issue'
+export type PublishTarget = 'gist' | 'file' | 'issue' | 'pr'
 
 export interface PublishRequest {
   target: PublishTarget
@@ -39,6 +40,11 @@ export interface PublishRequest {
   newBranch?: string
   path?: string
   commitMessage?: string
+
+  /** Pull requests: the branch with the changes (base is `branch`). */
+  head?: string
+  /** Open the pull request as a draft. */
+  draft?: boolean
 
   /** Issues. */
   title?: string
@@ -166,6 +172,34 @@ export async function executePublish(req: PublishRequest, ctx: PublishContext): 
         url: issue.htmlUrl,
         label: `issue #${issue.number}`,
         detail: repo,
+      }
+    }
+
+    case 'pr': {
+      const repo = requireRepo(req)
+      const title = req.title?.trim()
+      if (!title) throw new PublishPreflightError('Give the pull request a title.')
+      const base = req.branch?.trim()
+      const head = req.head?.trim()
+      if (!base || !head) {
+        throw new PublishPreflightError('Pick the branch to merge into and the branch with the changes.')
+      }
+      ctx.onStep?.(`opening pull request ${head} → ${base}…`)
+      const pr = await createPullRequest(repo, {
+        token: ctx.token,
+        baseUrl: ctx.baseUrl,
+        signal: ctx.signal,
+        title,
+        head,
+        base,
+        body: req.body,
+        draft: req.draft,
+      })
+      return {
+        kind: 'pr',
+        url: pr.htmlUrl,
+        label: `PR #${pr.number}`,
+        detail: `${repo} · ${head} → ${base}${pr.draft ? ' · draft' : ''}`,
       }
     }
 

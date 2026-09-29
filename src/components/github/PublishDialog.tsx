@@ -9,13 +9,16 @@ import { formatBytes } from '../../lib/format'
 import {
   artifactIssueBody,
   artifactIssueTitle,
+  artifactPullRequestBody,
   artifactToFilePayload,
   artifactToGist,
   branchNameFor,
   isBinaryArtifact,
   messageIssueBody,
+  messagePullRequestBody,
   messageToGist,
   PublishError,
+  pullRequestTitleFor,
   slugify,
   suggestRepoPath,
   titleFromText,
@@ -78,6 +81,7 @@ function useSource(): Resolved | null {
 const TARGETS: { id: PublishTarget; label: string; hint: string }[] = [
   { id: 'gist', label: 'Gist', hint: 'One file, instantly — secret by default' },
   { id: 'file', label: 'Repo file', hint: 'Commit into a repository (binary files too)' },
+  { id: 'pr', label: 'Pull request', hint: 'Open a pull request from one branch into another' },
   { id: 'issue', label: 'Issue', hint: 'Open an issue with the content in the body' },
 ]
 
@@ -114,6 +118,10 @@ export function PublishDialog() {
   const [useNewBranch, setUseNewBranch] = useState(defaults.useNewBranch)
   const [issueTitle, setIssueTitle] = useState('')
   const [issueBody, setIssueBody] = useState('')
+  const [prHead, setPrHead] = useState('')
+  const [prDraft, setPrDraft] = useState(false)
+  /** Which target the auto-generated body belongs to (issue vs PR differ). */
+  const [bodyFor, setBodyFor] = useState<PublishTarget | null>(null)
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | undefined>()
   const [result, setResult] = useState<PublishResult | null>(null)
@@ -136,22 +144,34 @@ export function PublishDialog() {
     setCommitMessage(`Add ${resolved.name} (via Slade)`)
     setNewBranch(branchNameFor('slade', resolved.title))
     setUseNewBranch(defaults.useNewBranch)
+    setPrHead(branchNameFor('slade', resolved.title))
+    setPrDraft(false)
     setIssueTitle(resolved.artifact ? artifactIssueTitle(resolved.artifact) : resolved.title)
     setIssueBody('')
+    setBodyFor(null)
     setResult(null)
     setLocalError(undefined)
   }, [source, resolved, defaults, activeRepo, activeBranch])
 
-  // Auto-generate the issue body from the resolved content.
+  // Auto-generate the issue / PR body from the resolved content. The two
+  // bodies differ, so switching targets regenerates rather than reusing.
   useEffect(() => {
-    if (!resolved || target !== 'issue' || issueBody) return
+    if (!resolved || (target !== 'issue' && target !== 'pr') || bodyFor === target) return
     const provenance = { origin: resolved.origin, model: resolved.model }
-    setIssueBody(
-      resolved.artifact
-        ? artifactIssueBody(resolved.artifact, provenance)
-        : messageIssueBody(resolved.text ?? '', provenance),
-    )
-  }, [resolved, target, issueBody])
+    const body =
+      target === 'issue'
+        ? resolved.artifact
+          ? artifactIssueBody(resolved.artifact, provenance)
+          : messageIssueBody(resolved.text ?? '', provenance)
+        : resolved.artifact
+          ? artifactPullRequestBody(resolved.artifact, provenance)
+          : messagePullRequestBody(resolved.text ?? '', provenance)
+    setIssueBody(body)
+    setBodyFor(target)
+    if (target === 'pr') {
+      setIssueTitle(resolved.artifact ? pullRequestTitleFor(resolved.artifact) : resolved.title)
+    }
+  }, [resolved, target, bodyFor])
 
   if (!source || !resolved) return null
 
@@ -197,6 +217,17 @@ export function PublishDialog() {
           newBranch: useNewBranch ? newBranch.trim() || undefined : undefined,
           path: path || resolved.name,
           commitMessage,
+        }
+      } else if (target === 'pr') {
+        req = {
+          target: 'pr',
+          name: resolved.name,
+          repo,
+          branch: branch || undefined,
+          head: prHead.trim() || undefined,
+          title: issueTitle,
+          body: issueBody,
+          draft: prDraft,
         }
       } else {
         req = {
@@ -402,6 +433,64 @@ export function PublishDialog() {
                   </label>
                 </>
               ) : null}
+
+              {target === 'pr' ? (
+                <>
+                  <label className="gh-field">
+                    <span>Repository</span>
+                    <input
+                      className="gh-input"
+                      list="gh-repo-options"
+                      value={repo}
+                      placeholder="owner/repo"
+                      onChange={(e) => setRepo(e.target.value)}
+                    />
+                  </label>
+                  <div className="publish-grid">
+                    <label className="gh-field">
+                      <span>Merge into (base)</span>
+                      <input
+                        className="gh-input"
+                        list="gh-branch-options"
+                        value={branch}
+                        placeholder="default branch"
+                        onChange={(e) => setBranch(e.target.value)}
+                      />
+                      <datalist id="gh-branch-options">
+                        {branches.map((b) => (
+                          <option key={b.name} value={b.name} />
+                        ))}
+                      </datalist>
+                    </label>
+                    <label className="gh-field">
+                      <span>From branch (head)</span>
+                      <input
+                        className="gh-input"
+                        list="gh-branch-options"
+                        value={prHead}
+                        placeholder="branch with the changes"
+                        onChange={(e) => setPrHead(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <label className="gh-field">
+                    <span>Title</span>
+                    <input className="gh-input" value={issueTitle} onChange={(e) => setIssueTitle(e.target.value)} />
+                  </label>
+                  <label className="gh-field">
+                    <span>Body (Markdown)</span>
+                    <textarea className="gh-input mono" rows={10} value={issueBody} onChange={(e) => setIssueBody(e.target.value)} />
+                  </label>
+                  <label className="gh-check">
+                    <input type="checkbox" checked={prDraft} onChange={(e) => setPrDraft(e.target.checked)} />
+                    <span>Open as a draft <em className="gh-muted">(not ready for review yet)</em></span>
+                  </label>
+                  <p className="gh-muted">
+                    The head branch must already exist — commit onto it first with <strong>Repo file</strong> →{' '}
+                    <em>Commit onto a new branch instead</em>.
+                  </p>
+                </>
+              ) : null}
             </div>
 
             {message ? <GhError>{message}</GhError> : null}
@@ -422,7 +511,7 @@ export function PublishDialog() {
                   Cancel
                 </button>
                 <button className="btn primary small" onClick={() => void submit()} disabled={busy || publishing || !connected} type="button">
-                  {busy || publishing ? <Spinner label={publishStep ?? 'publishing…'} /> : <><IconUpload size={12} /> {target === 'gist' ? 'Create gist' : target === 'file' ? 'Commit file' : 'Open issue'}</>}
+                  {busy || publishing ? <Spinner label={publishStep ?? 'publishing…'} /> : <><IconUpload size={12} /> {target === 'gist' ? 'Create gist' : target === 'file' ? 'Commit file' : target === 'pr' ? 'Open pull request' : 'Open issue'}</>}
                 </button>
               </div>
             </footer>

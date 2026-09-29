@@ -34,6 +34,7 @@ import {
   createBranch,
   createGist,
   createIssue,
+  createPullRequest,
   createRepo,
   encodePath,
   extOf as ghExtOf,
@@ -73,6 +74,7 @@ import { redactSecrets } from '../src/providers/base'
 import {
   artifactIssueBody,
   artifactIssueTitle,
+  artifactPullRequestBody,
   artifactToFilePayload,
   artifactToGist,
   branchNameFor,
@@ -82,7 +84,9 @@ import {
   gistNameFor,
   isBinaryArtifact,
   messageIssueBody,
+  messagePullRequestBody,
   PublishError,
+  pullRequestTitleFor,
   slugify,
   suggestRepoPath,
   titleFromText,
@@ -1592,6 +1596,13 @@ async function testGitHubClient() {
         : { status: 204 }
     },
     '/repos/octo/clash/merges': () => ({ status: 409, json: { message: 'Merge conflict' } }),
+    '/repos/octo/demo/pulls': () => ({
+      status: 201,
+      json: { number: 7, html_url: 'https://github.com/octo/demo/pull/7', title: 'Add the thing', state: 'open', draft: false },
+    }),
+    // GitHub's two 422s for pull requests.
+    '/repos/octo/stale/pulls': () => ({ status: 422, json: { message: 'No commits between main and dev', errors: [{ resource: 'PullRequest', code: 'invalid' }] } }),
+    '/repos/octo/dupe/pulls': () => ({ status: 422, json: { message: 'A pull request already exists for octo:dev.' } }),
     '/repos/octo/demo/git/trees/main': () => ({ status: 200, json: tree }),
     '/repos/octo/demo/contents/src/lib/util.ts': () => ({
       status: 200,
@@ -1758,6 +1769,49 @@ async function testGitHubClient() {
     }
     check('merging a branch into itself is refused', isGitHubError(sameBranch) && /two different branches/i.test(sameBranch.message), String(sameBranch))
     check('the self-merge made no API call', fake.seen.filter((r) => r.url === '/repos/octo/demo/merges').length === mergeCalls, String(mergeCalls))
+
+    /* --- pull requests --- */
+
+    const pr = await createPullRequest('octo/demo', { ...api, title: 'Add the thing', head: 'slade/x', base: 'main', body: 'because', draft: false })
+    check('a pull request reports its number', pr.number === 7 && pr.htmlUrl.endsWith('/pull/7'), JSON.stringify(pr))
+    check('a pull request reports its state', pr.state === 'open' && pr.draft === false, JSON.stringify(pr))
+    const prCall = fake.seen.find((r) => r.url === '/repos/octo/demo/pulls')
+    check('the PR posts title, head and base', prCall?.body.title === 'Add the thing' && prCall?.body.head === 'slade/x' && prCall?.body.base === 'main', JSON.stringify(prCall?.body))
+    check('the PR carries the body and draft flag', prCall?.body.body === 'because' && prCall?.body.draft === false, JSON.stringify(prCall?.body))
+    check('the PR allows maintainer edits', prCall?.body.maintainer_can_modify === true, JSON.stringify(prCall?.body))
+
+    let sameHead: unknown = null
+    try {
+      await createPullRequest('octo/demo', { ...api, title: 't', head: 'main', base: 'main' })
+    } catch (err) {
+      sameHead = err
+    }
+    check('a PR from a branch into itself is refused', isGitHubError(sameHead) && /must differ/i.test(sameHead.message), String(sameHead))
+
+    let noPrTitle: unknown = null
+    try {
+      await createPullRequest('octo/demo', { ...api, title: '  ', head: 'slade/x', base: 'main' })
+    } catch (err) {
+      noPrTitle = err
+    }
+    check('a PR without a title is refused', isGitHubError(noPrTitle) && /title/i.test(noPrTitle.message), String(noPrTitle))
+    check('the refused PRs made no API call', fake.seen.filter((r) => r.url === '/repos/octo/demo/pulls').length === 1, String(fake.seen.filter((r) => r.url === '/repos/octo/demo/pulls').length))
+
+    let stale: unknown = null
+    try {
+      await createPullRequest('octo/stale', { ...api, title: 't', head: 'dev', base: 'main' })
+    } catch (err) {
+      stale = err
+    }
+    check('a PR with no new commits says so', isGitHubError(stale) && /no commits that main doesn't already have/i.test(stale.message), String(stale))
+
+    let dupe: unknown = null
+    try {
+      await createPullRequest('octo/dupe', { ...api, title: 't', head: 'dev', base: 'main' })
+    } catch (err) {
+      dupe = err
+    }
+    check('a duplicate PR is explained', isGitHubError(dupe) && /already exists/i.test(dupe.message) && /dev into main/.test(dupe.message), String(dupe))
   } finally {
     fake.close()
   }
@@ -2035,6 +2089,12 @@ function testPublishPayloads() {
   check('issue bodies carry provenance', issueBody.includes('Simulacron Pro') && issueBody.includes('Report chat'))
   check('issue titles name the artifact', artifactIssueTitle(textArtifact) === 'Artifact: report.md')
   check('message issue bodies include the text', messageIssueBody('hello', { origin: 'an assistant answer' }).startsWith('hello'))
+
+  check('PR titles come from the artifact text', pullRequestTitleFor(textArtifact) === 'Report', pullRequestTitleFor(textArtifact))
+  const prBody = artifactPullRequestBody(textArtifact, { origin: 'Simulacron Pro', conversationTitle: 'Report chat' })
+  check('PR bodies summarize the artifact', prBody.includes('## Summary') && prBody.includes('# Report') && prBody.includes('report.md'), prBody.slice(0, 80))
+  check('PR bodies carry provenance', prBody.includes('Simulacron Pro') && prBody.includes('Report chat'))
+  check('message PR bodies include the text', messagePullRequestBody('hello', { origin: 'an assistant answer' }).includes('hello'))
 }
 
 /** executePublish: the three destinations, including the new-branch path. */
@@ -2049,6 +2109,10 @@ async function testPublishFlow() {
         ? { status: 200, json: { type: 'file', path: 'report.md', sha: 'old-sha', size: 3, encoding: 'base64', content: Buffer.from('old').toString('base64') } }
         : { status: 200, json: { content: { path: 'report.md', sha: 'new-sha', html_url: 'https://github.com/octo/demo/blob/slade/report/report.md' }, commit: { sha: 'c0ffee1234', html_url: 'https://github.com/octo/demo/commit/c0ffee1234' } } },
     '/repos/octo/demo/issues': () => ({ status: 201, json: { number: 3, html_url: 'https://github.com/octo/demo/issues/3' } }),
+    '/repos/octo/demo/pulls': () => ({
+      status: 201,
+      json: { number: 11, html_url: 'https://github.com/octo/demo/pull/11', title: 'Add report', state: 'open', draft: true },
+    }),
     '/gists': () => ({ status: 201, json: { id: '0123456789ab', html_url: 'https://gist.github.com/0123456789ab', public: true } }),
   })
   const ctx = { token, baseUrl: fake.base }
@@ -2072,6 +2136,32 @@ async function testPublishFlow() {
 
     const issue = await executePublish({ target: 'issue', name: 'x', repo: 'octo/demo', title: 'Bug', body: 'text' }, ctx)
     check('issue publish returns its number', issue.label === 'issue #3' && issue.url.endsWith('/issues/3'), JSON.stringify(issue))
+
+    const pr = await executePublish(
+      { target: 'pr', name: 'x', repo: 'octo/demo', branch: 'main', head: 'slade/report', title: 'Add report', body: 'the body', draft: true },
+      ctx,
+    )
+    check('PR publish returns its number', pr.label === 'PR #11' && pr.url.endsWith('/pull/11'), JSON.stringify(pr))
+    check('PR publish names both branches', (pr.detail ?? '').includes('slade/report → main') && (pr.detail ?? '').includes('draft'), String(pr.detail))
+    const prPost = fake.seen.find((r) => r.url === '/repos/octo/demo/pulls')
+    check('PR publish forwards head, base and draft', prPost?.body.head === 'slade/report' && prPost?.body.base === 'main' && prPost?.body.draft === true, JSON.stringify(prPost?.body))
+    check('PR publish forwards the body', prPost?.body.body === 'the body', String(prPost?.body.body))
+
+    let noPrHead: unknown = null
+    try {
+      await executePublish({ target: 'pr', name: 'x', repo: 'octo/demo', branch: 'main', title: 't' }, ctx)
+    } catch (err) {
+      noPrHead = err
+    }
+    check('a PR without a head branch is refused up front', noPrHead instanceof PublishPreflightError && /branch/i.test(noPrHead.message), String(noPrHead))
+
+    let noPrTitle: unknown = null
+    try {
+      await executePublish({ target: 'pr', name: 'x', repo: 'octo/demo', branch: 'main', head: 'dev', title: ' ' }, ctx)
+    } catch (err) {
+      noPrTitle = err
+    }
+    check('a PR without a title is refused up front', noPrTitle instanceof PublishPreflightError && /title/i.test(noPrTitle.message), String(noPrTitle))
 
     let noToken: unknown = null
     try {
@@ -2253,6 +2343,10 @@ async function testGitHubStoreAgainstFakeApi() {
     '/repos/octo/demo/branches': () => ({ status: 200, json: [{ name: 'main', commit: { sha: 's1' } }, { name: 'dev', commit: { sha: 's2' } }] }),
     '/repos/octo/demo': () => ({ status: 200, json: { id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 } }),
     '/search/code': () => ({ status: 200, json: { items: [{ path: 'src/lib/util.ts', name: 'util.ts', sha: 'b1', html_url: 'https://github.com/octo/demo/blob/main/src/lib/util.ts' }] } }),
+    '/repos/octo/demo/pulls': () => ({
+      status: 201,
+      json: { number: 42, html_url: 'https://github.com/octo/demo/pull/42', title: 'Fold dev in', state: 'open', draft: false },
+    }),
     '/gists': () => ({ status: 201, json: { id: 'ffeeddccbbaa', html_url: 'https://gist.github.com/ffeeddccbbaa', public: false } }),
   })
 
@@ -2323,6 +2417,11 @@ async function testGitHubStoreAgainstFakeApi() {
     check('the store remembers the last publish', useGitHub.getState().lastPublish?.url === published?.url)
     check('publishing clears the busy flag', useGitHub.getState().publishing === false)
     check('publishing keeps the step text out of the transcript', useGitHub.getState().publishError === undefined)
+
+    const pr = await useGitHub.getState().publish({ target: 'pr', name: 'dev', repo: 'octo/demo', branch: 'main', head: 'dev', title: 'Fold dev in', draft: false })
+    check('publishing a PR from the store returns the link', pr?.label === 'PR #42' && pr.url.endsWith('/pull/42'), JSON.stringify(pr))
+    check('the store remembers the PR publish', useGitHub.getState().lastPublish?.url === pr?.url)
+    check('the PR publish names the branches', (pr?.detail ?? '').includes('dev → main'), String(pr?.detail))
 
     // A failure must land on the store's error fields, not throw into the UI.
     const failing = await startFakeGitHub({})

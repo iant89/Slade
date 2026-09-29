@@ -5,6 +5,7 @@ import { extOf, guessLanguage, type GitHubTreeEntry } from '../../lib/github'
 import { CodeArtifact } from '../artifacts/CodeArtifact'
 import { Markdown } from '../chat/Markdown'
 import { MergeBranchDialog } from './MergeBranchDialog'
+import { PullRequestDialog } from './PullRequestDialog'
 import { GhEmpty, GhError, Spinner } from './bits'
 import {
   IconChevronDown,
@@ -18,6 +19,7 @@ import {
   IconImage,
   IconPaperclip,
   IconRefresh,
+  IconUpload,
 } from '../icons'
 
 const RENDER_LIMIT = 600
@@ -102,6 +104,7 @@ export function FileBrowser() {
   const [attachBusy, setAttachBusy] = useState<string | null>(null)
   const [pullBusy, setPullBusy] = useState(false)
   const [merging, setMerging] = useState(false)
+  const [proposing, setProposing] = useState(false)
 
   const filter = treeFilter.trim().toLowerCase()
   const treeRoot = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree])
@@ -270,6 +273,19 @@ export function FileBrowser() {
         >
           <IconGitMerge size={12} /> Merge…
         </button>
+        <button
+          className="btn ghost small"
+          onClick={() => setProposing(true)}
+          disabled={branches.length < 2}
+          title={
+            branches.length < 2
+              ? 'A pull request needs at least one other branch in this repository'
+              : `Propose ${activeBranch} ← another branch as a pull request`
+          }
+          type="button"
+        >
+          <IconUpload size={12} /> Pull request…
+        </button>
       </div>
 
       <div className="gh-search-inline">
@@ -396,6 +412,7 @@ export function FileBrowser() {
         </div>
       ) : null}
       {merging ? <MergeBranchDialog onClose={() => setMerging(false)} /> : null}
+      {proposing ? <PullRequestDialog onClose={() => setProposing(false)} /> : null}
     </div>
   )
 }

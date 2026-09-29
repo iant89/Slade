@@ -522,6 +522,90 @@ export async function mergeBranch(fullName: string, o: MergeBranchOptions): Prom
   }
 }
 
+export interface PullRequestResult {
+  number: number
+  htmlUrl: string
+  title: string
+  state: string
+  draft: boolean
+}
+
+export interface CreatePullRequestOptions extends GhRequest {
+  title: string
+  /** The branch that has the changes. */
+  head: string
+  /** The branch the changes are proposed for. */
+  base: string
+  body?: string
+  draft?: boolean
+}
+
+/**
+ * Open a pull request (`POST /repos/{owner}/{repo}/pulls`).
+ *
+ * The two 422s GitHub answers with are re-worded, because their raw sentences
+ * ("No commits between main and dev") don't say what to do about it.
+ */
+export async function createPullRequest(fullName: string, o: CreatePullRequestOptions): Promise<PullRequestResult> {
+  const title = o.title.trim()
+  const base = o.base.trim()
+  const head = o.head.trim()
+  if (!title) {
+    throw new GitHubError('validation', 'Give the pull request a title.')
+  }
+  if (!base || !head) {
+    throw new GitHubError('validation', 'Pick the branch to merge into (base) and the branch with the changes (head).')
+  }
+  if (base === head) {
+    throw new GitHubError('validation', 'The head and base branches must differ — GitHub cannot open a pull request from a branch into itself.')
+  }
+  let res: { number?: number; html_url?: string; title?: string; state?: string; draft?: boolean }
+  try {
+    res = await ghFetch<{ number?: number; html_url?: string; title?: string; state?: string; draft?: boolean }>(
+      `/repos/${fullName}/pulls`,
+      {
+        token: o.token,
+        baseUrl: o.baseUrl,
+        signal: o.signal,
+        method: 'POST',
+        body: {
+          title,
+          head,
+          base,
+          body: o.body?.trim() || undefined,
+          draft: Boolean(o.draft),
+          maintainer_can_modify: true,
+        },
+      },
+    )
+  } catch (err) {
+    if (isGitHubError(err) && err.kind === 'validation') {
+      if (/no commits between/i.test(err.message)) {
+        throw new GitHubError(
+          'validation',
+          `${head} has no commits that ${base} doesn't already have — nothing to open a pull request for.`,
+          err.status,
+        )
+      }
+      if (/already exists/i.test(err.message)) {
+        throw new GitHubError(
+          'validation',
+          `A pull request from ${head} into ${base} already exists on GitHub.`,
+          err.status,
+        )
+      }
+    }
+    throw err
+  }
+  return {
+    number: res.number ?? 0,
+    htmlUrl: res.html_url ?? `https://github.com/${fullName}/pulls`,
+    title: res.title ?? title,
+    state: res.state ?? 'open',
+    draft: Boolean(res.draft),
+  }
+}
+
 export interface TreeResult {
   entries: GitHubTreeEntry[]
   truncated: boolean
