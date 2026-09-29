@@ -51,6 +51,7 @@ export const DEFAULT_SETTINGS: Settings = {
     // bill their thinking against the same cap — the chat default is too
     // small to finish one. A ceiling costs nothing unless the tokens are used.
     stepMaxTokens: 16_384,
+    useLocalFs: true,
   },
   providers: DEFAULT_PROVIDERS,
   pinnedModelId: undefined,

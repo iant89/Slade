@@ -10,7 +10,7 @@ import { sendUserMessage, stopGeneration, regenerateFromUserMessage } from '../.
 import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { IconBot, IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
+import { IconBot, IconFolder, IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Model chip + quick switch                                           */
@@ -175,6 +175,7 @@ const COMMANDS = [
   { cmd: '/system', label: '/system', hint: 'Edit the default system prompt', icon: <IconSliders size={13} /> },
   { cmd: '/model', label: '/model', hint: 'Quick-switch the primary model', icon: <IconLayers size={13} /> },
   { cmd: '/agent', label: '/agent', hint: 'Toggle the orchestrator agent', icon: <IconBot size={13} /> },
+  { cmd: '/files', label: '/files', hint: 'Open the local file system workspace', icon: <IconFolder size={13} /> },
   { cmd: '/github', label: '/github', hint: 'Browse a repo and attach files as context', icon: <IconGithub size={13} /> },
   { cmd: '/sample', label: '/sample', hint: 'Attach sample files (CSV, code, image…)', icon: <IconFile size={13} /> },
   { cmd: '/new', label: '/new', hint: 'Start a new conversation', icon: <IconPlus size={13} /> },
@@ -373,6 +374,7 @@ export function Composer() {
       }
     }
     if (cmd === '/new') useChat.getState().newConversation()
+    if (cmd === '/files') useUI.getState().openFiles()
     if (cmd === '/github') useUI.getState().openGithub('files')
     if (cmd === '/sample') {
       void attachSample(SAMPLES[0]!.file)

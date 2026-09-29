@@ -9,8 +9,10 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconCode,
+  IconDownload,
   IconExternal,
   IconFile,
+  IconFolder,
   IconImage,
   IconPaperclip,
   IconRefresh,
@@ -91,9 +93,12 @@ export function FileBrowser() {
   const openFile = useGitHub((s) => s.openFile)
   const closeFile = useGitHub((s) => s.closeFile)
   const attachFile = useGitHub((s) => s.attachFile)
+  const pullFileToFs = useGitHub((s) => s.pullFileToFs)
+  const pullTreeToFs = useGitHub((s) => s.pullTreeToFs)
   const openRepo = useGitHub((s) => s.openRepo)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [attachBusy, setAttachBusy] = useState<string | null>(null)
+  const [pullBusy, setPullBusy] = useState(false)
 
   const filter = treeFilter.trim().toLowerCase()
   const treeRoot = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree])
@@ -123,6 +128,18 @@ export function FileBrowser() {
     setAttachBusy(path)
     await attachFile(path)
     setAttachBusy(null)
+  }
+
+  const pullOne = async (path: string) => {
+    setAttachBusy(path)
+    await pullFileToFs(path)
+    setAttachBusy(null)
+  }
+
+  const pullAll = async () => {
+    setPullBusy(true)
+    await pullTreeToFs({ prefix: treeFilter.trim() || undefined })
+    setPullBusy(false)
   }
 
   const toggleDir = (path: string) =>
@@ -172,6 +189,16 @@ export function FileBrowser() {
             </button>
             <button
               className="icon-btn small"
+              onClick={() => void pullOne(file.path)}
+              disabled={attachBusy === file.path}
+              aria-label={`Save ${file.path} to Local Files`}
+              title="Save to Local Files"
+              type="button"
+            >
+              <IconFolder size={12} />
+            </button>
+            <button
+              className="icon-btn small"
               onClick={() => void attach(file.path)}
               disabled={attachBusy === file.path}
               aria-label={`Attach ${file.path} to the next message`}
@@ -218,6 +245,15 @@ export function FileBrowser() {
         <button className="icon-btn small" onClick={() => void refreshTree()} aria-label="Reload file tree" title="Reload" type="button">
           <IconRefresh size={13} />
         </button>
+        <button
+          className="btn ghost small"
+          onClick={() => void pullAll()}
+          disabled={pullBusy || !tree}
+          title="Pull text files from this repository into Local Files so agents can read and modify them"
+          type="button"
+        >
+          {pullBusy ? <Spinner /> : <IconDownload size={12} />} Pull to Local Files
+        </button>
       </div>
 
       <div className="gh-search-inline">
@@ -247,6 +283,16 @@ export function FileBrowser() {
                     <FileIcon path={f.path} />
                     <span className="gh-tree-name">{f.path}</span>
                     {f.size != null ? <span className="gh-tree-size">{formatBytes(f.size)}</span> : null}
+                  </button>
+                  <button
+                    className="icon-btn small"
+                    onClick={() => void pullOne(f.path)}
+                    disabled={attachBusy === f.path}
+                    aria-label={`Save ${f.path} to Local Files`}
+                    title="Save to Local Files"
+                    type="button"
+                  >
+                    <IconFolder size={12} />
                   </button>
                   <button
                     className="icon-btn small"
@@ -293,6 +339,15 @@ export function FileBrowser() {
                 <IconExternal size={13} />
               </a>
             ) : null}
+            <button
+              className="btn ghost small"
+              disabled={!preview || attachBusy === preview.path}
+              onClick={() => preview && void pullOne(preview.path)}
+              title="Save this file into Local Files"
+              type="button"
+            >
+              <IconFolder size={12} /> Save to Files
+            </button>
             <button
               className="btn primary small"
               disabled={!preview || attachBusy === preview.path}

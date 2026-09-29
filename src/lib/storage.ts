@@ -7,6 +7,8 @@ export const KEYS = {
   artifacts: 'slade.artifacts.v1',
   /** GitHub connection + workspace state (never part of the export bundle). */
   github: 'slade.github.v1',
+  /** Local file system workspace used by agents and users to store files. */
+  fs: 'slade.fs.v1',
 } as const
 
 /** Load and zod-validate a JSON value from localStorage; fall back on any error. */

@@ -88,17 +88,32 @@ import {
 import { executePublish, PublishPreflightError, publishErrorMessage } from '../src/lib/github-publish'
 import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
+import { useFs, fsArtifactId } from '../src/store/fs'
+import {
+  buildFsTree,
+  extractFsActions,
+  formatFsContextForAgent,
+  formatFsManifest,
+  formatFsOpSummary,
+  fsBaseName,
+  fsDirName,
+  fsExt,
+  isFsError,
+  normalizeFsPath,
+  tryNormalizeFsPath,
+} from '../src/lib/fs'
 import { buildTurns } from '../src/engine/turns'
 import { parsePlannerReply, resolveWorkerModel } from '../src/engine/agent'
 import { CODING_AGENT_ORCHESTRATOR_PROMPT } from '../src/engine/orchestratorPrompt'
 import { z } from 'zod'
-import { conversationSchema } from '../src/lib/schemas'
-import type { Artifact } from '../src/types'
+import { conversationSchema, exportBundleSchema } from '../src/lib/schemas'
+import type { Artifact, FsFile } from '../src/types'
 // The browser build of react-dom/server avoids the `stream` require that the
 // node build does, which esbuild cannot bundled for ESM.
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
+import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
 import { AddModelForm } from '../src/components/settings/SettingsModal'
@@ -2293,6 +2308,633 @@ function testProviderManagement() {
   check('each row offers where to get a key', picker.includes('Get a key'))
 }
 
+function testLocalFsPrimitives() {
+  console.log('local file system primitives:')
+
+  check('normalizes leading/trailing slashes and backslashes', normalizeFsPath('/src\\lib//util.ts/') === 'src/lib/util.ts')
+  check('strips current-dir segments', normalizeFsPath('./src/./app.ts') === 'src/app.ts')
+  check('rejects parent-dir traversal', tryNormalizeFsPath('../secret.txt') === null && tryNormalizeFsPath('src/../../etc/passwd') === null)
+  check('rejects empty path', tryNormalizeFsPath('   ') === null && tryNormalizeFsPath('/') === null)
+  let caughtTraversal = false
+  try {
+    normalizeFsPath('src/../bad/../../root.ts')
+  } catch (err) {
+    caughtTraversal = isFsError(err) && err.kind === 'invalid_path'
+  }
+  check('normalizeFsPath throws FsError on traversal', caughtTraversal)
+
+  check('fsBaseName extracts leaf name', fsBaseName('src/components/App.tsx') === 'App.tsx' && fsBaseName('README.md') === 'README.md')
+  check('fsDirName extracts parent directory', fsDirName('src/components/App.tsx') === 'src/components' && fsDirName('README.md') === '')
+  check('fsExt extracts lowercase extension', fsExt('src/App.TSX') === 'tsx' && fsExt('Makefile') === '')
+
+  // Extract file actions from markdown fences & file header comments
+  const md = [
+    'Here are the changes:',
+    '```ts:src/math.ts',
+    'export const add = (a: number, b: number) => a + b',
+    '```',
+    '```fs:append:notes/changelog.md',
+    '- Added math module',
+    '```',
+    '```fs:move:src/old.ts -> src/new.ts',
+    '```',
+    '```fs:delete:tmp/scratch.txt',
+    '```',
+    '```python',
+    '# file: scripts/build.py',
+    'print("building")',
+    '```',
+  ].join('\n')
+
+  const actions = extractFsActions(md)
+  check('extracts all 5 file system actions', actions.length === 5, JSON.stringify(actions.map((a) => `${a.op}:${'path' in a ? a.path : a.toPath}`)))
+  check('standard lang:path fence becomes write action', actions[0]?.op === 'write' && actions[0]?.path === 'src/math.ts' && actions[0]?.lang === 'ts')
+  check('fs:append fence becomes append action', actions[1]?.op === 'append' && actions[1]?.path === 'notes/changelog.md')
+  check('fs:move fence becomes move action', actions[2]?.op === 'move' && actions[2]?.fromPath === 'src/old.ts' && actions[2]?.toPath === 'src/new.ts')
+  check('fs:delete fence becomes delete action', actions[3]?.op === 'delete' && actions[3]?.path === 'tmp/scratch.txt')
+  check('comment header inside untagged fence becomes write action', actions[4]?.op === 'write' && actions[4]?.path === 'scripts/build.py' && actions[4]?.content === 'print("building")')
+
+  const summary = formatFsOpSummary([
+    { op: 'create', path: 'src/math.ts', at: 1 },
+    { op: 'update', path: 'src/index.ts', version: 2, at: 2 },
+    { op: 'delete', path: 'tmp/scratch.txt', at: 3 },
+  ])
+  check('formatFsOpSummary describes operations', summary === 'created src/math.ts, updated src/index.ts (v2), deleted tmp/scratch.txt', summary)
+}
+
+function testLocalFsStore() {
+  console.log('local file system store:')
+  const fs = useFs.getState()
+  fs.clearAll()
+  useUI.getState().clearPendingAttachments()
+
+  const created = fs.writeFile('/src/utils/math.ts', 'export const add = (a: number, b: number) => a + b\n', {
+    source: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' },
+    conversationId: 'conv_fs',
+    messageId: 'msg_fs_1',
+    syncArtifact: true,
+  })
+  check('writeFile normalizes path and starts at version 1', created.path === 'src/utils/math.ts' && created.version === 1)
+  check('readFile returns stored content', useFs.getState().readFile('src/utils/math.ts')?.content === 'export const add = (a: number, b: number) => a + b\n')
+  check('syncs file to artifact store with localPath', useArtifacts.getState().byId[fsArtifactId('src/utils/math.ts')]?.localPath === 'src/utils/math.ts')
+
+  const updated = fs.writeFile('src/utils/math.ts', 'export const add = (a: number, b: number) => a + b\nexport const mul = (a: number, b: number) => a * b\n', {
+    source: { origin: 'user' },
+  })
+  check('updating increments version and preserves createdBy', updated.version === 2 && updated.createdBy.origin === 'model' && updated.updatedBy.origin === 'user')
+
+  const appended = fs.appendFile('notes/todo.md', '- Step 1', { source: { origin: 'user' } })
+  const appended2 = fs.appendFile('notes/todo.md', '- Step 2', { source: { origin: 'user' } })
+  check('appendFile creates then appends with newline', appended.version === 1 && appended2.version === 2 && appended2.content === '- Step 1\n- Step 2')
+
+  const moved = fs.moveFile('notes/todo.md', 'docs/roadmap.md', { origin: 'user' })
+  check('moveFile relocates file and removes old path', moved?.path === 'docs/roadmap.md' && !useFs.getState().exists('notes/todo.md') && useFs.getState().exists('docs/roadmap.md'))
+
+  // Directory tree & search
+  const tree = buildFsTree(useFs.getState().listFiles())
+  check('buildFsTree groups files into sorted directories', tree.dirs.map((d) => d.name).join(',') === 'docs,src', tree.dirs.map((d) => d.name).join(','))
+  const hits = useFs.getState().search('mul')
+  check('search finds content matches with line numbers', hits.length === 1 && hits[0]?.file.path === 'src/utils/math.ts' && hits[0]?.lines[0]?.line === 2, JSON.stringify(hits))
+
+  // Manifest and agent context formatting
+  const manifest = formatFsManifest(useFs.getState().listFiles())
+  check('formatFsManifest lists stored files', manifest.includes('src/utils/math.ts') && manifest.includes('docs/roadmap.md'), manifest)
+  const ctx = formatFsContextForAgent(useFs.getState().listFiles(), { queryHint: 'update math.ts' })
+  check('formatFsContextForAgent includes manifest and file contents', ctx.includes('LOCAL FILE SYSTEM WORKSPACE') && ctx.includes('export const mul'), ctx.slice(0, 200))
+
+  // Attach file to composer
+  const attached = useFs.getState().attachFile('src/utils/math.ts')
+  check('attachFile queues artifact in pendingAttachmentIds', Boolean(attached) && useUI.getState().pendingAttachmentIds.includes(attached!.id))
+  useUI.getState().clearPendingAttachments()
+
+  // Apply agent output batch
+  const ops = useFs.getState().applyAgentOutput(
+    [
+      '```json:config/settings.json',
+      '{"port": 8080}',
+      '```',
+      '```fs:delete:docs/roadmap.md',
+      '```',
+    ].join('\n'),
+    { source: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' } },
+  )
+  check('applyAgentOutput records create and delete ops', ops.length === 2 && ops[0]?.op === 'create' && ops[1]?.op === 'delete', JSON.stringify(ops))
+  check('config/settings.json exists in store', useFs.getState().readFile('config/settings.json')?.content === '{"port": 8080}')
+  check('docs/roadmap.md was deleted', !useFs.getState().exists('docs/roadmap.md'))
+
+  // Persistence & export bundle validation
+  check('persists under slade.fs.v1 in localStorage', (localStorage.getItem('slade.fs.v1') ?? '').includes('config/settings.json'))
+  const bundleCheck = exportBundleSchema.safeParse({
+    app: 'slade',
+    version: 1,
+    exportedAt: Date.now(),
+    files: useFs.getState().listFiles(),
+  })
+  check('exportBundleSchema validates files array', bundleCheck.success)
+
+  // Delete directory
+  const deletedCount = useFs.getState().deleteDirectory('src')
+  check('deleteDirectory removes all files under directory prefix', deletedCount === 1 && !useFs.getState().exists('src/utils/math.ts'))
+  useFs.getState().clearAll()
+}
+
+async function testAgentLocalFsIntegration() {
+  console.log('agent mode ↔ local file system:')
+  useFs.getState().clearAll()
+
+  // Seed an existing file in the local file system before starting the agent run.
+  useFs.getState().writeFile('src/counter.ts', 'export let count = 0\n', {
+    source: { origin: 'user' },
+  })
+
+  const systemPromptsSeen: { call: number; systemPrompt: string }[] = []
+  let calls = 0
+
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      calls++
+      const messages = (body.messages as { role: string; content: string }[]) ?? []
+      const sys = messages.find((m) => m.role === 'system')?.content ?? ''
+      systemPromptsSeen.push({ call: calls, systemPrompt: sys })
+
+      if (calls === 1) {
+        return {
+          status: 200,
+          sse: orTextStream(
+            JSON.stringify({
+              mode: 'plan',
+              reply: 'Two sequential steps: update src/counter.ts, then add unit tests in src/counter.test.ts.',
+              subtasks: [
+                {
+                  title: 'Implement increment/decrement in src/counter.ts',
+                  model: '',
+                  prompt: 'Update src/counter.ts to export increment() and decrement() functions.',
+                },
+                {
+                  title: 'Write unit tests in src/counter.test.ts',
+                  model: '',
+                  prompt: 'Write unit tests for src/counter.ts in src/counter.test.ts.',
+                },
+              ],
+            }),
+          ),
+        }
+      }
+      if (calls === 2) {
+        return {
+          status: 200,
+          sse: orTextStream(
+            'Updated counter module:\n\n```ts:src/counter.ts\nexport let count = 0\nexport const increment = () => ++count\nexport const decrement = () => --count\n```',
+          ),
+        }
+      }
+      if (calls === 3) {
+        return {
+          status: 200,
+          sse: orTextStream(
+            'Added unit tests:\n\n```ts:src/counter.test.ts\nimport { increment, decrement } from "./counter"\nincrement()\ndecrement()\n```',
+          ),
+        }
+      }
+      return {
+        status: 200,
+        sse: orTextStream(
+          'All done — updated `src/counter.ts` (v2) and created `src/counter.test.ts` (v1), plus `README.md`.\n\n```md:README.md\n# Counter\nRun tests for counter.\n```',
+        ),
+      }
+    },
+  })
+
+  const settings = useSettings.getState()
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+  settings.setAgent({ maxParallel: 1, useLocalFs: true })
+
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    freshAgentConversation()
+    await sendUserMessage('Add increment/decrement to src/counter.ts and write tests', [])
+
+    const msg = lastAssistant()
+    const run = msg.agent!
+    check('agent run completed', msg.status === 'complete' && run?.phase === 'complete', `${msg.status}/${run?.phase}`)
+    check(
+      'planner received existing local FS files in systemPrompt',
+      Boolean(systemPromptsSeen[0]?.systemPrompt.includes('src/counter.ts') && systemPromptsSeen[0]?.systemPrompt.includes('export let count = 0')),
+    )
+    check(
+      'step 1 worker received initial src/counter.ts in systemPrompt',
+      Boolean(systemPromptsSeen[1]?.systemPrompt.includes('src/counter.ts')),
+    )
+    check(
+      'step 2 worker immediately saw step 1 updated src/counter.ts (v2) in systemPrompt',
+      Boolean(systemPromptsSeen[2]?.systemPrompt.includes('increment = () => ++count')),
+    )
+    check(
+      'synthesizer saw both src/counter.ts (v2) and src/counter.test.ts (v1) in systemPrompt',
+      Boolean(
+        systemPromptsSeen[3]?.systemPrompt.includes('src/counter.ts') &&
+          systemPromptsSeen[3]?.systemPrompt.includes('src/counter.test.ts'),
+      ),
+    )
+    check(
+      'all worker and synthesizer files are persisted in useFs with expected versions',
+      useFs.getState().readFile('src/counter.ts')?.version === 2 &&
+        useFs.getState().readFile('src/counter.test.ts')?.version === 1 &&
+        useFs.getState().readFile('README.md')?.version === 1,
+      JSON.stringify(useFs.getState().listFiles().map((f) => `${f.path}@v${f.version}`)),
+    )
+    check(
+      'agent run recorded fsOps on steps and run summary',
+      Boolean(run.fsOps && run.fsOps.length === 3) &&
+        run.steps[0]?.fsOps?.[0]?.op === 'update' &&
+        run.steps[1]?.fsOps?.[0]?.op === 'create',
+      JSON.stringify(run.fsOps),
+    )
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+    settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+    settings.setAgent({ maxParallel: 2, useLocalFs: true })
+    useHealth.getState().markHealthy('mock-pro')
+    useHealth.getState().markHealthy('mock-lite')
+    useFs.getState().clearAll()
+    fake.close()
+  }
+}
+
+function testLocalFsUiRenders() {
+  console.log('local file system ui renders:')
+
+  const uiInit = useUI.getInitialState() as unknown as Record<string, unknown>
+  const fsInit = useFs.getInitialState() as unknown as {
+    files: Record<string, FsFile>
+    selectedPath: string | null
+    filter: string
+  }
+  const artifactInit = useArtifacts.getInitialState() as unknown as { byId: Record<string, Artifact> }
+  const origFiles = fsInit.files
+  const origSelected = fsInit.selectedPath
+  const origFilter = fsInit.filter
+  const origArtifacts = artifactInit.byId
+
+  const sampleFile: FsFile = {
+    path: 'src/agent/runner.ts',
+    name: 'runner.ts',
+    mime: 'text/typescript',
+    kind: 'code',
+    size: 48,
+    encoding: 'utf8',
+    content: 'export function runAgent() {\n  return "ok"\n}\n',
+    createdAt: Date.now() - 5000,
+    updatedAt: Date.now(),
+    version: 2,
+    createdBy: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' },
+    updatedBy: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' },
+  }
+
+  try {
+    uiInit.filesOpen = false
+    const closed = renderToString(createElement(FilesPanel))
+    check('files drawer renders nothing while closed', closed === '', closed.slice(0, 60))
+
+    uiInit.filesOpen = true
+    fsInit.files = {}
+    fsInit.selectedPath = null
+    fsInit.filter = ''
+    const empty = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
+    check('files drawer renders empty state when no files exist', empty.includes('No files stored yet') && empty.includes('Local Files'), empty.slice(0, 160))
+
+    fsInit.files = { [sampleFile.path]: sampleFile }
+    fsInit.selectedPath = sampleFile.path
+    const populated = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
+    check('files drawer renders directory tree and file row', populated.includes('src/') && populated.includes('runner.ts'), populated.slice(0, 240))
+    check('files drawer shows file count and version badge', populated.includes('1 file') && populated.includes('v2'))
+    check('files drawer renders selected file preview and provenance', populated.includes('src/agent/runner.ts') && populated.includes('Simulacron Pro') && populated.includes('runAgent'))
+
+    fsInit.filter = 'runAgent'
+    const searched = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
+    check('files drawer renders content search hits with line numbers', searched.includes(':1') && searched.includes('runAgent'), searched.slice(0, 300))
+    fsInit.filter = ''
+
+    // ArtifactCard with localPath
+    const art: Artifact = {
+      id: 'art_local_1',
+      name: 'runner.ts',
+      mime: 'text/typescript',
+      size: sampleFile.size,
+      kind: 'code',
+      createdAt: Date.now(),
+      provenance: sampleFile.updatedBy,
+      localPath: sampleFile.path,
+      text: sampleFile.content,
+    }
+    artifactInit.byId = { ...origArtifacts, [art.id]: art }
+    const cardHtml = renderToString(createElement(ArtifactCard, { artifactId: art.id })).replace(/<!-- -->/g, '')
+    check('artifact card displays localPath and Open in Files button', cardHtml.includes('src/agent/runner.ts') && cardHtml.includes('Open in Files'), cardHtml.slice(0, 300))
+
+    // MessageBubble with agent.fsOps
+    const msgWithFsOps = {
+      id: 'msg_fs_ops',
+      role: 'assistant' as const,
+      conversationId: 'conv_fs_ops',
+      content: 'All files have been written.',
+      createdAt: Date.now(),
+      status: 'complete' as const,
+      agent: {
+        phase: 'complete' as const,
+        orchestratorId: 'sim-pro',
+        strategy: 'Write the runner module.',
+        steps: [
+          {
+            id: 'step_1',
+            title: 'Create runner.ts',
+            prompt: 'Write src/agent/runner.ts',
+            modelId: 'sim-pro',
+            modelLabel: 'Simulacron Pro',
+            status: 'complete' as const,
+            result: '```ts:src/agent/runner.ts\nexport function runAgent() {}\n```',
+            fsOps: [{ op: 'update' as const, path: 'src/agent/runner.ts', size: 48, version: 2, at: Date.now() }],
+          },
+        ],
+        fsOps: [{ op: 'update' as const, path: 'src/agent/runner.ts', size: 48, version: 2, at: Date.now() }],
+      },
+    }
+    const bubbleHtml = renderToString(createElement(MessageBubble, { message: msgWithFsOps })).replace(/<!-- -->/g, '')
+    check('agent plan card renders fsOps summary strip and file chip', bubbleHtml.includes('updated src/agent/runner.ts') && bubbleHtml.includes('src/agent/runner.ts'), bubbleHtml.slice(0, 350))
+  } finally {
+    uiInit.filesOpen = false
+    fsInit.files = origFiles
+    fsInit.selectedPath = origSelected
+    fsInit.filter = origFilter
+    artifactInit.byId = origArtifacts
+  }
+}
+
+async function testGitLocalFsReadWriteAcross() {
+  console.log('git ↔ local file system read/write across:')
+  useFs.getState().clearAll()
+
+  const token = 'ghp_' + 'e'.repeat(24)
+  const initialMathTs = 'export const add = (a: number, b: number) => a + b\n'
+  const initialLegacyTs = 'export const legacy = true\n'
+  let postedTree: { base_tree?: string; tree?: { path: string; mode: string; type: string; sha?: string | null; content?: string }[] } | undefined
+  let postedCommit: { message?: string; tree?: string; parents?: string[] } | undefined
+  let patchedRefSha: string | undefined
+
+  const fakeGh = await startFakeGitHub({
+    '/repos/octo/demo': () => ({
+      status: 200,
+      json: {
+        id: 1,
+        name: 'demo',
+        full_name: 'octo/demo',
+        owner: { login: 'octo', avatar_url: '' },
+        private: false,
+        fork: false,
+        archived: false,
+        description: 'demo',
+        default_branch: 'main',
+        html_url: 'https://github.com/octo/demo',
+        pushed_at: null,
+        updated_at: null,
+        language: 'TypeScript',
+        stargazers_count: 1,
+      },
+    }),
+    '/repos/octo/demo/branches': () => ({
+      status: 200,
+      json: [{ name: 'main', commit: { sha: 'head_sha_1' } }],
+    }),
+    '/repos/octo/demo/git/trees/main': () => ({
+      status: 200,
+      json: {
+        truncated: false,
+        tree: [
+          { path: 'src/math.ts', mode: '100644', type: 'blob', sha: 'sha_math_1', size: initialMathTs.length },
+          { path: 'src/legacy.ts', mode: '100644', type: 'blob', sha: 'sha_leg_1', size: initialLegacyTs.length },
+        ],
+      },
+    }),
+    '/repos/octo/demo/contents/src/math.ts': () => ({
+      status: 200,
+      json: {
+        type: 'file',
+        name: 'math.ts',
+        path: 'src/math.ts',
+        sha: 'sha_math_1',
+        size: initialMathTs.length,
+        encoding: 'base64',
+        content: Buffer.from(initialMathTs).toString('base64'),
+      },
+    }),
+    '/repos/octo/demo/contents/src/legacy.ts': () => ({
+      status: 200,
+      json: {
+        type: 'file',
+        name: 'legacy.ts',
+        path: 'src/legacy.ts',
+        sha: 'sha_leg_1',
+        size: initialLegacyTs.length,
+        encoding: 'base64',
+        content: Buffer.from(initialLegacyTs).toString('base64'),
+      },
+    }),
+    '/repos/octo/demo/git/ref/heads/main': () => ({
+      status: 200,
+      json: { object: { sha: 'head_sha_1' } },
+    }),
+    '/repos/octo/demo/git/refs/heads/main': (body) => {
+      patchedRefSha = String((body as { sha?: string }).sha ?? '')
+      return { status: 200, json: { object: { sha: patchedRefSha } } }
+    },
+    '/repos/octo/demo/git/commits/head_sha_1': () => ({
+      status: 200,
+      json: { sha: 'head_sha_1', tree: { sha: 'base_tree_sha_1' } },
+    }),
+    '/repos/octo/demo/git/trees': (body) => {
+      postedTree = body as typeof postedTree
+      return { status: 201, json: { sha: 'new_tree_sha_2' } }
+    },
+    '/repos/octo/demo/git/commits': (body) => {
+      postedCommit = body as typeof postedCommit
+      return {
+        status: 201,
+        json: { sha: 'new_commit_sha_2', html_url: 'https://github.com/octo/demo/commit/new_commit_sha_2' },
+      }
+    },
+  })
+
+  let agentCalls = 0
+  const agentSysPrompts: string[] = []
+  const fakeProvider = await startFakeProvider({
+    '/v1beta/chat/completions': (body) => {
+      agentCalls++
+      const messages = (body.messages as { role: string; content: string }[]) ?? []
+      const sys = messages.find((m) => m.role === 'system')?.content ?? ''
+      agentSysPrompts.push(sys)
+      if (agentCalls === 1) {
+        return {
+          status: 200,
+          sse: orTextStream(
+            JSON.stringify({
+              mode: 'plan',
+              reply: 'Update src/math.ts and remove src/legacy.ts.',
+              subtasks: [
+                {
+                  title: 'Add multiply to src/math.ts and delete src/legacy.ts',
+                  model: '',
+                  prompt: 'Add multiply(a, b) to src/math.ts and remove src/legacy.ts.',
+                },
+              ],
+            }),
+          ),
+        }
+      }
+      if (agentCalls === 2) {
+        return {
+          status: 200,
+          sse: orTextStream(
+            'Updated `src/math.ts`, added `src/math.test.ts`, and removed `src/legacy.ts`:\n\n```ts:src/math.ts\nexport const add = (a: number, b: number) => a + b\nexport const multiply = (a: number, b: number) => a * b\n```\n\n```ts:src/math.test.ts\nimport { add, multiply } from "./math"\nconsole.log(add(2, 3), multiply(2, 3))\n```\n\n[FS:DELETE src/legacy.ts]',
+          ),
+        }
+      }
+      return {
+        status: 200,
+        sse: orTextStream('Completed updates across `src/math.ts`, `src/math.test.ts`, and deleted `src/legacy.ts`.'),
+      }
+    },
+  })
+
+  const realFetch = globalThis.fetch
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('https://api.github.com')) {
+      return realFetch(url.replace('https://api.github.com', fakeGh.base), init)
+    }
+    return realFetch(url, init)
+  }) as typeof fetch
+
+  const settings = useSettings.getState()
+  settings.setProvider('openrouter', { apiKey: 'sk-or-fake-key' })
+  settings.addModel(openrouterModel(fakeProvider.base))
+  settings.setModel('mock-pro', { enabled: false })
+  settings.setModel('mock-lite', { enabled: false })
+  settings.pin('openrouter-test')
+  settings.setAgent({ maxParallel: 1, useLocalFs: true })
+
+  try {
+    useGitHub.setState({
+      token,
+      login: 'octo',
+      authStatus: 'authorized',
+      scopes: ['repo'],
+      repos: [],
+      tree: undefined,
+      preview: undefined,
+    })
+
+    const opened = await useGitHub.getState().openRepo('octo/demo', 'main')
+    check('openRepo loads octo/demo@main', opened === true && useGitHub.getState().tree?.entries.length === 2)
+
+    // 1. Pull single file from GitHub into Local FS
+    const pulledLegacy = await useGitHub.getState().pullFileToFs('src/legacy.ts', { silent: true })
+    check(
+      'pullFileToFs stores file in useFs with remote metadata and dirty=false',
+      pulledLegacy?.content === initialLegacyTs &&
+        pulledLegacy?.remote?.repo === 'octo/demo' &&
+        pulledLegacy?.remote?.ref === 'main' &&
+        pulledLegacy?.dirty === false,
+      JSON.stringify(pulledLegacy),
+    )
+
+    // 2. Run an agent turn mentioning src/math.ts (which is in the GitHub tree but not yet in useFs!)
+    useHealth.getState().markHealthy('openrouter-test')
+    freshAgentConversation()
+    await sendUserMessage('Please add multiply to src/math.ts and delete src/legacy.ts', [])
+
+    check(
+      'agent automatically pulled mentioned repo file src/math.ts from GitHub before planning',
+      Boolean(
+        agentSysPrompts[0]?.includes('src/math.ts') &&
+          agentSysPrompts[0]?.includes('export const add') &&
+          agentSysPrompts[0]?.includes('CONNECTED GITHUB REPOSITORY (octo/demo@main'),
+      ),
+    )
+
+    const mathAfterAgent = useFs.getState().readFile('src/math.ts')
+    const testAfterAgent = useFs.getState().readFile('src/math.test.ts')
+    check(
+      'agent modified src/math.ts in useFs, preserving remote provenance and marking dirty=true',
+      Boolean(
+        mathAfterAgent?.content.includes('multiply') &&
+          mathAfterAgent?.remote?.repo === 'octo/demo' &&
+          mathAfterAgent?.dirty === true,
+      ),
+      JSON.stringify(mathAfterAgent),
+    )
+    check(
+      'agent created new file src/math.test.ts in useFs with dirty=true',
+      Boolean(testAfterAgent?.content.includes('multiply(2, 3)') && testAfterAgent?.dirty === true),
+    )
+    check(
+      'agent deleted src/legacy.ts in useFs and recorded it in deletedRemotes for Git commit',
+      useFs.getState().readFile('src/legacy.ts') === undefined &&
+        useFs.getState().deletedRemotes['src/legacy.ts']?.repo === 'octo/demo',
+      JSON.stringify(useFs.getState().deletedRemotes),
+    )
+
+    // 3. Commit local FS changes (modified src/math.ts, new src/math.test.ts, deleted src/legacy.ts) to GitHub!
+    const commitRes = await useGitHub.getState().commitFsToGitHub({
+      message: 'Add multiply, unit tests, and remove legacy module',
+    })
+    check(
+      'commitFsToGitHub succeeds and returns commit SHA and URL',
+      commitRes?.commitSha === 'new_commit_sha_2' && commitRes?.htmlUrl.includes('new_commit_sha_2'),
+      JSON.stringify(commitRes),
+    )
+    check(
+      'Git Data tree payload included updated src/math.ts, created src/math.test.ts, and deleted src/legacy.ts (sha: null)',
+      Boolean(
+        postedTree?.base_tree === 'base_tree_sha_1' &&
+          postedTree?.tree?.some((e) => e.path === 'src/math.ts' && e.content?.includes('multiply')) &&
+          postedTree?.tree?.some((e) => e.path === 'src/math.test.ts' && e.content?.includes('multiply(2, 3)')) &&
+          postedTree?.tree?.some((e) => e.path === 'src/legacy.ts' && e.sha === null),
+      ),
+      JSON.stringify(postedTree),
+    )
+    check(
+      'Git commit referenced base head SHA and updated branch ref',
+      postedCommit?.parents?.[0] === 'head_sha_1' && patchedRefSha === 'new_commit_sha_2',
+      JSON.stringify({ postedCommit, patchedRefSha }),
+    )
+    check(
+      'after commitFsToGitHub, local files are marked dirty=false with remote metadata and deletedRemotes is cleared',
+      useFs.getState().readFile('src/math.ts')?.dirty === false &&
+        useFs.getState().readFile('src/math.test.ts')?.dirty === false &&
+        useFs.getState().readFile('src/math.test.ts')?.remote?.repo === 'octo/demo' &&
+        Object.keys(useFs.getState().deletedRemotes).length === 0,
+    )
+  } finally {
+    globalThis.fetch = realFetch
+    settings.removeModel('openrouter-test')
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+    settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+    settings.setAgent({ maxParallel: 2, useLocalFs: true })
+    useHealth.getState().markHealthy('mock-pro')
+    useHealth.getState().markHealthy('mock-lite')
+    useFs.getState().clearAll()
+    useGitHub.getState().signOut()
+    fakeGh.close()
+    fakeProvider.close()
+  }
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -2324,6 +2966,11 @@ async function main() {
   testGitHubUiRenders()
   testModelPicker()
   testProviderManagement()
+  testLocalFsPrimitives()
+  testLocalFsStore()
+  await testAgentLocalFsIntegration()
+  testLocalFsUiRenders()
+  await testGitLocalFsReadWriteAcross()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

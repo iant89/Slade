@@ -9,6 +9,7 @@ import { ChatView } from './components/chat/ChatView'
 import { Composer } from './components/chat/Composer'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { GitHubPanel } from './components/github/GitHubPanel'
+import { FilesPanel } from './components/fs/FilesPanel'
 import { PublishDialog } from './components/github/PublishDialog'
 import { Lightbox } from './components/artifacts/Lightbox'
 import { Toasts } from './components/common/Toasts'
@@ -75,10 +76,17 @@ function useHotkeys() {
         e.preventDefault()
         useUI.getState().toggleGithub()
       }
-      // Esc closes the GitHub drawer unless something modal has focus.
-      if (e.key === 'Escape' && useUI.getState().githubOpen && !useUI.getState().publishSource) {
+      if (meta && e.key.toLowerCase() === 'e') {
+        e.preventDefault()
+        useUI.getState().toggleFiles()
+      }
+      // Esc closes the GitHub or Files drawer unless something modal has focus.
+      if (e.key === 'Escape' && (useUI.getState().githubOpen || useUI.getState().filesOpen) && !useUI.getState().publishSource) {
         const tag = (e.target as HTMLElement | null)?.tagName
-        if (tag !== 'INPUT' && tag !== 'TEXTAREA') useUI.getState().closeGithub()
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          useUI.getState().closeGithub()
+          useUI.getState().closeFiles()
+        }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -125,6 +133,7 @@ export default function App() {
         <Composer />
       </main>
       <ModelRail />
+      <FilesPanel />
       <GitHubPanel />
       <SettingsModal />
       <PublishDialog />

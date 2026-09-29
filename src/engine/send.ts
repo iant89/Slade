@@ -9,7 +9,7 @@ import { buildTurns } from './turns'
 import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates, skippedModels } from './strategy'
 import { escalateTokens } from './completion'
 import { finishRun, getRun, registerRun, stopGeneration, isGenerating, type ActiveRun } from './active'
-import { runAgentTurn } from './agent'
+import { applyAgentOutputWithGit, prepareAgentWorkspaceContext, runAgentTurn } from './agent'
 import { uid } from '../lib/id'
 import { announceResponse, currentAnnouncement, setAnnouncer } from './announce'
 
@@ -166,9 +166,21 @@ async function runChain(
             detail: `The answer was cut off at ${outcome.maxTokensUsed.toLocaleString('en-US')} tokens — raise Max output tokens in Settings → Defaults for the rest of it.`,
           })
         }
+        const finalModelId = lastOf(state.chain)
+        if ((settings.agent.useLocalFs ?? true) && finalModelId && state.content) {
+          await applyAgentOutputWithGit(state.content, {
+            source: {
+              origin: 'model',
+              modelId: finalModelId,
+              modelLabel: modelLabel(settings.models, finalModelId),
+            },
+            conversationId,
+            messageId: assistantMessageId,
+          })
+        }
         finalize(assistantMessageId, {
           status: 'complete',
-          modelId: lastOf(state.chain),
+          modelId: finalModelId,
           chain: [...state.chain],
           failedChain: [...state.failedChain],
           handoffs: [...state.handoffs],
@@ -515,11 +527,17 @@ async function attemptOnce(args: {
   }
 
   arm('first-token', settings.defaults.firstTokenTimeoutMs)
+  const useLocalFs = settings.agent.useLocalFs ?? true
+  const lastUserText = [...turns].reverse().find((t) => t.role === 'user')?.text ?? ''
+  const fsBlock = useLocalFs ? await prepareAgentWorkspaceContext(lastUserText) : ''
+  const systemPrompt = fsBlock
+    ? `${params.systemPrompt}\n\nTo create or update files in Slade's local file system, emit fenced blocks tagged with the target path (\`\`\`lang:path/to/file.ext).\n\n${fsBlock}`
+    : params.systemPrompt
   try {
     await adapter.run({
       model,
       turns,
-      systemPrompt: params.systemPrompt,
+      systemPrompt,
       temperature: params.temperature,
       maxTokens,
       topP: params.topP,

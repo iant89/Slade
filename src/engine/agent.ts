@@ -12,11 +12,14 @@
  * tracking and stop/cancel behave exactly like the plain chain.
  */
 
-import type { AgentRun, AgentStep, AttemptFailure, ChatTurn, Message, ModelDef, Settings, Usage } from '../types'
+import type { AgentRun, AgentStep, AttemptFailure, ChatTurn, FsOpRecord, Message, ModelDef, Settings, Usage } from '../types'
 import { z } from 'zod'
 import { useChat } from '../store/chat'
 import { useSettings } from '../store/settings'
 import { useUI } from '../store/ui'
+import { useFs } from '../store/fs'
+import { useGitHub } from '../store/github'
+import { extractFsActions, formatFsContextForAgent, formatGitHubTreeForAgent } from '../lib/fs'
 import { buildTurns } from './turns'
 import { modelHasKey, newAssistantPlaceholder } from './strategy'
 import { announceResponse } from './announce'
@@ -39,7 +42,7 @@ import { CODING_AGENT_ORCHESTRATOR_PROMPT } from './orchestratorPrompt'
 export const PLAN_MARKER = '[SLADE:ORCHESTRATOR:PLAN]'
 export const SYNTH_MARKER = '[SLADE:ORCHESTRATOR:SYNTH]'
 
-function planSystemPrompt(settings: Settings, maxSteps: number): string {
+function planSystemPrompt(settings: Settings, maxSteps: number, fsContext = ''): string {
   const workers = settings.models.filter((m) => m.enabled && modelHasKey(settings, m))
   const roster = workers
     .map((m) => {
@@ -55,9 +58,14 @@ function planSystemPrompt(settings: Settings, maxSteps: number): string {
 
 SLADE AGENT-MODE PLANNING CONTRACT
 
-The coding-agent prompt above is your governing role and quality standard. This call is the planning stage of Slade's orchestrator. Slade supplies the conversation and available worker roster, then dispatches the subtasks you return. You do not have direct filesystem, shell, git, test-runner, or repository-editing tools in this runtime. Treat only user-provided or attached repository context as inspected; worker models return suggestions and deliverables, not verified changes. Never claim that you directly changed files, ran commands or tests, or inspected local Git state.
+The coding-agent prompt above is your governing role and quality standard. This call is the planning stage of Slade's orchestrator. Slade supplies the conversation, the local file system workspace, and the available worker roster, then dispatches the subtasks you return. You do not have shell, git, or test-runner tools in this runtime, so never claim that you ran commands or tests or inspected local Git state.
 
-If a task is simple and can be answered responsibly without delegation, or if essential information is missing and must be requested, return an answer. For substantial work, create a small, actionable plan and delegate only the work that can be done with the context available. Each worker receives only its own prompt, so give it the relevant context and use explicit ROLE, OBJECTIVE, CONTEXT, ALLOWED FILES, PROTECTED FILES, REQUIREMENTS, CONSTRAINTS, ACCEPTANCE CRITERIA, TEST REQUIREMENTS, and DELIVERABLE fields. Do not claim a worker can modify the user's repository or run tools.
+Slade mounts a persistent LOCAL FILE SYSTEM shared across the orchestrator, all worker steps, and future turns, and bridged directly to the connected GitHub repository when one is open:
+- Workers (and you) can create or overwrite files in the local file system by emitting fenced blocks tagged with the target file path: \`\`\`<lang>:<path/to/file.ext> (e.g. \`\`\`typescript:src/index.ts or \`\`\`csv:data/report.csv).
+- Workers can pull a file from the connected GitHub repository into the local file system with \`\`\`fs:pull:<path/to/file.ext>, append to a file with \`\`\`fs:append:<path/to/file.ext>, move/rename with \`\`\`fs:move:<old/path> -> <new/path>, or delete with \`\`\`fs:delete:<path/to/file.ext>.
+- Files written by completed steps are stored immediately in the local file system, exposed to subsequent worker steps and the synthesis pass, and can be committed back to GitHub.
+
+If a task is simple and can be answered responsibly without delegation, or if essential information is missing and must be requested, return an answer. For substantial work, create a small, actionable plan and delegate only the work that can be done with the context available. Each worker receives its own prompt plus the current local file system workspace, so give it the relevant task context and use explicit ROLE, OBJECTIVE, CONTEXT, ALLOWED FILES, PROTECTED FILES, REQUIREMENTS, CONSTRAINTS, ACCEPTANCE CRITERIA, TEST REQUIREMENTS, and DELIVERABLE fields.
 
 ${PLAN_MARKER}
 
@@ -71,22 +79,22 @@ To delegate a substantial task:
 
 Planning rules:
 - At most ${maxSteps} subtasks; fewer is better when the task is small.
-- Each subtask prompt must be fully self-contained: the worker sees NOTHING else from this conversation. Repeat every detail it needs.
+- Each subtask prompt must be fully self-contained: the worker sees its prompt and the local file system workspace, but nothing else from this conversation.
 - Decompose by responsibility and order dependent subtasks so later work builds on earlier results.
-- Parallel subtasks must not depend on one another or assume shared repository modifications; Slade workers do not share files or worktrees.
+- Parallel subtasks must not write to the same file paths concurrently.
 - When the task benefits from independent perspectives, use distinct available models when practical.
-- If files are involved, ask the worker to return complete, clearly named fenced file blocks. Treat these as proposed deliverables, not as files written to disk.
+- If files are involved, ask the worker to return complete, clearly named fenced file blocks (\`\`\`lang:path/to/file.ext) so Slade stores them in the local file system.
 
 Worker roster:
-${roster || '(no workers configured — answer directly)'}`
+${roster || '(no workers configured — answer directly)'}${fsContext ? `\n\n${fsContext}` : ''}`
 }
 
-function synthSystemPrompt(): string {
+function synthSystemPrompt(fsContext = ''): string {
   return `${CODING_AGENT_ORCHESTRATOR_PROMPT}
 
 SLADE AGENT-MODE FINAL SYNTHESIS CONTRACT
 
-This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. In this Slade runtime you do not have direct filesystem, shell, git, test-runner, or repository-editing tools. Do not claim that files were changed, tests/builds were run, or a repository diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
+This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. In this Slade runtime you have access to Slade's persistent local file system (where worker file blocks were stored), but you do not have shell, git, or test-runner tools. Do not claim that tests/builds were run or a Git checkout diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
 
 For a software-development task, provide a concise final report with these headings:
 
@@ -98,16 +106,96 @@ DOCUMENTATION
 REMAINING
 STATUS
 
-Describe proposed code/artifacts accurately (model-generated file blocks are not changes made to a checkout). Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. Preserve useful worker file blocks with their filename tags so Slade can render them as artifacts. If a worker failed or returned unusable output, say so and continue with the usable results.
+Describe files stored in the local file system accurately. Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. Preserve useful worker file blocks with their filename tags (\`\`\`lang:path/to/file.ext) so Slade renders them as artifacts and keeps the local file system up to date. If a worker failed or returned unusable output, say so and continue with the usable results.
 
-${SYNTH_MARKER}`
+${SYNTH_MARKER}${fsContext ? `\n\n${fsContext}` : ''}`
 }
 
-function workerSystemPrompt(): string {
+function workerSystemPrompt(fsContext = ''): string {
   return `You are a specialist worker model in Slade. An orchestrator delegated exactly one self-contained task to you.
 
 Complete ONLY that task. Return the deliverable directly in Markdown — no meta-commentary about being an AI, no restating the task.
-If the task involves a file (CSV, code, document), emit it in a fenced block tagged with a filename, e.g. \`\`\`csv:report.csv or \`\`\`typescript:main.ts.`
+Slade mounts a persistent local file system:
+- If the task involves creating or updating a file (CSV, code, document), emit it in a fenced block tagged with its relative path, e.g. \`\`\`csv:report.csv or \`\`\`typescript:src/main.ts. Slade automatically stores it in the local file system.
+- To pull a file from the connected GitHub repository into the local file system, use \`\`\`fs:pull:path/to/file.ext.
+- To append to an existing file, use \`\`\`fs:append:path/to/file.ext.
+- To move or rename a file, use \`\`\`fs:move:old/path.ext -> new/path.ext.
+- To delete a file, use \`\`\`fs:delete:path/to/file.ext.${fsContext ? `\n\n${fsContext}` : ''}`
+}
+
+export async function prepareAgentWorkspaceContext(queryHint: string): Promise<string> {
+  await useGitHub.getState().syncRepoFilesForPrompt(queryHint)
+  const fsBlock = formatFsContextForAgent(useFs.getState().listFiles(), { queryHint })
+  const gh = useGitHub.getState()
+  const ghBlock =
+    gh.activeRepo && gh.activeBranch && gh.tree
+      ? formatGitHubTreeForAgent(gh.activeRepo, gh.activeBranch, gh.tree.entries)
+      : ''
+  return [fsBlock, ghBlock].filter(Boolean).join('\n\n')
+}
+
+export async function applyAgentOutputWithGit(
+  markdown: string,
+  meta: {
+    source: { origin: 'model'; modelId: string; modelLabel: string }
+    conversationId?: string
+    messageId?: string
+  },
+): Promise<FsOpRecord[]> {
+  const pullOps: FsOpRecord[] = []
+  const actions = extractFsActions(markdown)
+  for (const action of actions) {
+    if (action.op === 'pull') {
+      const pulled = await useGitHub.getState().pullFileToFs(action.path, { silent: true })
+      if (pulled) {
+        pullOps.push({
+          op: 'pull',
+          path: pulled.path,
+          size: pulled.size,
+          version: pulled.version,
+          at: Date.now(),
+        })
+      }
+    }
+  }
+  const writeOps = useFs.getState().applyAgentOutput(markdown, meta)
+
+  // If a GitHub repo is open and an agent created/updated a file whose path
+  // matches a blob in that repo's tree, link its remote metadata as dirty so
+  // Git sync knows it modifies an upstream file.
+  const gh = useGitHub.getState()
+  if (gh.activeRepo && gh.activeBranch && gh.tree) {
+    const treeByPath = new Map(
+      gh.tree.entries.filter((e) => e.type === 'blob').map((e) => [e.path, e.sha]),
+    )
+    for (const op of writeOps) {
+      if (op.op === 'create' || op.op === 'update') {
+        const cur = useFs.getState().readFile(op.path)
+        if (cur && !cur.remote && treeByPath.has(op.path)) {
+          const sha = treeByPath.get(op.path)
+          useFs.setState((st) => ({
+            files: {
+              ...st.files,
+              [op.path]: {
+                ...cur,
+                remote: {
+                  kind: 'github',
+                  repo: gh.activeRepo!,
+                  ref: gh.activeBranch!,
+                  path: op.path,
+                  url: `https://github.com/${gh.activeRepo}/blob/${encodeURIComponent(gh.activeBranch!)}/${op.path}`,
+                  sha,
+                },
+                dirty: true,
+              },
+            },
+          }))
+        }
+      }
+    }
+  }
+
+  return [...pullOps, ...writeOps]
 }
 
 /* ------------------------------------------------------------------ */
@@ -277,6 +365,7 @@ export async function runAgentTurn(
   const collectAttempts = (rows: AttemptFailure[] | undefined) => {
     if (rows?.length) attemptsAcc.push(...rows)
   }
+  const useLocalFs = settings.agent.useLocalFs ?? true
 
   try {
     /* ---------------- planning ---------------- */
@@ -286,10 +375,11 @@ export async function runAgentTurn(
       { upToMessageId: userMessageId },
     )
     const planTurns: ChatTurn[] = [...historyTurns]
+    const planFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
     const planResult = await runCompletion({
       purpose: 'Planning',
       turns: planTurns,
-      systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps),
+      systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps, planFsContext),
       settings,
       candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
       // Every orchestrator call gets the step budget, not the chat default: a
@@ -323,7 +413,7 @@ export async function runAgentTurn(
             text: 'Your previous response was not the required JSON object. Respond again with ONLY the JSON object — no prose, no code fences.',
           },
         ],
-        systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps),
+        systemPrompt: planSystemPrompt(settings, settings.agent.maxSteps, planFsContext),
         settings,
         candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
         maxTokensFloor: settings.agent.stepMaxTokens,
@@ -338,6 +428,14 @@ export async function runAgentTurn(
     // The orchestrator answered directly — nothing to delegate.
     if (plannerReply?.mode === 'answer') {
       const answer = plannerReply.answer
+      const directLabel = modelLabel(settings.models, planResult.model.id)
+      const directFsOps = useLocalFs
+        ? await applyAgentOutputWithGit(answer, {
+            source: { origin: 'model', modelId: planResult.model.id, modelLabel: directLabel },
+            conversationId,
+            messageId: assistantMessageId,
+          })
+        : []
       finalize(assistantMessageId, {
         status: 'complete',
         content: answer,
@@ -351,9 +449,10 @@ export async function runAgentTurn(
           strategy: undefined,
           orchestratorModelId: planResult.model.id,
           finishedAt: Date.now(),
+          fsOps: directFsOps.length ? directFsOps : undefined,
         },
       })
-      announceResponse(`Response from ${modelLabel(settings.models, planResult.model.id)}.`)
+      announceResponse(`Response from ${directLabel}.`)
       return
     }
 
@@ -414,10 +513,11 @@ export async function runAgentTurn(
       }, 140)
 
       try {
+        const stepFsContext = useLocalFs ? await prepareAgentWorkspaceContext(step.prompt) : ''
         const result = await runCompletion({
           purpose: `Step “${step.title}”`,
           turns: [{ role: 'user', text: step.prompt }],
-          systemPrompt: workerSystemPrompt(),
+          systemPrompt: workerSystemPrompt(stepFsContext),
           settings,
           candidates: ordered,
           maxTokensFloor: settings.agent.stepMaxTokens,
@@ -429,11 +529,19 @@ export async function runAgentTurn(
         })
         collectAttempts(result.attempts)
         usageAcc.current = mergeUsage(usageAcc.current, result.usage)
+        const stepLabel = modelLabel(settings.models, result.model.id)
+        const stepFsOps = useLocalFs
+          ? await applyAgentOutputWithGit(result.text, {
+              source: { origin: 'model', modelId: result.model.id, modelLabel: stepLabel },
+              conversationId,
+              messageId: `step-${step.id}`,
+            })
+          : []
         patchStep(assistantMessageId, step.id, {
           status: 'complete',
           result: result.text,
           modelId: result.model.id,
-          modelLabel: modelLabel(settings.models, result.model.id),
+          modelLabel: stepLabel,
           failedChain: result.failedChain,
           attempts: result.attempts,
           elapsedMs: Math.round(performance.now() - startedAt),
@@ -441,6 +549,7 @@ export async function runAgentTurn(
           // half-finished file; the step card says so instead of letting the
           // truncation look like the worker's choice.
           truncated: result.truncated || undefined,
+          fsOps: stepFsOps.length ? stepFsOps : undefined,
         })
       } catch (err) {
         if (err instanceof ProviderError && err.failure === 'aborted') throw err
@@ -492,11 +601,13 @@ export async function runAgentTurn(
 
     let content = ''
     let synthTruncated = false
+    let synthModelId = orchestrator.id
+    const synthFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
     try {
       const synth = await runCompletion({
         purpose: 'Synthesis',
         turns: synthTurns,
-        systemPrompt: synthSystemPrompt(),
+        systemPrompt: synthSystemPrompt(synthFsContext),
         settings,
         candidates: [orchestrator, ...workerCandidates(settings, new Set([orchestrator.id]))],
         maxTokensFloor: settings.agent.stepMaxTokens,
@@ -509,6 +620,7 @@ export async function runAgentTurn(
       collectAttempts(synth.attempts)
       usageAcc.current = mergeUsage(usageAcc.current, synth.usage)
       content = synth.text
+      synthModelId = synth.model.id
       synthTruncated = Boolean(synth.truncated)
     } catch (err) {
       if (err instanceof ProviderError && err.failure === 'aborted') throw err
@@ -528,7 +640,24 @@ export async function runAgentTurn(
         .join('\n\n')
     }
 
+    const synthFsOps =
+      useLocalFs && content
+        ? await applyAgentOutputWithGit(content, {
+            source: {
+              origin: 'model',
+              modelId: synthModelId,
+              modelLabel: modelLabel(settings.models, synthModelId),
+            },
+            conversationId,
+            messageId: assistantMessageId,
+          })
+        : []
+
     const finalRunState = readRun(assistantMessageId)
+    const allFsOps: FsOpRecord[] = [
+      ...(finalRunState?.steps ?? []).flatMap((s) => s.fsOps ?? []),
+      ...synthFsOps,
+    ]
     const workerIds = [...new Set((finalRunState?.steps ?? []).map((s) => s.modelId))]
     const hadFailures = (finalRunState?.steps ?? []).some((s) => s.status === 'error')
     const cutOff = (finalRunState?.steps ?? []).filter((s) => s.truncated)
@@ -550,6 +679,7 @@ export async function runAgentTurn(
         phase: 'complete',
         note,
         finishedAt: Date.now(),
+        fsOps: allFsOps.length ? allFsOps : undefined,
       },
     })
     announceResponse(

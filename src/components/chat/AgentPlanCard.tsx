@@ -1,6 +1,10 @@
 import { useState } from 'react'
-import type { AgentRun, AgentStep } from '../../types'
+import type { AgentRun, AgentStep, FsOpRecord } from '../../types'
 import { useSettings } from '../../store/settings'
+import { useFs } from '../../store/fs'
+import { useGitHub } from '../../store/github'
+import { useUI } from '../../store/ui'
+import { formatFsOpSummary } from '../../lib/fs'
 import { Markdown } from './Markdown'
 import {
   IconAlert,
@@ -8,6 +12,8 @@ import {
   IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconFolder,
+  IconGitCommit,
   IconLoader,
 } from '../icons'
 
@@ -81,6 +87,76 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
           <IconAlert size={12} /> {run.error}
         </p>
       )}
+
+      {run.fsOps && run.fsOps.length > 0 && <FsOpsStrip ops={run.fsOps} />}
+    </div>
+  )
+}
+
+function FsOpsStrip({ ops }: { ops: FsOpRecord[] }) {
+  const activeRepo = useGitHub((s) => s.activeRepo)
+  const defaultRepo = useGitHub((s) => s.publishDefaults.repo)
+  const publishing = useGitHub((s) => s.publishing)
+
+  const openInFiles = (path: string) => {
+    useFs.getState().selectFile(path)
+    useUI.getState().openFiles()
+  }
+
+  // Deduplicate by final path so the strip lists each touched file once with its latest operation.
+  const byPath = new Map<string, FsOpRecord>()
+  for (const op of ops) byPath.set(op.path, op)
+  const items = Array.from(byPath.values())
+  const writablePaths = items.filter((o) => o.op === 'create' || o.op === 'update' || o.op === 'move').map((o) => o.path)
+  const targetRepo = activeRepo ?? defaultRepo
+
+  return (
+    <div className="agent-fs-strip" aria-label="Local file system operations">
+      <div className="gh-row" style={{ justifyContent: 'space-between' }}>
+        <span className="agent-fs-summary">
+          <IconFolder size={12} /> {formatFsOpSummary(ops)}
+        </span>
+        {writablePaths.length > 0 ? (
+          <button
+            className="btn ghost small"
+            disabled={publishing}
+            onClick={() => {
+              if (!targetRepo || !useGitHub.getState().token) {
+                useUI.getState().openFiles()
+                return
+              }
+              void useGitHub.getState().commitFsToGitHub({
+                paths: writablePaths,
+                repo: targetRepo,
+                message: `Apply agent changes (${writablePaths.length} file${writablePaths.length === 1 ? '' : 's'} via Slade)`,
+              })
+            }}
+            title={
+              targetRepo
+                ? `Commit ${writablePaths.length} file${writablePaths.length === 1 ? '' : 's'} to ${targetRepo}`
+                : 'Open Local Files to commit changes to GitHub'
+            }
+            type="button"
+          >
+            <IconGitCommit size={11} /> {targetRepo ? `Commit to ${targetRepo}` : 'Commit to GitHub'}
+          </button>
+        ) : null}
+      </div>
+      <div className="agent-fs-chips">
+        {items.map((op) => (
+          <button
+            key={`${op.op}:${op.path}`}
+            className={`agent-fs-chip op-${op.op}`}
+            onClick={() => openInFiles(op.path)}
+            title={`Open ${op.path} in local file system`}
+            type="button"
+          >
+            <span className="agent-fs-op">{op.op}</span>
+            <code>{op.path}</code>
+            {op.version != null && op.version > 1 ? <span className="fs-version-badge">v{op.version}</span> : null}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -118,6 +194,11 @@ function StepRow({
         <span className="agent-step-meta">
           {fellBackFrom.length > 0 && (
             <span className="agent-step-fallback">← {fellBackFrom.map(labelOf).join(', ')}</span>
+          )}
+          {step.fsOps && step.fsOps.length > 0 && (
+            <span className="agent-step-fs" title={step.fsOps.map((o) => `${o.op} ${o.path}`).join(', ')}>
+              <IconFolder size={11} /> {step.fsOps.length}
+            </span>
           )}
           <span className="agent-step-model">{model}</span>
           {step.truncated && step.status === 'complete' && (

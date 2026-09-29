@@ -85,11 +85,12 @@ orchestration, and everything is persisted with the message.
 - Simulators play along: with no API keys, agent mode is fully demoable — the
   built-in models produce plans, worker deliverables, and synthesis.
 
-For software-repository tasks, the orchestrator can use conversation history and files
-attached from GitHub as context, then return model-generated code/file artifacts. It does
-not have local filesystem, shell, Git, or test-runner access, and it cannot apply changes
-to a checkout or independently verify worker claims. Treat generated changes as proposals
-until you apply and test them in the target repository.
+For software-repository tasks, the orchestrator and worker models can use conversation
+history, files attached from GitHub, and Slade's persistent **Local File System**
+(`slade.fs.v1`) as workspace context, and any path-tagged file blocks they emit are
+automatically stored in Local Files. The runtime does not execute OS shell commands, Git
+checkouts, or test runners, so it cannot independently execute tests or builds against a
+local checkout.
 
 ### Configuring it (Settings → Agent)
 
@@ -100,6 +101,41 @@ until you apply and test them in the target repository.
   on purpose: a step is a whole deliverable ("build the app"), and reasoning models bill
   their thinking against the same cap. A ceiling costs nothing unless the tokens are used.
 - **Expand worker output** — completed steps show their full result by default.
+- **Store and read files in the local file system** — enabled by default; gives the
+  orchestrator and every worker model a persistent local file system (`slade.fs.v1`)
+  where they can create, update, append, move, and delete files across steps and turns.
+
+## Local file system (`Ctrl/Cmd + E` or `/files`)
+
+Slade includes a persistent **Local File System** (`src/lib/fs.ts`, `src/store/fs.ts`,
+`src/components/fs/FilesPanel.tsx`) stored in `localStorage` under `slade.fs.v1` and
+included in JSON backups (**Settings → Data**):
+
+- **Automatic agent workspace** — when **Store and read files in the local file system**
+  is enabled in **Settings → Agent**, the planner, every delegated worker step, the
+  synthesizer, and direct chat models receive a manifest and contents of stored files in
+  their workspace context.
+- **Structured file emission** — models and agents write to the local file system by
+  emitting fenced blocks tagged with a relative path:
+  - ```` ```ts:src/app.ts ```` or ```` ```fs:write:src/app.ts ```` — create or overwrite a file (incrementing its version)
+  - ```` ```fs:append:notes/changelog.md ```` — append to an existing file
+  - ```` ```fs:move:src/old.ts -> src/new.ts ```` — move or rename a file
+  - ```` ```fs:delete:tmp/scratch.txt ```` — delete a file
+  - ```` ```fs:pull:src/lib/util.ts ```` or `[FS:PULL src/lib/util.ts]` — pull a file from the connected GitHub repository into the local file system
+- **Two-way GitHub ↔ Local FS sync** — when a GitHub repository is open (`Ctrl/Cmd + G`),
+  agents see the repository tree alongside the local file system, automatically pull
+  mentioned repo files into `useFs` before planning/execution, track local modifications
+  and deletions (`dirty` / `synced` badges), and let you commit & push single or multiple
+  files (additions, modifications, and deletions) back to a GitHub branch in one atomic
+  Git Data API commit (`commitTree`).
+- **Cross-step visibility** — files written by earlier worker steps are immediately stored
+  and exposed to subsequent worker steps and the final synthesizer, and each step's file
+  operations (`create`, `update`, `append`, `move`, `delete`) appear as interactive chips
+  on the orchestrator plan card.
+- **Local Files drawer** — click the folder icon in the header (`Ctrl/Cmd + E` or `/files`)
+  to browse the directory tree, search paths and file contents with line numbers, create
+  or upload files, edit or rename files inline, attach files to the next prompt, download
+  them, or publish them to GitHub.
 
 
 ## The failover engine

@@ -2160,3 +2160,202 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 .settings-intro p { margin: 0 0 6px; font-size: 0.86em; line-height: 1.55; color: var(--text-muted); }
 .settings-intro p:last-child { margin-bottom: 0; }
 .settings-intro-hint { color: var(--text-faint) !important; }
+
+/* Local file system workspace & agent operations --------------------- */
+
+.fs-create-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--bg-panel);
+}
+
+.fs-version-badge {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-ink);
+  flex: none;
+}
+
+.fs-git-badge {
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 999px;
+  flex: none;
+}
+.fs-git-badge.synced {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+.fs-git-badge.dirty {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+
+.fs-git-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-panel);
+  font-size: 0.8em;
+}
+.fs-git-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fs-git-repo code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--text-muted);
+}
+
+.fs-search-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 8px 6px 26px;
+}
+
+.fs-search-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: var(--radius-s);
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+.fs-search-line:hover { border-color: var(--accent-dim); }
+.fs-line-num {
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  color: var(--text-faint);
+  flex: none;
+}
+.fs-search-line code {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fs-preview-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 0.74em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+}
+
+.fs-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+}
+.fs-editor-ta {
+  width: 100%;
+  resize: vertical;
+  min-height: 180px;
+  font-size: 0.8em;
+  line-height: 1.5;
+}
+.fs-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-step-fs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 0.9em;
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.agent-fs-strip {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-fs-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78em;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.agent-fs-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.agent-fs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.76em;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.agent-fs-chip:hover {
+  border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
+}
+.agent-fs-chip code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+.agent-fs-op {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: 700;
+  color: var(--accent-ink);
+}
+.agent-fs-chip.op-delete .agent-fs-op { color: var(--danger); }
+

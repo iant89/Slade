@@ -3,8 +3,34 @@ import { useCurrentConversation, useChat } from '../../store/chat'
 import { useSettings } from '../../store/settings'
 import { useHealth } from '../../store/health'
 import { useGitHub } from '../../store/github'
+import { useFs } from '../../store/fs'
 import { useUI } from '../../store/ui'
-import { IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
+import { IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
+
+/** Local file system workspace toggle — shows a dot when files are stored. */
+function FilesButton() {
+  const open = useUI((s) => s.filesOpen)
+  const toggleFiles = useUI((s) => s.toggleFiles)
+  const fileCount = useFs((s) => Object.keys(s.files).length)
+
+  return (
+    <button
+      className={`icon-btn gh-toggle fs-toggle${open ? ' active' : ''}`}
+      onClick={toggleFiles}
+      aria-pressed={open}
+      aria-label={open ? 'Close the local file system' : 'Open the local file system (Ctrl+E)'}
+      title={
+        fileCount > 0
+          ? `Local file system (Ctrl+E) — ${fileCount} file${fileCount === 1 ? '' : 's'} stored`
+          : 'Local file system (Ctrl+E)'
+      }
+      type="button"
+    >
+      <IconFolder size={16} />
+      {fileCount > 0 ? <span className="gh-toggle-dot" aria-hidden="true" /> : null}
+    </button>
+  )
+}
 
 /** GitHub workspace toggle — the dot means "connected". */
 function GitHubButton() {
@@ -86,6 +112,7 @@ export function Header() {
       </div>
       <div className="header-right">
         <HealthStrip />
+        <FilesButton />
         <GitHubButton />
         <button className="icon-btn only-mobile" onClick={toggleRail} aria-label="Toggle model chain panel" type="button">
           <IconPanelRight size={17} />
