@@ -116,7 +116,7 @@ import { GitHubPanel } from '../src/components/github/GitHubPanel'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
-import { AddModelForm } from '../src/components/settings/SettingsModal'
+import { AddModelForm, ProviderTokenManager } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
 import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
 import { DEFAULT_PROVIDERS } from '../src/providers/registry'
@@ -574,7 +574,7 @@ async function testAgentMode() {
  * test (and impossible for users to route through a proxy). It now honours
  * `model.baseURL`, so the whole failing path can be exercised offline.
  */
-type FakeRoute = (body: Record<string, unknown>) => { status: number; json?: unknown; sse?: string[] }
+type FakeRoute = (body: Record<string, unknown>, req: import('node:http').IncomingMessage) => { status: number; json?: unknown; sse?: string[] }
 
 async function startFakeProvider(routes: Record<string, FakeRoute>) {
   const seen: { url: string; headers: Record<string, unknown> }[] = []
@@ -600,7 +600,7 @@ async function startFakeProvider(routes: Record<string, FakeRoute>) {
       } catch {
         /* leave empty */
       }
-      const out = match[1](parsed)
+      const out = match[1](parsed, req)
       if (out.sse) {
         res.writeHead(out.status, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
         for (const chunk of out.sse) res.write(`data: ${chunk}\n\n`)
@@ -755,6 +755,98 @@ async function testOpenRouterFailover() {
     check('quota wall benches on a timed cooldown', h?.state === 'cooldown' && (h?.cooldownUntil ?? 0) > Date.now(), h?.state)
   } finally {
     settings.removeModel('openrouter-test')
+    fake.close()
+  }
+}
+
+async function testMultiTokenRotationAndCooldowns() {
+  console.log('multi-token rotation & per-token cooldowns:')
+  const keysReceived: string[] = []
+  const fake = await startFakeProvider({
+    '/v1beta/chat/completions': (_body, req) => {
+      const auth = (req.headers.authorization as string | undefined) ?? ''
+      const key = auth.replace(/^Bearer\s+/i, '').trim()
+      keysReceived.push(key)
+
+      // Token 1 returns 429 Rate Limit
+      if (key === 'sk-token-1') {
+        return {
+          status: 429,
+          json: { error: { message: 'Rate limit exceeded for token 1', type: 'rate_limit' } },
+        }
+      }
+      // Token 2 succeeds
+      if (key === 'sk-token-2') {
+        return {
+          status: 200,
+          sse: orTextStream('Response from token 2!'),
+        }
+      }
+      // Token 3 backup
+      return {
+        status: 200,
+        sse: orTextStream('Response from token 3!'),
+      }
+    },
+  })
+
+  const settings = useSettings.getState()
+  settings.setProvider('openrouter', {
+    apiKey: 'sk-token-1',
+    apiKeys: [
+      { id: 'tok-1', key: 'sk-token-1', label: 'Primary Key', enabled: true },
+      { id: 'tok-2', key: 'sk-token-2', label: 'Secondary Key', enabled: true },
+      { id: 'tok-3', key: 'sk-token-3', label: 'Backup Key', enabled: true },
+    ],
+  })
+  settings.addModel(openrouterModel(fake.base))
+  settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+  settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
+  settings.pin('openrouter-test')
+
+  try {
+    useHealth.getState().markHealthy('openrouter-test')
+    useHealth.getState().markTokenHealthy('tok-1')
+    useHealth.getState().markTokenHealthy('tok-2')
+    useHealth.getState().markTokenHealthy('tok-3')
+
+    // Turn 1: Tok 1 fails with 429, engine immediately rotates to Tok 2 on same model
+    useChat.getState().newConversation()
+    await sendUserMessage('test multi token failover', [])
+    const a1 = lastAssistant()
+    check('turn 1 completes with openrouter-test model', a1.status === 'complete' && a1.modelId === 'openrouter-test', `${a1.status} / ${a1.modelId}`)
+    check('turn 1 tried token 1 then token 2', keysReceived.length === 2 && keysReceived[0] === 'sk-token-1' && keysReceived[1] === 'sk-token-2', JSON.stringify(keysReceived))
+    check('turn 1 received expected content', a1.content.includes('Response from token 2!'), a1.content)
+
+    const tok1Health = useHealth.getState().byToken['tok-1']
+    const tok2Health = useHealth.getState().byToken['tok-2']
+    check('token 1 is on cooldown', tok1Health?.state === 'cooldown' && (tok1Health?.cooldownUntil ?? 0) > Date.now(), JSON.stringify(tok1Health))
+    check('token 2 is healthy', tok2Health?.state === 'available', JSON.stringify(tok2Health))
+
+    // Turn 2: Token 1 is on cooldown, so engine skips it and goes straight to Token 2
+    useChat.getState().newConversation()
+    keysReceived.length = 0
+    await sendUserMessage('second message', [])
+    const a2 = lastAssistant()
+    check('turn 2 completes with openrouter-test model', a2.status === 'complete' && a2.modelId === 'openrouter-test', `${a2.status} / ${a2.modelId}`)
+    check('turn 2 went straight to token 2 without attempting token 1', keysReceived.length === 1 && keysReceived[0] === 'sk-token-2', JSON.stringify(keysReceived))
+
+    // Turn 3: When all tokens for openrouter fail/cooldown, model-level failover kicks in
+    useHealth.getState().recordTokenFailure('tok-2', 'hard_quota', 'Token 2 quota exhausted')
+    useHealth.getState().recordTokenFailure('tok-3', 'hard_quota', 'Token 3 quota exhausted')
+
+    useChat.getState().newConversation()
+    keysReceived.length = 0
+    await sendUserMessage('all tokens down test', [])
+    const a3 = lastAssistant()
+    check('turn 3 fell back to next model in chain when all tokens cooling', a3.status === 'complete' && a3.modelId === 'mock-pro', `${a3.status} / ${a3.modelId}`)
+    check('turn 3 recorded openrouter-test in failedChain', (a3.failedChain ?? []).includes('openrouter-test'), JSON.stringify(a3.failedChain))
+  } finally {
+    settings.removeModel('openrouter-test')
+    settings.setProvider('openrouter', { apiKey: '', apiKeys: undefined })
+    settings.pin(undefined)
+    settings.setModel('mock-pro', { enabled: true, simulate: 'ok' })
+    settings.setModel('mock-lite', { enabled: true, simulate: 'ok' })
     fake.close()
   }
 }
@@ -2306,6 +2398,22 @@ function testProviderManagement() {
   check('add-provider dialog lists all supported providers', SUPPORTED_PROVIDERS.every((p) => picker.includes(p.label)), picker.slice(0, 120))
   check('the simulator row says no key is needed', picker.includes('no key needed'))
   check('each row offers where to get a key', picker.includes('Get a key'))
+
+  // SSR: ProviderTokenManager renders tokens list and cooldown badges
+  const sampleProv: ProviderDef = {
+    id: 'prov_multi_test',
+    kind: 'openai',
+    label: 'OpenAI Team',
+    apiKey: 'sk-primary-key',
+    apiKeys: [
+      { id: 't1', key: 'sk-primary-key', label: 'Primary Key', enabled: true },
+      { id: 't2', key: 'sk-backup-key', label: 'Backup Key', enabled: true },
+    ],
+  }
+  const tokenManagerHtml = renderToString(createElement(ProviderTokenManager, { provider: sampleProv })).replace(/<!-- -->/g, '')
+  check('token manager renders token count', tokenManagerHtml.includes('API Tokens (2)'), tokenManagerHtml.slice(0, 200))
+  check('token manager renders individual token labels', tokenManagerHtml.includes('Primary Key') && tokenManagerHtml.includes('Backup Key'), tokenManagerHtml.slice(0, 300))
+  check('token manager renders active badge', tokenManagerHtml.includes('Active'), tokenManagerHtml.slice(0, 300))
 }
 
 function testLocalFsPrimitives() {
@@ -2935,6 +3043,88 @@ async function testGitLocalFsReadWriteAcross() {
   }
 }
 
+function testInlineThoughtsRendering() {
+  console.log('inline expandable thoughts UI rendering:')
+  const settingsInit = useSettings.getInitialState() as unknown as { s: Settings }
+  const origSettings = settingsInit.s
+
+  const msgWithReasoning = {
+    id: 'msg_reasoning_1',
+    role: 'assistant' as const,
+    conversationId: 'conv_thoughts',
+    content: 'Here is the final answer.',
+    reasoning: 'First consider step A, then analyze edge cases in step B.',
+    createdAt: Date.now(),
+    status: 'complete' as const,
+    modelId: 'mock-pro',
+  }
+
+  // 1. Assistant message with reasoning renders .thought-block
+  const html = renderToString(createElement(MessageBubble, { message: msgWithReasoning })).replace(/<!-- -->/g, '')
+  check('thought block renders into assistant message', html.includes('thought-block') && html.includes('Thought process'), html.slice(0, 300))
+  check('thought block calculates word count badge', html.includes('11 words'), html.slice(0, 400))
+
+  // 1b. Streaming message renders open thought block with live content
+  const streamingMsg = {
+    ...msgWithReasoning,
+    status: 'streaming' as const,
+    content: '',
+  }
+  const streamHtml = renderToString(createElement(MessageBubble, { message: streamingMsg })).replace(/<!-- -->/g, '')
+  check('streaming message renders open thought body with reasoning text', streamHtml.includes('thought-block') && streamHtml.includes('streaming') && streamHtml.includes('First consider step A'), streamHtml.slice(0, 400))
+
+  // 2. Disabling showThoughts on the model suppresses the thought block
+  settingsInit.s = {
+    ...origSettings,
+    models: origSettings.models.map((m) => (m.id === 'mock-pro' ? { ...m, showThoughts: false } : m)),
+  }
+  const htmlDisabled = renderToString(createElement(MessageBubble, { message: msgWithReasoning })).replace(/<!-- -->/g, '')
+  check('disabled model showThoughts suppresses thought block', !htmlDisabled.includes('thought-block'), htmlDisabled.slice(0, 300))
+  settingsInit.s = origSettings
+
+  // 3. Agent plan card renders planning reasoning and worker step reasoning
+  const msgWithAgentThoughts = {
+    id: 'msg_agent_thoughts',
+    role: 'assistant' as const,
+    conversationId: 'conv_agent_thoughts',
+    content: 'All tasks completed successfully.',
+    createdAt: Date.now(),
+    status: 'complete' as const,
+    modelId: 'mock-pro',
+    agent: {
+      phase: 'complete' as const,
+      orchestratorModelId: 'mock-pro',
+      strategy: 'Divide into frontend and backend tasks',
+      planningReasoning: 'Decomposing task requirements into modular subcomponents',
+      steps: [
+        {
+          id: 'step_1',
+          title: 'Implement component',
+          prompt: 'Write component',
+          modelId: 'mock-pro',
+          modelLabel: 'Simulacron Pro',
+          status: 'complete' as const,
+          result: 'export function Widget() { return null }',
+          reasoning: 'Analyzing state requirements and rendering logic',
+        },
+      ],
+    },
+  }
+
+  // With expandStepResults enabled, the step body and its thought process block are expanded
+  settingsInit.s = {
+    ...origSettings,
+    agent: {
+      ...origSettings.agent,
+      expandStepResults: true,
+    },
+  }
+  const agentHtml = renderToString(createElement(MessageBubble, { message: msgWithAgentThoughts })).replace(/<!-- -->/g, '')
+  check('agent plan card renders planning reasoning block', agentHtml.includes('Planning reasoning') && agentHtml.includes('6 words'), agentHtml.slice(0, 500))
+  check('agent step renders worker thought process block', agentHtml.includes('Simulacron Pro thought process'), agentHtml.slice(0, 600))
+  settingsInit.s = origSettings
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -2945,6 +3135,7 @@ async function main() {
   await testFailover()
   await testChainVisibility()
   await testOpenRouterFailover()
+  await testMultiTokenRotationAndCooldowns()
   await testReasoningStreams()
   await testReasoningBudgetRetry()
   await testAgentReasoningBudget()
@@ -2971,6 +3162,7 @@ async function main() {
   await testAgentLocalFsIntegration()
   testLocalFsUiRenders()
   await testGitLocalFsReadWriteAcross()
+  testInlineThoughtsRendering()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

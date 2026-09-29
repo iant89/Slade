@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AgentSettings,
+  ApiTokenDef,
   AppearanceSettings,
   ArtifactSettings,
   DefaultsSettings,
@@ -10,8 +11,12 @@ import type {
 } from '../types'
 import { DEFAULT_MODELS, DEFAULT_PROVIDERS } from '../providers/registry'
 import { validateSettings } from '../lib/schemas'
-import { normalizeProviderDef } from '../lib/providerCatalog'
+import { normalizeProviderDef, providerTokens } from '../lib/providerCatalog'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
+import { uid } from '../lib/id'
+import { useHealth } from './health'
+
+export { providerTokens }
 
 export const DEFAULT_SETTINGS: Settings = {
   version: 1,
@@ -24,6 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
       'You are Slade, a dependable assistant routed across many models. Be accurate, concise, and format answers in Markdown.',
     stream: true,
     typingIndicator: true,
+    showThoughts: true,
     autoScroll: 'smooth',
     failoverStrategy: 'priority',
     requestTimeoutMs: 60_000,
@@ -103,7 +109,7 @@ export interface SettingsState {
   setArtifactsPrefs: (patch: Partial<ArtifactSettings>) => void
   setAgent: (patch: Partial<AgentSettings>) => void
   setAppearance: (patch: Partial<AppearanceSettings>) => void
-  /** Update an existing provider instance (key, base URL, label). */
+  /** Update an existing provider instance (key, base URL, label, apiKeys). */
   setProvider: (pid: string, patch: Partial<Omit<ProviderDef, 'id' | 'kind'>>) => void
   addProvider: (def: ProviderDef) => void
   /**
@@ -111,6 +117,12 @@ export interface SettingsState {
    * Returns the ids of the removed models (for health cleanup).
    */
   removeProvider: (pid: string) => string[]
+  /** Add a new API token to a provider connection's pool. */
+  addProviderToken: (pid: string, token: { key: string; label?: string; enabled?: boolean }) => ApiTokenDef | undefined
+  /** Remove an API token from a provider connection's pool. */
+  removeProviderToken: (pid: string, tokenId: string) => void
+  /** Toggle or update an API token in a provider connection's pool. */
+  updateProviderToken: (pid: string, tokenId: string, patch: Partial<ApiTokenDef>) => void
   pin: (modelId: string | undefined) => void
   replaceAll: (s: Settings) => void
   resetSettings: () => void
@@ -179,7 +191,87 @@ export const useSettings = create<SettingsState>((set, get) => ({
     const s = get().s
     // Only existing instances can be patched — adding one is addProvider's job.
     if (!s.providers.some((p) => p.id === pid)) return
-    const providers = s.providers.map((p) => (p.id === pid ? { ...p, ...patch } : p))
+    const providers = s.providers.map((p) => {
+      if (p.id !== pid) return p
+      const updated = { ...p, ...patch }
+      // If patch specified apiKey directly (without apiKeys), sync apiKeys to use the new key
+      if (patch.apiKey !== undefined && patch.apiKeys === undefined) {
+        const keyChanged = p.apiKey !== patch.apiKey
+        const tokId = keyChanged ? uid('tok') : p.apiKeys?.[0]?.id || `${pid}-primary`
+        updated.apiKeys = patch.apiKey.trim()
+          ? [{ id: tokId, key: patch.apiKey.trim(), label: 'Primary token', enabled: true }]
+          : undefined
+        useHealth.getState().markTokenHealthy(tokId)
+      } else if (patch.apiKeys !== undefined && patch.apiKey === undefined) {
+        updated.apiKey = patch.apiKeys[0]?.key || ''
+      }
+      return updated
+    })
+    const next = { ...s, providers }
+    persist(next)
+    set({ s: next })
+  },
+  addProviderToken: (pid, token) => {
+    const s = get().s
+    const provider = s.providers.find((p) => p.id === pid)
+    if (!provider) return undefined
+    const existing = providerTokens(provider)
+    const newToken: ApiTokenDef = {
+      id: uid('tok'),
+      key: token.key.trim(),
+      label: token.label?.trim() || `Token ${existing.length + 1}`,
+      enabled: token.enabled !== false,
+      createdAt: Date.now(),
+    }
+    const nextTokens = [...existing, newToken]
+    const providers = s.providers.map((p) =>
+      p.id === pid
+        ? {
+            ...p,
+            apiKey: nextTokens[0]?.key || p.apiKey,
+            apiKeys: nextTokens,
+          }
+        : p,
+    )
+    const next = { ...s, providers }
+    persist(next)
+    set({ s: next })
+    return newToken
+  },
+  removeProviderToken: (pid, tokenId) => {
+    const s = get().s
+    const provider = s.providers.find((p) => p.id === pid)
+    if (!provider) return
+    const existing = providerTokens(provider)
+    const nextTokens = existing.filter((t) => t.id !== tokenId)
+    const providers = s.providers.map((p) =>
+      p.id === pid
+        ? {
+            ...p,
+            apiKey: nextTokens[0]?.key || '',
+            apiKeys: nextTokens.length > 0 ? nextTokens : undefined,
+          }
+        : p,
+    )
+    const next = { ...s, providers }
+    persist(next)
+    set({ s: next })
+  },
+  updateProviderToken: (pid, tokenId, patch) => {
+    const s = get().s
+    const provider = s.providers.find((p) => p.id === pid)
+    if (!provider) return
+    const existing = providerTokens(provider)
+    const nextTokens = existing.map((t) => (t.id === tokenId ? { ...t, ...patch } : t))
+    const providers = s.providers.map((p) =>
+      p.id === pid
+        ? {
+            ...p,
+            apiKey: nextTokens[0]?.key || p.apiKey,
+            apiKeys: nextTokens,
+          }
+        : p,
+    )
     const next = { ...s, providers }
     persist(next)
     set({ s: next })
@@ -243,6 +335,15 @@ export function effectiveParams(s: Settings, modelId?: string): EffectiveParams 
     topP: s.defaults.topP,
     systemPrompt: model?.overrides?.systemPrompt ?? s.defaults.systemPrompt,
   }
+}
+
+/** Whether thinking / reasoning should be rendered for this model. */
+export function modelShowsThoughts(s: Settings, modelId?: string): boolean {
+  if (!modelId) return s.defaults.showThoughts ?? true
+  const model = s.models.find((m) => m.id === modelId)
+  if (model?.showThoughts !== undefined) return model.showThoughts
+  if (model?.overrides?.showThoughts !== undefined) return model.overrides.showThoughts
+  return s.defaults.showThoughts ?? true
 }
 
 export function providerKey(s: Settings, model: ModelDef): string {

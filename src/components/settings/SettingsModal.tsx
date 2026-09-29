@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ModelDef, ProviderDef, ProviderId } from '../../types'
-import { useSettings, DEFAULT_SETTINGS, providerById } from '../../store/settings'
+import type { ApiTokenDef, ModelDef, ProviderDef, ProviderId } from '../../types'
+import { useSettings, DEFAULT_SETTINGS, providerById, providerTokens } from '../../store/settings'
 import { useHealth } from '../../store/health'
 import { useChat } from '../../store/chat'
 import { useArtifacts } from '../../store/artifacts'
@@ -62,23 +62,27 @@ export function SettingsModal() {
   return (
     <Modal open={open} onClose={close} labelledBy="settings-title">
       <div className="settings-layout">
-        <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-          <h2 id="settings-title" className="settings-title">
-            Settings
-          </h2>
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              role="tab"
-              aria-selected={tab === t.id}
-              className={`settings-tab${tab === t.id ? ' active' : ''}`}
-              onClick={() => setTab(t.id)}
-              type="button"
-            >
-              {t.icon} {t.label}
-            </button>
-          ))}
-        </div>
+        <aside className="settings-sidebar">
+          <div className="settings-header">
+            <h2 id="settings-title" className="settings-title">
+              Settings
+            </h2>
+          </div>
+          <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                role="tab"
+                aria-selected={tab === t.id}
+                className={`settings-tab${tab === t.id ? ' active' : ''}`}
+                onClick={() => setTab(t.id)}
+                type="button"
+              >
+                {t.icon} <span>{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </aside>
         <div className="settings-content" role="tabpanel" aria-label={`${tab} settings`}>
           {tab === 'models' && <ModelsTab />}
           {tab === 'defaults' && <DefaultsTab />}
@@ -228,6 +232,17 @@ function ModelsTab() {
                       }
                     />
                   </FieldRow>
+                  <Toggle
+                    label="Show thought process"
+                    checked={Boolean(m.showThoughts ?? m.overrides?.showThoughts ?? settings.defaults.showThoughts ?? true)}
+                    hint="Display expandable model thinking / reasoning when available"
+                    onChange={(checked) =>
+                      setModel(m.id, {
+                        showThoughts: checked,
+                        overrides: { ...m.overrides, showThoughts: checked },
+                      })
+                    }
+                  />
                   {provider?.kind === 'mock' && (
                     <SelectRow
                       label="Simulated behavior"
@@ -463,6 +478,7 @@ function DefaultsTab() {
 
       <SectionTitle>Streaming & feel</SectionTitle>
       <Toggle checked={defaults.stream} onChange={(v) => set({ stream: v })} label="Stream responses" hint="Token-by-token rendering" />
+      <Toggle checked={Boolean(defaults.showThoughts ?? true)} onChange={(v) => set({ showThoughts: v })} label="Show thought process" hint="Display expandable model reasoning and inline agent thoughts" />
       <Toggle checked={defaults.typingIndicator} onChange={(v) => set({ typingIndicator: v })} label="Typing indicator" hint="Animated dots while waiting for the first token" />
       <SelectRow
         label="Auto-scroll"
@@ -893,30 +909,201 @@ function GitHubTab() {
 
 type TestState = { ok: boolean; message: string } | 'testing' | null
 
+export function ProviderTokenManager({ provider }: { provider: ProviderDef }) {
+  const models = useSettings((s) => s.s.models)
+  const { addProviderToken, removeProviderToken, updateProviderToken } = useSettings.getState()
+  const healthByToken = useHealth((s) => s.byToken)
+  const tokens = providerTokens(provider)
+  const [showKey, setShowKey] = useState<Record<string, boolean>>({})
+  const [tokenTests, setTokenTests] = useState<Record<string, TestState>>({})
+  const [newKey, setNewKey] = useState('')
+  const [newLabel, setNewLabel] = useState('')
+  const [isAdding, setIsAdding] = useState(false)
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const testSingleToken = async (tok: ApiTokenDef) => {
+    setTokenTests((t) => ({ ...t, [tok.id]: 'testing' }))
+    const adapter = adapterFor(provider.kind)
+    const configured =
+      models.find((m) => m.provider === provider.id && m.enabled) ?? models.find((m) => m.provider === provider.id)
+    const res = await adapter.testKey(tok.key, provider.baseURL, configured)
+    setTokenTests((t) => ({ ...t, [tok.id]: { ok: res.ok, message: res.message } }))
+    if (res.ok) {
+      useHealth.getState().markTokenHealthy(tok.id)
+      for (const m of models) {
+        if (m.provider === provider.id) useHealth.getState().markHealthy(m.id)
+      }
+    } else {
+      useHealth.getState().recordTokenFailure(tok.id, 'auth', res.message)
+    }
+  }
+
+  const handleAddToken = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newKey.trim()) return
+    addProviderToken(provider.id, {
+      key: newKey.trim(),
+      label: newLabel.trim() || undefined,
+      enabled: true,
+    })
+    setNewKey('')
+    setNewLabel('')
+    setIsAdding(false)
+  }
+
+  return (
+    <div className="provider-tokens-section">
+      <div className="provider-tokens-head">
+        <span className="provider-tokens-title">
+          <IconKey size={13} /> API Tokens ({tokens.length})
+        </span>
+        {!isAdding && (
+          <button
+            type="button"
+            className="btn ghost small"
+            onClick={() => setIsAdding(true)}
+          >
+            <IconPlus size={12} /> Add Token
+          </button>
+        )}
+      </div>
+
+      <div className="provider-tokens-list">
+        {tokens.map((tok, idx) => {
+          const th = healthByToken[tok.id]
+          const isCooling = Boolean(th?.cooldownUntil && th.cooldownUntil > now)
+          const coolRemainingSecs = isCooling ? Math.max(1, Math.round((th!.cooldownUntil! - now) / 1000)) : 0
+          const tState = tokenTests[tok.id]
+
+          return (
+            <div key={tok.id} className={`provider-token-card${isCooling ? ' cooling' : ''}${tok.enabled === false ? ' disabled' : ''}`}>
+              <div className="provider-token-main">
+                <div className="provider-token-info">
+                  <div className="provider-token-header">
+                    <span className="provider-token-name">{tok.label || `Token ${idx + 1}`}</span>
+                    {isCooling ? (
+                      <span className="token-status-badge cooldown" title={th?.lastError?.message || 'Rate limit / quota cooldown'}>
+                        ⏱ Cooling down (~{coolRemainingSecs}s)
+                      </span>
+                    ) : tok.enabled === false ? (
+                      <span className="token-status-badge disabled">Disabled</span>
+                    ) : (
+                      <span className="token-status-badge ready">✓ Active</span>
+                    )}
+                  </div>
+                  <div className="provider-token-key-display">
+                    <input
+                      type={showKey[tok.id] ? 'text' : 'password'}
+                      value={tok.key}
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="provider-token-input"
+                      onChange={(e) => updateProviderToken(provider.id, tok.id, { key: e.target.value })}
+                      placeholder="sk-…"
+                    />
+                  </div>
+                </div>
+
+                <div className="provider-token-actions">
+                  <button
+                    type="button"
+                    className="btn ghost small"
+                    onClick={() => setShowKey((s) => ({ ...s, [tok.id]: !s[tok.id] }))}
+                    title={showKey[tok.id] ? 'Hide API key' : 'Show API key'}
+                  >
+                    {showKey[tok.id] ? 'Hide' : 'Show'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn primary small"
+                    disabled={tState === 'testing' || !tok.key.trim()}
+                    onClick={() => void testSingleToken(tok)}
+                  >
+                    {tState === 'testing' ? 'Testing…' : 'Test'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn small ${tok.enabled === false ? 'secondary' : 'ghost'}`}
+                    onClick={() => updateProviderToken(provider.id, tok.id, { enabled: tok.enabled === false })}
+                    title={tok.enabled === false ? 'Enable token' : 'Disable token'}
+                  >
+                    {tok.enabled === false ? 'Enable' : 'Disable'}
+                  </button>
+                  {tokens.length > 1 && (
+                    <button
+                      type="button"
+                      className="icon-btn danger"
+                      onClick={() => removeProviderToken(provider.id, tok.id)}
+                      title="Remove API token"
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {tState && tState !== 'testing' && (
+                <div className={`provider-test ${tState.ok ? 'ok' : 'fail'}`} role="status">
+                  {tState.ok ? <IconCheck size={12} /> : <IconAlert size={12} />} {tState.message}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {isAdding && (
+        <form onSubmit={handleAddToken} className="add-token-form">
+          <div className="add-token-fields">
+            <input
+              type="password"
+              placeholder="API Token (sk-…)"
+              value={newKey}
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setNewKey(e.target.value)}
+              required
+            />
+            <input
+              type="text"
+              placeholder="Label (e.g. Backup Key, Team Pro)"
+              value={newLabel}
+              onChange={(e) => setNewLabel(e.target.value)}
+            />
+          </div>
+          <div className="add-token-actions">
+            <button type="button" className="btn ghost small" onClick={() => setIsAdding(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn primary small" disabled={!newKey.trim()}>
+              <IconPlus size={12} /> Add to Pool
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  )
+}
+
 function ProvidersTab() {
   const providers = useSettings((s) => s.s.providers)
   const models = useSettings((s) => s.s.models)
+  const healthByToken = useHealth((s) => s.byToken)
   const { setProvider, addProvider, removeProvider } = useSettings.getState()
-  const [show, setShow] = useState<Record<string, boolean>>({})
-  const [tests, setTests] = useState<Record<string, TestState>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [now, setNow] = useState(Date.now())
 
-  const test = async (p: ProviderDef) => {
-    setTests((t) => ({ ...t, [p.id]: 'testing' }))
-    const adapter = adapterFor(p.kind)
-    // Test against a model the user actually has configured, so the result
-    // means "this chain can answer", not "this key can list a catalogue".
-    const configured =
-      models.find((m) => m.provider === p.id && m.enabled) ?? models.find((m) => m.provider === p.id)
-    const res = await adapter.testKey(p.apiKey, p.baseURL, configured)
-    setTests((t) => ({ ...t, [p.id]: { ok: res.ok, message: res.message } }))
-    if (res.ok) {
-      for (const m of models) {
-        if (m.provider === p.id) useHealth.getState().markHealthy(m.id)
-      }
-    }
-  }
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   const addByKind = (kind: ProviderId) => {
     const def: ProviderDef = {
@@ -927,7 +1114,6 @@ function ProvidersTab() {
     }
     addProvider(def)
     setAdding(false)
-    // Open the fresh connection's config so the key can be pasted right away.
     setExpanded(def.id)
   }
 
@@ -944,11 +1130,6 @@ function ProvidersTab() {
     }
     const removedModelIds = removeProvider(p.id)
     for (const id of removedModelIds) useHealth.getState().removeModel(id)
-    setTests((t) => {
-      const next = { ...t }
-      delete next[p.id]
-      return next
-    })
     if (expanded === p.id) setExpanded(null)
   }
 
@@ -956,22 +1137,29 @@ function ProvidersTab() {
     <div>
       <SectionTitle>Provider connections</SectionTitle>
       <p className="settings-note">
-        Each connection has its own key (and, for OpenAI-compatible endpoints, its own base URL) and holds its own
-        models. Add the same kind twice for two accounts, or several OpenAI-compatible endpoints — Groq, DeepSeek,
-        Ollama — side by side. Keys are stored locally in your browser only, are masked on screen, and are never logged
-        or sent anywhere except the provider they belong to.
+        Each connection has its own pooled API tokens (and, for OpenAI-compatible endpoints, its own base URL) and holds
+        its own models. Add multiple API tokens under a single provider for automatic load-balancing and cooldown-based
+        failover on rate limits (429) or quota exhaustion (402). Keys are stored locally in your browser only, are masked on
+        screen, and are never logged or sent anywhere except the provider they belong to.
       </p>
       {providers.map((p) => {
         const sup = supportedProvider(p.kind)
-        const t = tests[p.id] ?? null
         const needsKey = !sup?.noKey
         const modelCount = models.filter((m) => m.provider === p.id).length
         const isOpen = expanded === p.id
+        const tokens = providerTokens(p)
+        const coolingCount = tokens.filter((tok) => Boolean(healthByToken[tok.id]?.cooldownUntil && healthByToken[tok.id]!.cooldownUntil! > now)).length
+
         return (
           <div key={p.id} className="provider-row">
             <div className="provider-head">
               <strong>{p.label}</strong>
               <span className="provider-hint">{sup?.hint ?? p.kind}</span>
+              {needsKey && tokens.length > 0 && (
+                <span className={`provider-tokens-badge${coolingCount > 0 ? ' has-cooling' : ''}`} title={`${tokens.length} API tokens configured${coolingCount ? `, ${coolingCount} cooling down` : ''}`}>
+                  {tokens.length} {tokens.length === 1 ? 'key' : 'keys'}{coolingCount > 0 ? ` (${coolingCount} ⏱)` : ''}
+                </span>
+              )}
               <span className="provider-models" title="Models on this provider (Settings → Models)">
                 {modelCount} model{modelCount === 1 ? '' : 's'}
               </span>
@@ -996,25 +1184,11 @@ function ProvidersTab() {
                 </button>
               </span>
             </div>
+
             {needsKey && (
-              <div className="provider-key-row">
-                <input
-                  type={show[p.id] ? 'text' : 'password'}
-                  value={p.apiKey}
-                  placeholder="sk-…"
-                  aria-label={`${p.label} API key`}
-                  autoComplete="off"
-                  spellCheck={false}
-                  onChange={(e) => setProvider(p.id, { apiKey: e.target.value })}
-                />
-                <button className="btn ghost" onClick={() => setShow((s) => ({ ...s, [p.id]: !s[p.id] }))} type="button">
-                  {show[p.id] ? 'Hide' : 'Show'}
-                </button>
-                <button className="btn primary" onClick={() => void test(p)} disabled={t === 'testing'} type="button">
-                  {t === 'testing' ? 'Testing…' : 'Test'}
-                </button>
-              </div>
+              <ProviderTokenManager provider={p} />
             )}
+
             {isOpen && (
               <div className="provider-config">
                 <FieldRow label="Display name" hint="Shown on models, the rail and failover reports">
@@ -1037,11 +1211,6 @@ function ProvidersTab() {
                     Get a key ↗
                   </a>
                 )}
-              </div>
-            )}
-            {t && t !== 'testing' && (
-              <div className={`provider-test ${t.ok ? 'ok' : 'fail'}`} role="status">
-                {t.ok ? <IconCheck size={12} /> : <IconAlert size={12} />} {t.message}
               </div>
             )}
           </div>

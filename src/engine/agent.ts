@@ -376,6 +376,7 @@ export async function runAgentTurn(
     )
     const planTurns: ChatTurn[] = [...historyTurns]
     const planFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
+    let planReasoning = ''
     const planResult = await runCompletion({
       purpose: 'Planning',
       turns: planTurns,
@@ -388,11 +389,16 @@ export async function runAgentTurn(
       maxTokensFloor: settings.agent.stepMaxTokens,
       signal,
       silent: true,
+      onReasoning: (t) => {
+        planReasoning += t
+        setRun(assistantMessageId, { ...baseRun, planningReasoning: planReasoning })
+      },
     })
     collectAttempts(planResult.attempts)
     usageAcc.current = mergeUsage(usageAcc.current, planResult.usage)
     signal.throwIfAborted()
 
+    const finalPlanReasoning = planResult.reasoning ?? (planReasoning.trim() ? planReasoning : undefined)
     let plannerReply = parsePlannerReply(planResult.text)
     let note: string | undefined
 
@@ -439,6 +445,7 @@ export async function runAgentTurn(
       finalize(assistantMessageId, {
         status: 'complete',
         content: answer,
+        reasoning: finalPlanReasoning,
         modelId: planResult.model.id,
         chain: [planResult.model.id],
         usage: usageAcc.current,
@@ -447,6 +454,7 @@ export async function runAgentTurn(
           phase: 'complete',
           steps: [],
           strategy: undefined,
+          planningReasoning: finalPlanReasoning,
           orchestratorModelId: planResult.model.id,
           finishedAt: Date.now(),
           fsOps: directFsOps.length ? directFsOps : undefined,
@@ -488,6 +496,7 @@ export async function runAgentTurn(
       ...baseRun,
       phase: 'executing',
       steps,
+      planningReasoning: finalPlanReasoning,
       strategy: plannerReply?.mode === 'plan' ? plannerReply.reply : undefined,
       note,
       orchestratorModelId: orchestrator.id,
@@ -505,11 +514,15 @@ export async function runAgentTurn(
       const planned = pool.find((m) => m.id === step.modelId)
       const ordered = planned ? [planned, ...pool.filter((m) => m.id !== planned.id)] : pool.length ? pool : [orchestrator]
 
-      // Stream the worker's output into the step card, throttled so fast
+      // Stream the worker's output and reasoning into the step card, throttled so fast
       // token cadences don't thrash the store.
       let acc = ''
+      let stepReasoning = ''
       const flush = makeThrottledFlush(() => {
-        patchStep(assistantMessageId, step.id, { result: acc })
+        patchStep(assistantMessageId, step.id, {
+          result: acc,
+          reasoning: stepReasoning.trim() ? stepReasoning : undefined,
+        })
       }, 140)
 
       try {
@@ -526,6 +539,10 @@ export async function runAgentTurn(
             acc += t
             flush()
           },
+          onReasoning: (t) => {
+            stepReasoning += t
+            flush()
+          },
         })
         collectAttempts(result.attempts)
         usageAcc.current = mergeUsage(usageAcc.current, result.usage)
@@ -540,6 +557,7 @@ export async function runAgentTurn(
         patchStep(assistantMessageId, step.id, {
           status: 'complete',
           result: result.text,
+          reasoning: result.reasoning ?? (stepReasoning.trim() ? stepReasoning : undefined),
           modelId: result.model.id,
           modelLabel: stepLabel,
           failedChain: result.failedChain,
@@ -600,6 +618,7 @@ export async function runAgentTurn(
     ]
 
     let content = ''
+    let synthReasoning = ''
     let synthTruncated = false
     let synthModelId = orchestrator.id
     const synthFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
@@ -616,12 +635,17 @@ export async function runAgentTurn(
           content += t
           useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, content }))
         },
+        onReasoning: (t) => {
+          synthReasoning += t
+          useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, reasoning: synthReasoning }))
+        },
       })
       collectAttempts(synth.attempts)
       usageAcc.current = mergeUsage(usageAcc.current, synth.usage)
       content = synth.text
       synthModelId = synth.model.id
       synthTruncated = Boolean(synth.truncated)
+      if (synth.reasoning) synthReasoning = synth.reasoning
     } catch (err) {
       if (err instanceof ProviderError && err.failure === 'aborted') throw err
       // Synthesis failed on every candidate — stitch the worker output
@@ -668,6 +692,7 @@ export async function runAgentTurn(
     finalize(assistantMessageId, {
       status: 'complete',
       content,
+      reasoning: synthReasoning.trim() ? synthReasoning : finalPlanReasoning,
       modelId: orchestrator.id,
       chain: [orchestrator.id, ...workerIds.filter((id) => id !== orchestrator.id)],
       usage: usageAcc.current,

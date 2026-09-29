@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import type { AgentRun, AgentStep, FsOpRecord } from '../../types'
-import { useSettings } from '../../store/settings'
+import { useSettings, modelShowsThoughts } from '../../store/settings'
 import { useFs } from '../../store/fs'
 import { useGitHub } from '../../store/github'
 import { useUI } from '../../store/ui'
 import { formatFsOpSummary } from '../../lib/fs'
 import { Markdown } from './Markdown'
+import { ThinkingBlock } from './MessageBubble'
 import {
   IconAlert,
   IconBot,
@@ -35,7 +36,8 @@ const PHASE_LABEL: Record<AgentRun['phase'], string> = {
 }
 
 export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: string | undefined) => string }) {
-  const expandDefault = useSettings((s) => s.s.agent.expandStepResults)
+  const settings = useSettings((s) => s.s)
+  const expandDefault = settings.agent.expandStepResults
   const [open, setOpen] = useState<Record<string, boolean>>({})
 
   const total = run.steps.length
@@ -45,6 +47,8 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
 
   const phaseBadge =
     run.phase === 'executing' ? `${PHASE_LABEL[run.phase]} ${done + failed}/${total}` : PHASE_LABEL[run.phase]
+
+  const showPlanningThoughts = modelShowsThoughts(settings, run.orchestratorModelId)
 
   return (
     <div className={`agent-plan phase-${run.phase}`} aria-label="Orchestrator run">
@@ -61,11 +65,30 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       </header>
 
       {run.phase === 'planning' && (
-        <p className="agent-plan-strategy">Delegating the work…</p>
+        <>
+          <p className="agent-plan-strategy">Delegating the work…</p>
+          {showPlanningThoughts && run.planningReasoning ? (
+            <div style={{ marginTop: '0.5rem' }}>
+              <ThinkingBlock
+                reasoning={run.planningReasoning}
+                streaming={true}
+                label="Orchestrator reasoning"
+              />
+            </div>
+          ) : null}
+        </>
       )}
       {run.strategy && run.phase !== 'planning' && (
         <p className="agent-plan-strategy">{run.strategy}</p>
       )}
+      {run.phase !== 'planning' && showPlanningThoughts && run.planningReasoning ? (
+        <div style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+          <ThinkingBlock
+            reasoning={run.planningReasoning}
+            label="Planning reasoning"
+          />
+        </div>
+      ) : null}
       {run.note && <p className="agent-plan-note">{run.note}</p>}
 
       {run.phase === 'planning' ? null : (
@@ -176,7 +199,10 @@ function StepRow({
   expanded: boolean
   onToggle: () => void
 }) {
-  const hasBody = Boolean((step.result && step.result.trim()) || step.error)
+  const settings = useSettings((s) => s.s)
+  const showThoughts = modelShowsThoughts(settings, step.modelId)
+  const hasThoughts = Boolean(showThoughts && (step.reasoning || (step.status === 'running' && !step.result)))
+  const hasBody = Boolean((step.result && step.result.trim()) || step.error || hasThoughts)
   const model = labelOf(step.modelId) || step.modelLabel
   const fellBackFrom = (step.failedChain ?? []).filter((id) => id !== step.modelId)
 
@@ -223,6 +249,15 @@ function StepRow({
       </button>
       {expanded && hasBody && (
         <div className="agent-step-body">
+          {showThoughts && (step.reasoning || (step.status === 'running' && !step.result)) ? (
+            <div style={{ marginBottom: step.result ? '0.5rem' : '0' }}>
+              <ThinkingBlock
+                reasoning={step.reasoning}
+                streaming={step.status === 'running' && !step.result}
+                label={`${step.modelLabel || 'Worker'} thought process`}
+              />
+            </div>
+          ) : null}
           {step.error ? (
             <p className="agent-step-error">{step.error}</p>
           ) : (
