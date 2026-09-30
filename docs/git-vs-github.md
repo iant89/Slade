@@ -151,11 +151,13 @@ refs, just addressed over REST. Slade loses less than it looks by staying there.
 
 **P0 — pure refactor, no behavior change.** Extract `http.ts` / `git/` / `forge/github.ts`
 as in §2. Move `commitTree` behind `git/commit.ts` with a forge-agnostic signature.
-While in there, fix a real bug: `commitTree` hardcodes `mode: '100644'` for every entry,
-so a committed shell script loses its `+x` bit and a committed symlink becomes a
-regular file containing the target path. Modes belong to the Git layer, and they are
-the kind of thing the split makes visible. The existing fake `api.github.com` in
-`scripts/smoke.ts` is a ready-made harness for the REST transport.
+While in there, fix a real bug: `commitTree` hardcoded `mode: '100644'` for every entry,
+so a committed shell script lost its `+x` bit and a committed symlink became a regular
+file containing the target path. Modes belong to the Git layer, and they are the kind of
+thing the split makes visible. *(The mode bug itself is fixed — see §6 — the extraction
+is still worth doing, and is what keeps the preview in `changes.ts` from drifting away
+from the commit path again.)* The existing fake `api.github.com` in `scripts/smoke.ts`
+is a ready-made harness for the REST transport.
 
 **P1 — the object layer, which pays off without any protocol.** Compute oids locally.
 Then Local Files can be diffed against a real remote ref, a commit can be *built*
@@ -270,17 +272,64 @@ belongs in the Git layer rather than in a patch to one call site: the preview is
 no sha1, no oids — so it is complementary to §5's P1, not a partial implementation of
 it. Nothing in main computes a Git object today.
 
-**Fix shape.** Carry the mode end to end — `readFile` → `RemoteFile` → `FsFile` →
-`CommitTreeEntryInput`, defaulting to `100644` only when there is genuinely nothing to
-preserve. A cheaper first cut: in `commitTree`, read the base tree (already being
-fetched for `base_tree`) and reuse the existing mode for each path, so an edit can
-never silently change a mode it didn't mean to. Either way, add the assertion the
-harness is missing.
+### Fixed
 
-One spelling trap for whoever does it: GitHub's tree API wants `040000` for a subtree,
-while git's own tree *object* stores `40000`. Get it wrong and every oid is wrong while
-the UI looks perfect — the same trap §3 describes, which is why this needs `git` as the
-reference in tests, not a rendered page.
+`commitTree` now reads the modes off the branch and keeps them, so an edit is a *content*
+change and nothing else:
+
+- **Source.** One `GET /git/trees/{baseTreeSha}?recursive=1` per commit — the same call
+  `getTree()` already makes for the browser, and it is skipped entirely when every entry
+  carries an explicit mode. Truncated trees degrade to the old `100644` default for the
+  paths they don't list.
+- **Rule.** `blobModeFor()` carries `100755` when the path already has it, otherwise
+  writes `100644`. Only *regular-file* modes are carried: `120000` (symlink) and `160000`
+  (submodule) describe something that is not a blob's contents, so writing file content
+  under them would corrupt the entry — the guard is a test, not a comment.
+- **Escape hatch.** `CommitTreeEntryInput.mode` lets a caller state the mode outright
+  (used when creating something that *should* be executable). Local Files still has no
+  `chmod`, so a brand-new executable file can only be authored this way — a gap, not a
+  regression.
+
+Three things this deliberately does **not** touch, because they are separate defects or
+separate surfaces:
+
+- the preview/commit rule divergence (`ref` vs `repo`) and the `allFiles` fallback that
+  commits everything when nothing is dirty. Modes are preserved either way now, so
+  neither can corrupt anything any more — but "no changes" followed by a commit is still
+  a wart;
+- **Publish → commit a file**, which goes through the contents API (`writeFile`), not
+  `commitTree`. That endpoint takes no mode parameter at all, so whether it preserves one
+  is a question about GitHub's server behaviour, and it is unverified here — worth a
+  test against a real repository before claiming either way.
+
+**Verified** (`git commit tree modes` + the agent round-trip test in `npm run test:smoke`,
+and against real `git` outside it):
+
+| Case | Result |
+| --- | --- |
+| edit an executable path | `100755` preserved ✅ |
+| edit a plain path | `100644` preserved ✅ |
+| create a file | `100644` ✅ |
+| explicit `mode: '100755'` | honoured, no lookup ✅ |
+| path that is a symlink upstream | **not** written as `120000` ✅ |
+| deletion | `sha: null` unchanged ✅ |
+
+And the payload's effect on a real repository:
+
+```
+mode 100644 -> tree 1184e140712751de9880a9114fb50f03b475a500   (pre-fix)
+mode 100755 -> tree 31e608648b097abeeae5708b175b2638af0a598f   (fixed)
+$ git checkout 31e6086 -- run.sh && ls -l run.sh
+-rwxr-xr-x run.sh
+```
+
+The mode is part of the tree's identity, which is the point: the old behaviour didn't
+just look wrong, it rewrote history's contents.
+
+One spelling trap for anyone extending this: GitHub's tree API wants `040000` for a
+subtree, while git's own tree *object* stores `40000`. Get it wrong and every oid is
+wrong while the UI looks perfect — the same trap §3 describes, which is why this is
+checked against real `git` and not a rendered page.
 
 ## 7. One-line summary
 
