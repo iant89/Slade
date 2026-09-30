@@ -234,9 +234,41 @@ symlink upstream will be committed as `100644` — the link becomes a regular fi
 containing the target path.
 
 **Why the tests didn't catch it.** `scripts/smoke.ts` types the captured payload as
-`mode: string` and then asserts only on `path`, `content`, and `sha: null`. The mode is
-in the harness's type and in none of its assertions, so the suite passes with the bug,
-and would pass again if it were reintroduced.
+`mode: string` (the `postedTree` fixture, line 3282 at main `e76077d`) and then asserts
+only on `path`, `content`, and `sha: null`. The mode is in the harness's type and in
+none of its assertions, so the suite passes with the bug, and would pass again if it
+were reintroduced.
+
+**Main made it worse, not better.** PR #19 — merged after this note was first written —
+added `src/lib/changes.ts`, a preview of "what would land on GitHub if you committed
+the Local Files workspace", whose header states *"the rules mirror `commitFsToGitHub`"*.
+They don't quite, and the difference points straight at this bug:
+
+| | Preview (`changes.ts:160`) | Actual commit (`store/github.ts:747`) |
+| --- | --- | --- |
+| "changed" means | `!tracked \|\| dirty \|\| remote.ref !== ref` | `dirty \|\| !remote \|\| remote.repo !== repo` |
+| branch granularity | compares the **branch** (`ref`) | compares only the **repo** |
+| empty change set | shows nothing to commit | **falls back to committing every local file** |
+
+So the two can disagree about the same workspace, and `grep -n "mode\|exec\|100644"
+src/lib/changes.ts` returns nothing: the preview has no more idea about modes than the
+commit path does. Put together with the fallback, here is the whole failure in one
+sequence — nothing in Local Files is dirty, so:
+
+1. the preview correctly reports **no changes**;
+2. the user hits **Commit & Push**;
+3. the commit path sees an empty `changed` set, takes the `allFiles` fallback, and
+   re-commits every file in the workspace;
+4. every executable file among them silently becomes `100644`.
+
+Nothing in the UI can show step 4 happening, because a mode-only change is invisible to
+a content diff and the exec bit was already dropped on the way in. This is why the fix
+belongs in the Git layer rather than in a patch to one call site: the preview is a
+*second* mirror of the commit rules, and it will need the mode too.
+
+**Also note.** `src/lib/diff.ts` (PR #19) is a line-level diff with no object model —
+no sha1, no oids — so it is complementary to §5's P1, not a partial implementation of
+it. Nothing in main computes a Git object today.
 
 **Fix shape.** Carry the mode end to end — `readFile` → `RemoteFile` → `FsFile` →
 `CommitTreeEntryInput`, defaulting to `100644` only when there is genuinely nothing to
