@@ -11,6 +11,16 @@ import { buildPanelItems, useSessionGitHubActions } from './panel'
 import { IconArrowDown, IconStarburst, IconWifiOff } from '../icons'
 
 /**
+ * Virtuoso is generated from a `system()` definition, and its prop setter takes
+ * every prop it finds with `'components' in props`. Passing `undefined`
+ * explicitly therefore counts as "present" and overwrites its internal
+ * component registry with nothing — the next render throws reading it
+ * ("Cannot read properties of undefined"). An empty registry says the same
+ * thing safely: keep the built-in components.
+ */
+const NO_COMPONENT_OVERRIDES = {}
+
+/**
  * The chat panel: everything the conversation holds, in one scroll area above
  * the composer. The messages come first; the GitHub Actions this session made
  * are appended to the end of the same list (`./panel.ts`), so they are part of
@@ -77,7 +87,7 @@ export function ChatView() {
           atBottomStateChange={setAtBottom}
           atBottomThreshold={80}
           increaseViewportBy={{ top: 300, bottom: 600 }}
-          components={pending ? { Footer: PendingFooter } : undefined}
+          components={pending ? { Footer: PendingFooter } : NO_COMPONENT_OVERRIDES}
         />
       )}
       <AnimatePresence>

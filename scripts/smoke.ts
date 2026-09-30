@@ -126,6 +126,7 @@ import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
 import { GitHubActionCard, GitHubActionItem, GitHubRunActivity } from '../src/components/github/GitHubActivity'
 import { buildPanelItems, sessionGitHubActions, usePanelHasContent } from '../src/components/chat/panel'
+import { ChatView } from '../src/components/chat/ChatView'
 import { useGitHubActivity, logGitHubAction, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
 import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
@@ -5115,6 +5116,78 @@ function testChatPanelUi() {
   useChat.getState().clearAllConversations()
 }
 
+/**
+ * The chat panel itself, rendered.
+ *
+ * Virtuoso is generated from a `system()` definition, and its prop setter
+ * copies every prop it finds with `'components' in props` — so an explicitly
+ * `undefined` `components` prop counts as present, writes `undefined` into the
+ * component registry, and the next render of the list reads through it
+ * (`u[a]` / "Cannot read properties of undefined"). The panel must always hand
+ * Virtuoso a registry object, pending footer or not.
+ */
+function testChatPanelRenders() {
+  console.log('chat panel render (virtuoso component registry):')
+  const html = renderWithLiveState
+  const actInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
+  const actState = { ...useGitHubActivity.getState() } as unknown as { entries: unknown[] }
+
+  /** Render the panel, reporting a crash as a failed check instead of a stack. */
+  const renderPanel = (): { markup: string; error: string } => {
+    try {
+      return { markup: html(createElement(ChatView)), error: '' }
+    } catch (err) {
+      return { markup: '', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  try {
+    const settled: Message = {
+      id: 'msg_panel_settled',
+      role: 'assistant',
+      conversationId: 'conv_render',
+      content: 'the panel keeps its messages',
+      createdAt: 1,
+      status: 'complete',
+    }
+    const pending: Message = { ...settled, id: 'msg_panel_pending', status: 'pending' }
+
+    // The scroller shell is what the crash took down: the list mounts it, then
+    // the component registry is read back. (Rows themselves are measured in the
+    // browser, so server rendering legitimately shows an empty item list.)
+    const shell = (markup: string) => markup.includes('virtuoso-scroller') && markup.includes('virtuoso-item-list')
+
+    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled] })], 'conv_render')
+    actInit.entries = []
+    const idle = renderPanel()
+    check('a settled conversation renders the list without crashing', idle.error === '', idle.error)
+    check('…and the panel mounts as content, not the empty state', shell(idle.markup) && !idle.markup.includes('chat-view empty'), idle.markup.slice(0, 160))
+
+    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [pending] })], 'conv_render')
+    const waiting = renderPanel()
+    check('a pending message renders the list without crashing', waiting.error === '', waiting.error)
+    check('…and the typing footer is mounted', waiting.markup.includes('pending-footer'), waiting.markup.slice(0, 160))
+
+    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled] })], 'conv_render')
+    actInit.entries = [
+      { id: 'gha_render', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
+    ]
+    const withAction = renderPanel()
+    check('an appended action renders the list without crashing', withAction.error === '', withAction.error)
+    check('…and the action keeps the panel docked rather than empty', shell(withAction.markup) && !withAction.markup.includes('chat-view empty'), withAction.markup.slice(0, 160))
+    check('…and it drops the pending footer again', !withAction.markup.includes('pending-footer'))
+
+    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled, pending] })], 'conv_render')
+    actInit.entries = []
+    const both = renderPanel()
+    check('a pending message after a settled one still renders both', both.error === '', both.error)
+    check('…with the footer back for the pending turn', both.markup.includes('pending-footer'), both.markup.slice(0, 160))
+  } finally {
+    useChat.getState().clearAllConversations()
+    Object.assign(actInit, actState)
+  }
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -5170,6 +5243,7 @@ async function main() {
   await testConversationArchive()
   testConversationMenuUi()
   testChatPanelUi()
+  testChatPanelRenders()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }
