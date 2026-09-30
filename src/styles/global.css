@@ -1028,6 +1028,44 @@ kbd {
   font-size: 0.72em; color: var(--text-faint);
 }
 
+/* Repository + branch comboboxes docked in the composer's bottom bar. */
+.composer-context {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.composer-context .combobox { min-width: 0; }
+.composer-context .combobox-trigger {
+  width: auto;
+  max-width: 210px;
+  padding: 5px 10px;
+  gap: 6px;
+  border-radius: 999px;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.composer-context .combobox-trigger:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.composer-context .cb-branch .combobox-trigger { max-width: 150px; }
+.composer-context .cb-icon { display: inline-flex; flex: none; color: var(--accent-ink); }
+.composer-context .combobox-value { flex-direction: row; }
+.composer-context .cb-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.composer-context .combobox-placeholder { color: var(--text-faint); font-weight: 500; }
+.composer-context .cb-owner { color: var(--text-faint); font-weight: 500; }
+
 /* Centered "greeting + composer" — the fresh-conversation layout. */
 .composer-wrap.centered {
   flex: 1 1 auto;
@@ -2137,6 +2175,14 @@ input[type='range']::-moz-range-thumb {
   .composer-bar { gap: 6px; padding: 5px 8px 8px; }
   .composer-left { gap: 4px; }
   .composer-count { display: none; }
+  /* Repo/branch pickers move to their own full-width row on top of the bar
+     so the send button keeps the bottom-right corner. */
+  .composer-bar { flex-wrap: wrap; }
+  .composer-left { flex: 1 1 0; }
+  .composer-context { order: -1; flex: 1 1 100%; }
+  .composer-context .combobox { flex: 1 1 0; }
+  .composer-context .combobox-trigger,
+  .composer-context .cb-branch .combobox-trigger { max-width: none; width: 100%; }
   .model-chip { max-width: 110px; padding: 5px 8px; font-size: 0.76em; }
   .agent-chip { max-width: 120px; padding: 5px 8px; font-size: 0.76em; }
   .agent-chip-orchestrator { max-width: 50px; }
@@ -2817,11 +2863,27 @@ input[type='range']::-moz-range-thumb {
   transition: background var(--dur-fast) ease;
 }
 .combobox-opt .opt-label { font-size: 0.87em; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
-.combobox-opt .opt-check { color: var(--accent-ink); font-weight: 700; }
-.combobox-opt .opt-hint { font-size: 0.76em; color: var(--text-muted); }
+.combobox-opt .opt-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combobox-opt .opt-main svg { vertical-align: -2px; margin-right: 5px; }
+.combobox-opt .opt-check { color: var(--accent-ink); font-weight: 700; flex: none; }
+.combobox-opt .opt-hint {
+  font-size: 0.76em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .combobox-opt.active { background: var(--accent-soft); }
 .combobox-opt[aria-selected='true'] .opt-label { color: var(--accent-ink); }
 .combobox-empty { padding: 10px; font-size: 0.8em; color: var(--text-muted); }
+.combobox-empty.combobox-loading { display: flex; align-items: center; gap: 7px; }
+.combobox-empty .link-btn { font-size: inherit; padding: 0; }
+.combobox-notice {
+  padding: 7px 11px;
+  font-size: 0.76em;
+  color: var(--danger);
+  border-bottom: 1px solid var(--border);
+}
 
 /* ---------- Model ID field ---------- */
 
