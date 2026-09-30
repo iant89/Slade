@@ -11,6 +11,7 @@ import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { RepoBranchPickers } from './RepoBranchPickers'
+import { usePanelHasContent } from './panel'
 import { IconArrowUp, IconBot, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
 
 /* ------------------------------------------------------------------ */
@@ -216,6 +217,7 @@ async function attachSample(name: string): Promise<void> {
 
 export function Composer() {
   const conv = useCurrentConversation()
+  const hasPanelContent = usePanelHasContent()
   const enterToSend = useSettings((s) => s.s.appearance.enterToSend)
   const pendingIds = useUI((s) => s.pendingAttachmentIds)
   const removePending = useUI((s) => s.removePendingAttachment)
@@ -400,7 +402,9 @@ export function Composer() {
 
   // A fresh (or missing) conversation gets the centered, Claude-style layout:
   // a serif greeting above the composer and a few quiet starting points below.
-  const isEmpty = !conv || conv.messages.length === 0
+  // A panel that already holds something — the session's GitHub cards, even
+  // before the first message — keeps the composer docked under it instead.
+  const isEmpty = !hasPanelContent
   const greeting = useMemo(() => {
     const h = new Date().getHours()
     if (h < 5) return 'Burning the midnight oil'

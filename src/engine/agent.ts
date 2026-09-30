@@ -487,8 +487,8 @@ export async function runAgentTurn(
 
   /**
    * Every GitHub call this run makes is tagged with this scope, so the cards
-   * render inline with the run's answer (the plan card) rather than in the
-   * strip above the composer, which is left to the calls you make yourself.
+   * render inside the run's answer (the plan card) rather than in the chat
+   * panel, whose appended cards are left to the calls you make yourself.
    * Entered inside the try so the finally below always releases it.
    */
   const githubScope = uid('ghs')

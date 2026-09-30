@@ -124,7 +124,8 @@ import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
-import { GitHubActionCard, GitHubActivityFeed, GitHubRunActivity } from '../src/components/github/GitHubActivity'
+import { GitHubActionCard, GitHubActionItem, GitHubRunActivity } from '../src/components/github/GitHubActivity'
+import { buildPanelItems, sessionGitHubActions, usePanelHasContent } from '../src/components/chat/panel'
 import { useGitHubActivity, logGitHubAction, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
 import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
@@ -2585,38 +2586,79 @@ async function testGitHubActionCards() {
     const seed = () => {
       activityInit.entries = useGitHubActivity.getState().entries
     }
-    const feedHtml = () => {
-      seed()
-      return renderToString(createElement(GitHubActivityFeed)).replace(/<!-- -->/g, '')
-    }
     const runHtml = (scope: string) => {
       seed()
       return renderToString(createElement(GitHubRunActivity, { scope })).replace(/<!-- -->/g, '')
     }
 
-    // Idle: the ledger folds to its count line (the calls are over), and the
-    // strip stays one line tall instead of holding a column of cards open all
-    // session. Exactly two buttons either way: toggle + Clear.
-    const idleFeed = feedHtml()
-    check(
-      'an idle ledger folds to its count line',
-      !idleFeed.includes('gh-activity-list') && /\d+ GitHub actions/.test(idleFeed) && idleFeed.includes('Clear'),
-      idleFeed.slice(0, 240),
-    )
-    check('…with just the toggle and Clear', (idleFeed.match(/<button/g) ?? []).length === 2, String((idleFeed.match(/<button/g) ?? []).length))
+    /* ---- the panel: your calls are appended to the chat log ---- */
 
-    // In flight: it opens itself, and lists the cards.
-    const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
-    const liveFeed = feedHtml()
+    const now = Date.now()
+    const userMessage: Message = {
+      id: 'msg_panel_user',
+      role: 'user',
+      conversationId: 'conv_panel',
+      content: 'ship it',
+      createdAt: now,
+      status: 'complete',
+    }
+    const assistantMessage: Message = {
+      id: 'msg_panel_assistant',
+      role: 'assistant',
+      conversationId: 'conv_panel',
+      content: 'done',
+      createdAt: now,
+      status: 'complete',
+    }
+    const sessionEntries = () => sessionGitHubActions(useGitHubActivity.getState().entries)
+    const panelItems = () => buildPanelItems([userMessage, assistantMessage], sessionEntries())
+
+    const before = panelItems()
     check(
-      'a call in flight opens the list',
-      liveFeed.includes('gh-activity-list') && liveFeed.includes('/live.ts') && liveFeed.includes('1 running'),
-      liveFeed.slice(0, 300),
+      'the panel keeps the conversation in order',
+      before[0]?.id === 'msg_panel_user' && before[1]?.id === 'msg_panel_assistant',
+      JSON.stringify(before.map((i) => i.id)),
     )
-    check('…and a card is still not a button', !/gh-action-card[^>]*>\s*<button/.test(liveFeed), liveFeed.slice(0, 200))
+    check(
+      'every action is appended after the last message, never between messages',
+      before.length > 2 && before.slice(2).every((i) => i.kind === 'github'),
+      JSON.stringify(before.map((i) => i.kind)),
+    )
+    check(
+      'the appended cards keep the order the calls happened in',
+      JSON.stringify(before.slice(2).map((i) => i.id)) === JSON.stringify(sessionEntries().map((e) => e.id)),
+      JSON.stringify(before.slice(2).map((i) => i.id)),
+    )
+    const lastItem = before[before.length - 1]!
+    check(
+      'the newest call is the last thing in the panel',
+      lastItem.kind === 'github' && lastItem.id === sessionEntries()[sessionEntries().length - 1]?.id,
+      JSON.stringify(lastItem),
+    )
+    seed()
+    const itemHtml = renderToString(
+      createElement(GitHubActionItem, { entry: lastItem.kind === 'github' ? lastItem.entry : sessionEntries()[0]! }),
+    ).replace(/<!-- -->/g, '')
+    check('a panel card renders as a row in the message column', itemHtml.includes('gh-panel-item') && itemHtml.includes('gh-action-card'), itemHtml.slice(0, 200))
+    check('…carrying the action and what it touched', itemHtml.includes('GitHub Action:') && itemHtml.includes('<code>'), itemHtml.slice(0, 300))
+    check('…and it is still not a button', !itemHtml.includes('<button'), itemHtml.slice(0, 200))
+
+    // In flight: the card is in the panel as it happens, with its status glyph.
+    const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
+    const livePanel = panelItems()
+    const liveItem = livePanel[livePanel.length - 1]!
+    seed()
+    const liveHtml = renderToString(
+      createElement(GitHubActionItem, { entry: liveItem.kind === 'github' ? liveItem.entry : sessionEntries()[0]! }),
+    ).replace(/<!-- -->/g, '')
+    check(
+      'a call in flight is appended to the panel, marked running',
+      liveItem.id === liveId && liveHtml.includes('/live.ts') && liveHtml.includes('gh-action-card status-running'),
+      liveHtml.slice(0, 300),
+    )
     finishGitHubAction(liveId, { status: 'done' })
 
-    /* ---- run-scoped cards render inline, not in the strip ---- */
+    /* ---- a run’s cards render in the run’s answer, not in the panel ---- */
     useGitHubActivity.getState().enterScope('scope_run_1')
     const inRun = logGitHubAction({ kind: 'get-file', subject: '/src/math.ts', repo: 'octo/demo', ref: 'main' })
     const runCards = useGitHubActivity.getState().entries.filter((e) => e.id === inRun)
@@ -2624,12 +2666,17 @@ async function testGitHubActionCards() {
 
     const inlineLive = runHtml('scope_run_1')
     check(
-      'a run’s calls render inline, in the run’s own block',
+      'a run’s calls render inside the run’s own block',
       inlineLive.includes('GitHub activity · 1 call') &&
         inlineLive.includes('gh-activity-list') &&
         inlineLive.includes('/src/math.ts') &&
         !inlineLive.includes('/live.ts'),
       inlineLive.slice(0, 300),
+    )
+    check(
+      '…and the panel does not repeat them',
+      !panelItems().some((i) => i.kind === 'github' && i.id === inRun),
+      JSON.stringify(panelItems().map((i) => i.id)),
     )
     finishGitHubAction(inRun, { status: 'done' })
     useGitHubActivity.getState().exitScope('scope_run_1')
@@ -2640,18 +2687,16 @@ async function testGitHubActionCards() {
       inlineFolded.includes('GitHub activity · 1 call') && !inlineFolded.includes('gh-activity-list'),
       inlineFolded.slice(0, 200),
     )
-
-    const afterRunFeed = feedHtml()
-    check(
-      'the strip does not also show the run’s cards',
-      !afterRunFeed.includes('/src/math.ts'),
-      afterRunFeed.slice(0, 300),
-    )
     check('a scope with no calls renders nothing', runHtml('scope_nothing') === '')
 
     useGitHubActivity.getState().clear()
     activityInit.entries = []
-    check('clearing empties the feed', renderToString(createElement(GitHubActivityFeed)) === '')
+    const clearedPanel = panelItems()
+    check(
+      'clearing the ledger leaves the panel with just the conversation',
+      clearedPanel.length === 2 && clearedPanel.every((i) => i.kind === 'message'),
+      JSON.stringify(clearedPanel.map((i) => i.kind)),
+    )
     check('the card title escapes nothing weird', card.includes('octo/demo@main'))
   } finally {
     off()
@@ -3666,8 +3711,11 @@ async function testGitLocalFsReadWriteAcross() {
       inlineRun.slice(Math.max(0, inlineRun.indexOf('gh-activity')), inlineRun.indexOf('gh-activity') + 300),
     )
     check(
-      '…and the strip above the composer does not repeat them',
-      !renderToString(createElement(GitHubActivityFeed)).includes('/src/math.ts'),
+      '…and the chat panel does not repeat them',
+      !buildPanelItems([], sessionGitHubActions(useGitHubActivity.getState().entries)).some(
+        (i) => i.kind === 'github' && i.entry.subject === '/src/math.ts',
+      ),
+      JSON.stringify(sessionGitHubActions(useGitHubActivity.getState().entries).map((e) => `${e.title} ${e.subject}`)),
     )
   } finally {
     globalThis.fetch = realFetch
@@ -4734,6 +4782,33 @@ function testConversationHelpers() {
   }
   check(`${cases} random anchors: the menu always lands fully inside the window`, escaped === 0, `${escaped} escaped`)
   check('…and a button with room below always gets the menu directly below it', notBelow === 0, `${notBelow} misplaced`)
+
+  /* --- ensureConversation (the panel always has a chat to append to) ------ */
+  const ensure = () => useChat.getState().ensureConversation()
+  const chatState = () => useChat.getState()
+
+  seedConversations([convFixture('a', 'Alpha', 30), convFixture('b', 'Beta', 20)], 'a')
+  check(
+    'ensureConversation returns the open chat and creates nothing',
+    ensure() === 'a' && chatState().order.join() === 'a,b' && chatState().conversations.a?.title === 'Alpha',
+  )
+
+  seedConversations([convFixture('a', 'Alpha', 30)], '')
+  const created = ensure()
+  check(
+    'with nothing open — the last chat deleted or archived — it creates one',
+    created !== '' && chatState().currentId === created && chatState().conversations[created]?.messages.length === 0,
+    JSON.stringify({ created, order: chatState().order }),
+  )
+  check('…and handing the id back stays stable on the next call', ensure() === created)
+
+  useChat.setState({ currentId: 'ghost' })
+  const recovered = ensure()
+  check(
+    'a dangling currentId is replaced, never handed back',
+    recovered !== 'ghost' && Boolean(chatState().conversations[recovered]),
+    JSON.stringify({ recovered, order: chatState().order }),
+  )
 }
 
 async function testConversationArchive() {
@@ -4989,6 +5064,57 @@ function testConversationMenuUi() {
   useChat.getState().clearAllConversations()
 }
 
+/**
+ * The chat panel's own predicate: does the panel hold anything? The composer
+ * asks it to choose between the centered greeting and a docked composer above a
+ * panel that already has content, so a session whose only content is GitHub
+ * cards still gets a panel that scrolls instead of a floating log.
+ */
+function testChatPanelUi() {
+  console.log('chat panel (composer layout gate):')
+  const html = renderWithLiveState
+  const Probe = () => createElement('span', { 'data-panel': usePanelHasContent() ? 'content' : 'empty' })
+  const actInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
+  const card = (id: string, scope?: string) => ({
+    id,
+    kind: 'get-file',
+    title: 'GitHub Action: Get File Contents',
+    subject: '/src/a.ts',
+    status: 'done',
+    at: 1,
+    count: 1,
+    scope,
+  })
+  const seedLog = (entries: unknown[]) => {
+    actInit.entries = entries
+  }
+  const label = () => html(createElement(Probe))
+
+  seedConversations([], '')
+  seedLog([])
+  check('nothing stored: no conversation and no cards → the panel is empty', label() === '<span data-panel="empty"></span>', label())
+
+  seedConversations([convFixture('a', 'Alpha', 10)], 'a')
+  check('a conversation with no messages yet is still empty', label() === '<span data-panel="empty"></span>', label())
+
+  seedConversations([convFixture('a', 'Alpha', 10, { messages: [chatMessage('a', 'user', 'hi')] })], 'a')
+  seedLog([])
+  check('a message makes the panel content, so the composer docks', label() === '<span data-panel="content"></span>', label())
+
+  seedConversations([convFixture('a', 'Alpha', 10)], 'a')
+  seedLog([card('gha_1')])
+  check('a GitHub action alone makes the panel content (composer docks under it)', label() === '<span data-panel="content"></span>', label())
+
+  seedLog([card('gha_2', 'scope_run_1')])
+  check('a run’s card does not: it belongs to its run’s answer, not the panel', label() === '<span data-panel="empty"></span>', label())
+
+  seedLog([card('gha_3', 'scope_run_1'), card('gha_4')])
+  check('one session card among a run’s calls is enough', label() === '<span data-panel="content"></span>', label())
+
+  seedLog([])
+  useChat.getState().clearAllConversations()
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -5043,6 +5169,7 @@ async function main() {
   testConversationHelpers()
   await testConversationArchive()
   testConversationMenuUi()
+  testChatPanelUi()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

@@ -313,13 +313,15 @@ against and a status glyph.
 - **A run's calls go inline with the run.** When the orchestrator makes GitHub
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
   cards render inside that run's plan card, under the steps they served, so the
-  work and the calls that did it sit together. Calls *you* make (browsing the
-  drawer, searching, publishing, signing in) land in the strip above the
-  composer, which lists only your own activity.
-- **The list folds to its count line when nothing is running.** Either block
-  opens itself while calls are in flight and collapses to `12 GitHub actions`
-  the moment the last one lands; clicking the line opens it again, and a
-  finished run keeps its calls one click away.
+  work and the calls that did it sit together. That block opens itself while its
+  calls are in flight and folds to `GitHub activity · 12 calls` the moment the
+  last one lands; clicking the line opens it again.
+- **Your calls are appended to the chat panel.** Calls *you* make (browsing the
+  drawer, searching, publishing, signing in) are appended to the end of the
+  scrollable chat panel — in the message column, above the composer — so they
+  scroll with the conversation instead of sitting outside it in a strip. Each one
+  is appended after what was already there: an action never splits a message from
+  the reply it caused.
 - **A card never expands.** There is nothing to open: what happened, and to what,
   is the whole card. Failures keep GitHub's own sentence in the row's tooltip.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
@@ -329,7 +331,7 @@ against and a status glyph.
   Anything unmapped still gets a card with its path, so no call can slip past
   unlogged.
 - Identical calls in a burst (pulling 25 files) fold into one card with a `×25`
-  counter instead of burying the list, the strip keeps the last 60, and a request
+  counter instead of burying the log, the panel keeps the last 60, and a request
   cancelled mid-flight (a search you typed over) drops its card rather than
   showing a failure.
 
