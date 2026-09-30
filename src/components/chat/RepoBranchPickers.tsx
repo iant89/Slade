@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { FilterCombobox, type ComboboxOption } from '../common/FilterCombobox'
+import { DiffChangesLabel } from './DiffChanges'
 import { useGitHub } from '../../store/github'
 import { useUI } from '../../store/ui'
 import { parseRepoInput, type GitHubBranch, type GitHubRepo } from '../../lib/github'
@@ -260,15 +261,17 @@ function BranchCombobox() {
 /* ------------------------------------------------------------------ */
 
 /**
- * Repository + branch comboboxes docked at the bottom of the composer.
- * Both switch the shared GitHub workspace (`useGitHub`), so the agent's
- * tree context, file panel and publish targets follow along.
+ * Repository + branch comboboxes (and the changes label) docked at the
+ * bottom of the composer. The comboboxes switch the shared GitHub workspace
+ * (`useGitHub`); the label summarizes pending Local Files changes against
+ * the selected repo/branch and opens a full-screen diff viewer on click.
  */
 export function RepoBranchPickers() {
   return (
     <div className="composer-context">
       <RepoCombobox />
       <BranchCombobox />
+      <DiffChangesLabel />
     </div>
   )
 }
