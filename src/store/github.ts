@@ -203,6 +203,8 @@ export interface GitHubState {
   loadRepos: (opts?: { force?: boolean }) => Promise<void>
   setRepoFilter: (v: string) => void
   openRepo: (input: string, opts?: { branch?: string }) => Promise<boolean>
+  /** Fetch the branch list for the active repo (no tree reload). */
+  loadBranches: (opts?: { force?: boolean }) => Promise<void>
   setBranch: (branch: string) => Promise<void>
   setTreeFilter: (v: string) => void
   refreshTree: () => Promise<void>
@@ -487,6 +489,19 @@ export const useGitHub = create<GitHubState>((set, get) => {
       } catch (err) {
         set({ treeLoading: false, treeError: textOf(err), tree: undefined, branchesLoading: false })
         return false
+      }
+    },
+
+    loadBranches: async (opts) => {
+      const { activeRepo, branches, branchesLoading, token } = get()
+      if (!activeRepo || branchesLoading) return
+      if (branches.length && !opts?.force) return
+      set({ branchesLoading: true })
+      try {
+        const list = await listBranches(activeRepo, { token: token || undefined })
+        set({ branches: list, branchesLoading: false })
+      } catch {
+        set({ branches: [], branchesLoading: false })
       }
     },
 

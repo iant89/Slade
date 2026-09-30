@@ -10,6 +10,7 @@ import { sendUserMessage, stopGeneration, regenerateFromUserMessage } from '../.
 import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
+import { RepoBranchPickers } from './RepoBranchPickers'
 import { IconArrowUp, IconBot, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
 
 /* ------------------------------------------------------------------ */
@@ -518,6 +519,8 @@ export function Composer() {
             <ModelChip />
             <AgentChip />
           </div>
+
+          <RepoBranchPickers />
 
           <div className="composer-right">
             <span className="composer-count" aria-label={`${text.length} characters, about ${tokens} tokens`}>
