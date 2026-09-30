@@ -66,7 +66,9 @@ export interface UIState {
 export const useUI = create<UIState>((set) => ({
   settingsOpen: false,
   settingsTab: 'models',
-  sidebarOpen: false,
+  // Desktop starts with the sidebar open (it's a primary surface there); the
+  // narrow layout starts with it closed, where it is an overlay drawer.
+  sidebarOpen: typeof window !== 'undefined' ? window.innerWidth >= 900 : false,
   railOpen: false,
   githubOpen: false,
   githubTab: 'repos',

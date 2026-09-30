@@ -10,7 +10,7 @@ import { sendUserMessage, stopGeneration, regenerateFromUserMessage } from '../.
 import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { IconBot, IconFolder, IconGear, IconGithub, IconPaperclip, IconSend, IconStop, IconChevronDown, IconFile, IconLayers, IconSliders, IconPlus, IconX } from '../icons'
+import { IconArrowUp, IconBot, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Model chip + quick switch                                           */
@@ -397,8 +397,41 @@ export function Composer() {
 
   const tokens = estimateTokens(text + pendingIds.length * 500)
 
+  // A fresh (or missing) conversation gets the centered, Claude-style layout:
+  // a serif greeting above the composer and a few quiet starting points below.
+  const isEmpty = !conv || conv.messages.length === 0
+  const greeting = useMemo(() => {
+    const h = new Date().getHours()
+    if (h < 5) return 'Burning the midnight oil'
+    if (h < 12) return 'Good morning'
+    if (h < 18) return 'Good afternoon'
+    return 'Good evening'
+  }, [])
+
+  const toggleAgent = () => {
+    const chat = useChat.getState()
+    const c = conv ?? chat.conversations[chat.currentId]
+    if (c) {
+      chat.setConversationAgent(c.id, !c.agentEnabled)
+      toast({
+        kind: 'info',
+        title: !c.agentEnabled ? 'Agent mode on' : 'Agent mode off',
+        detail: !c.agentEnabled
+          ? 'The orchestrator now plans and delegates tasks to your other models.'
+          : 'Back to direct model chat.',
+      })
+    }
+  }
+
   return (
-    <div className="composer-wrap">
+    <div className={`composer-wrap${isEmpty ? ' centered' : ''}`}>
+      {isEmpty && (
+        <div className="composer-greeting">
+          <IconStarburst size={30} className="composer-greeting-mark" />
+          <h1 className="composer-greeting-title">{greeting}</h1>
+        </div>
+      )}
+
       {pendingIds.length > 0 && (
         <div className="pending-row" aria-label="Attachments queued for next message">
           {pendingIds.map((id) => (
@@ -496,12 +529,37 @@ export function Composer() {
               </button>
             ) : (
               <button className="send-btn" onClick={send} disabled={!canSend} aria-label="Send message" type="button">
-                <IconSend size={15} />
+                <IconArrowUp size={16} />
               </button>
             )}
           </div>
         </div>
       </div>
+
+      {isEmpty && (
+        <div className="composer-suggestions">
+          <button
+            className="suggestion-chip"
+            type="button"
+            onClick={() => {
+              void attachSample(SAMPLES[0]!.file)
+              toast({ kind: 'info', title: 'Sample attached', detail: `Added ${SAMPLES[0]!.label} to the composer.` })
+            }}
+          >
+            <IconFile size={13} /> Try a sample file
+          </button>
+          <button className="suggestion-chip" type="button" onClick={toggleAgent}>
+            <IconBot size={13} /> Agent mode
+          </button>
+          <button className="suggestion-chip" type="button" onClick={() => openSettings('models')}>
+            <IconZap size={13} /> Simulate failover
+          </button>
+          <button className="suggestion-chip" type="button" onClick={() => openSettings('providers')}>
+            <IconKey size={13} /> Connect API keys
+          </button>
+        </div>
+      )}
+
       <div className="composer-foot">
         <span>
           <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for newline

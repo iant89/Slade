@@ -24,6 +24,18 @@ function I({ size = 16, children, ...rest }: P) {
 export const IconPlus = (p: P) => (
   <I {...p}><path d="M12 5v14M5 12h14" /></I>
 )
+/** The Slade mark: a rounded eight-ray starburst (Claude-style asterisk). */
+export const IconStarburst = (p: P) => (
+  <I {...p} strokeWidth={2.5}>
+    <path d="M12 2.8v18.4" />
+    <path d="M2.8 12h18.4" />
+    <path d="M5.7 5.7l12.6 12.6" />
+    <path d="M18.3 5.7 5.7 18.3" />
+  </I>
+)
+export const IconArrowUp = (p: P) => (
+  <I {...p}><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></I>
+)
 export const IconSend = (p: P) => (
   <I {...p}><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7z" /></I>
 )

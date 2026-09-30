@@ -21,6 +21,7 @@ import {
   IconGithub,
   IconPencil,
   IconRefresh,
+  IconStarburst,
   IconTrash,
   IconAlert,
   IconBot,
@@ -90,9 +91,9 @@ export function ThinkingBlock({
 export function TypingIndicator({ label }: { label?: string }) {
   return (
     <div className="typing" role="status" aria-label={label || 'Assistant is typing'}>
-      <span className="typing-dot" />
-      <span className="typing-dot" />
-      <span className="typing-dot" />
+      <span className="typing-mark" aria-hidden="true">
+        <IconStarburst size={16} />
+      </span>
       {label ? <span className="typing-label">{label}</span> : null}
     </div>
   )
