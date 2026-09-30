@@ -430,17 +430,23 @@ function freshAgentConversation(): string {
 
 function testOrchestratorPrompt() {
   console.log('coding-agent orchestrator prompt:')
-  check('uses the requested lead-engineer role', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('lead software-engineering orchestrator'))
-  check('includes the full development lifecycle', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('UNDERSTAND\n↓\nINSPECT\n↓\nPLAN\n↓\nDECOMPOSE'))
-  check('includes the no-false-completion quality gate', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('DO NOT MARK COMPLETE.'))
-  check('includes the required final-report sections', ['IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'REMAINING', 'STATUS'].every((section) => CODING_AGENT_ORCHESTRATOR_PROMPT.includes(section)))
-  check('includes the final orchestrator responsibility', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('The work is verified and complete.'))
+  // Collapse all whitespace so the prose checks survive line-wrapping in the
+  // prompt source: long sentences are wrapped across physical lines, so exact
+  // substring matching against the raw string would fail on a newline.
+  const P = CODING_AGENT_ORCHESTRATOR_PROMPT.replace(/\s+/g, ' ').trim()
+  check('uses the requested lead-engineer role', P.includes('lead software-engineering orchestrator'))
+  check('is explicit about its runtime capability limits (no shell/git/test runner)', P.includes('NO shell, NO terminal, NO Git client, and NO test/build runner'))
+  check('forbids fabricating tool results (provenance of claims)', P.includes('invent file contents, test results, build outcomes, or Git operations'))
+  check('includes the full development lifecycle', P.includes('UNDERSTAND ↓ (inspect context) PLAN ↓ (decompose) DELEGATE'))
+  check('includes the no-false-completion quality gate', P.includes('Never report "Done" unless all relevant acceptance criteria have been verified'))
+  check('includes the required final-report sections', ['IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'REMAINING', 'STATUS'].every((section) => P.includes(section)))
+  check('includes the final orchestrator responsibility', P.includes('the work is verified and complete'))
 
   // Completion report: a plain-language summary first, then only the issues
   // the user must know about, then the detail — and the roadmap rules.
-  const reportSpec = CODING_AGENT_ORCHESTRATOR_PROMPT.slice(CODING_AGENT_ORCHESTRATOR_PROMPT.indexOf('36. FINAL REPORT'))
+  const reportSpec = P.slice(P.indexOf('31. FINAL REPORT'))
   const at = ['SUMMARY', 'ISSUES', 'IMPLEMENTED', 'FILES CHANGED', 'TESTING', 'ARCHITECTURE', 'DOCUMENTATION', 'ROADMAP', 'REMAINING', 'STATUS'].map(
-    (h) => reportSpec.indexOf(`\n${h}\n`),
+    (h) => reportSpec.indexOf(h),
   )
   check(
     'final report leads with SUMMARY, then ISSUES, and keeps the detail sections in order',
@@ -450,33 +456,33 @@ function testOrchestratorPrompt() {
   check(
     'ISSUES is reserved for real problems and names what the user must know',
     reportSpec.includes('Include ISSUES only when there is something real to report') &&
-      reportSpec.includes('Tests or builds that failed, were skipped, or could not be run.') &&
-      reportSpec.includes('Manual actions the user must take'),
+      reportSpec.includes('failed, skipped, or unrunnable tests and builds') &&
+      reportSpec.includes('manual actions the user must take'),
   )
   check(
     'ROADMAP section only appears when a roadmap was used',
-    reportSpec.includes('Include only when a roadmap or milestone file was used'),
+    reportSpec.includes('only when a roadmap or milestone file was used'),
   )
   check(
     'orchestrator owns the roadmap and may only mark verified work done',
-    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('You own the roadmap.') &&
-      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Do not mark incomplete work as complete.') &&
-      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Mark a step done only when its acceptance criteria are verified'),
+    P.includes('You own the roadmap.') &&
+      P.includes('Do not mark incomplete work as complete.') &&
+      P.includes('Mark a step done only when its acceptance criteria are verified'),
   )
   check(
     'roadmap notation Slade parses is spelled out',
-    ['[x] the step is complete', '[~] the step is in progress', '[ ] the step is not started'].every((n) => CODING_AGENT_ORCHESTRATOR_PROMPT.includes(n)),
+    ['[x] the step is complete', '[~] the step is in progress', '[ ] the step is not started'].every((n) => P.includes(n)),
   )
   check(
     'model is told Slade renders the timeline itself, and not to draw its own',
-    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('the previous step, the current step, and the next step when there is one') &&
-      CODING_AGENT_ORCHESTRATOR_PROMPT.includes('Do not draw your own timeline or progress bar in the report.'),
+    P.includes('renders the previous, current, and next step') &&
+      P.includes('do not draw your own timeline or progress bar'),
   )
   check(
     'the model is told never to rewrite a roadmap it only saw truncated',
-    CODING_AGENT_ORCHESTRATOR_PROMPT.includes('If the roadmap is shown to you truncated, never rewrite it.'),
+    P.includes('If the roadmap is shown to you truncated, never rewrite it.'),
   )
-  check('quality gate covers the roadmap and the issues report', CODING_AGENT_ORCHESTRATOR_PROMPT.includes('[ ] Everything the user must be made aware of is reported under ISSUES'))
+  check('quality gate covers the roadmap and the issues report', P.includes('[ ] Everything the user must be made aware of is reported under ISSUES'))
 }
 
 function testPlannerParsing() {
