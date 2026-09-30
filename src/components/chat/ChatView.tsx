@@ -6,7 +6,7 @@ import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { currentAnnouncement, setAnnouncer } from '../../engine/send'
 import { MessageBubble, TypingIndicator } from './MessageBubble'
-import { IconArrowDown, IconBot, IconSparkles, IconWifiOff } from '../icons'
+import { IconArrowDown, IconStarburst, IconWifiOff } from '../icons'
 
 export function ChatView() {
   const conv = useCurrentConversation()
@@ -33,16 +33,18 @@ export function ChatView() {
     return <NoConversation />
   }
 
+  // A fresh conversation gets the centered "greeting + composer" layout: the
+  // chat area steps aside and the composer renders its own greeting.
+  const empty = messages.length === 0
+
   return (
-    <div className="chat-view">
+    <div className={`chat-view${empty ? ' empty' : ''}`}>
       {!online && (
         <div className="offline-banner" role="alert">
           <IconWifiOff size={14} /> You're offline — sends will fail until the connection returns.
         </div>
       )}
-      {messages.length === 0 ? (
-        <EmptyState />
-      ) : (
+      {messages.length === 0 ? null : (
         <Virtuoso
           ref={virtuoso}
           className="msg-list"
@@ -86,59 +88,12 @@ function PendingFooter() {
   )
 }
 
-export function EmptyState() {
-  const openSettings = useUI((s) => s.openSettings)
-  const newChat = useChat((s) => s.newConversation)
-  const conv = useCurrentConversation()
-  const agentEnabled = Boolean(conv?.agentEnabled)
-  return (
-    <div className="empty-state">
-      <div className="empty-mark" aria-hidden="true">
-        <span className="empty-logo">SLADE</span>
-        <span className="empty-tagline">one chat window · every model · never stalls</span>
-      </div>
-      <div className="empty-cards">
-        <button className="empty-card" type="button" onClick={() => newChat()}>
-          <IconSparkles size={16} />
-          <strong>Start a chat</strong>
-          <span>Send a prompt — it streams in token by token.</span>
-        </button>
-        <button
-          className="empty-card"
-          type="button"
-          onClick={() => conv && useChat.getState().setConversationAgent(conv.id, !agentEnabled)}
-        >
-          <IconBot size={16} />
-          <strong>{agentEnabled ? 'Agent mode is on' : 'Meet the orchestrator'}</strong>
-          <span>
-            {agentEnabled
-              ? 'Describe a task below — the orchestrator will plan it and delegate the steps to your other models.'
-              : 'Flip on Agent mode: describe a task and an orchestrator model delegates the steps to your other models, then assembles the answer.'}
-          </span>
-        </button>
-        <button className="empty-card" type="button" onClick={() => openSettings('models')}>
-          <strong>Wire up failover</strong>
-          <span>
-            Settings → Models: set <em>Simulacron Pro</em> to simulate a failure, then send a message and watch the
-            handoff.
-          </span>
-        </button>
-        <button className="empty-card" type="button" onClick={() => openSettings('providers')}>
-          <strong>Bring your keys</strong>
-          <span>Add OpenAI, Anthropic or Gemini keys to route to real models with the same failover engine.</span>
-        </button>
-      </div>
-      <div className="empty-hint">Tip: ask to “generate a CSV of Q3 sales” to see an artifact card.</div>
-    </div>
-  )
-}
-
 function NoConversation() {
   const newChat = useChat((s) => s.newConversation)
   return (
     <div className="empty-state">
       <div className="empty-mark" aria-hidden="true">
-        <span className="empty-logo">SLADE</span>
+        <IconStarburst size={34} />
       </div>
       <button className="btn primary" onClick={() => newChat()} type="button">
         New chat

@@ -8,7 +8,7 @@ import { useUI } from '../../store/ui'
 import type { MenuAnchor } from '../../lib/menuPlacement'
 import { RenameInput } from '../common/RenameInput'
 import { ConversationMenu, type ConversationMenuState } from './ConversationMenu'
-import { IconChevronDown, IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight } from '../icons'
+import { IconChevronDown, IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight, IconPlus } from '../icons'
 
 /** Local file system workspace toggle — shows a dot when files are stored. */
 function FilesButton() {
@@ -80,8 +80,10 @@ function HealthStrip() {
 export function Header() {
   const conv = useCurrentConversation()
   const openSettings = useUI((s) => s.openSettings)
+  const sidebarOpen = useUI((s) => s.sidebarOpen)
   const toggleSidebar = useUI((s) => s.toggleSidebar)
   const toggleRail = useUI((s) => s.toggleRail)
+  const railOpen = useUI((s) => s.railOpen)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [menu, setMenu] = useState<ConversationMenuState | null>(null)
   const titleRef = useRef<HTMLButtonElement>(null)
@@ -123,8 +125,18 @@ export function Header() {
   return (
     <header className="header">
       <div className="header-left">
-        <button className="icon-btn only-mobile" onClick={toggleSidebar} aria-label="Toggle conversations" type="button">
+        <button className="icon-btn" onClick={toggleSidebar} aria-label="Toggle conversations" aria-pressed={sidebarOpen} title="Toggle conversations (Ctrl+J)" type="button">
           <IconPanelLeft size={17} />
+        </button>
+        {/* Floating new-chat button for when the sidebar is collapsed. */}
+        <button
+          className="icon-btn header-new-chat"
+          onClick={() => useChat.getState().newConversation()}
+          aria-label="Start a new chat"
+          title="New chat"
+          type="button"
+        >
+          <IconPlus size={17} />
         </button>
         {editing && conv ? (
           <RenameInput
@@ -164,7 +176,14 @@ export function Header() {
         <HealthStrip />
         <FilesButton />
         <GitHubButton />
-        <button className="icon-btn only-mobile" onClick={toggleRail} aria-label="Toggle model chain panel" type="button">
+        <button
+          className="icon-btn"
+          onClick={toggleRail}
+          aria-label="Toggle model chain panel"
+          aria-pressed={railOpen}
+          title="Model chain panel"
+          type="button"
+        >
           <IconPanelRight size={17} />
         </button>
         <button

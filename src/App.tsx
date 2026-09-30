@@ -125,8 +125,12 @@ export default function App() {
   useHotkeys()
   useBootstrapConversation()
 
+  // Root-level state classes drive the animated sidebar / rail collapse.
+  const sidebarOpen = useUI((s) => s.sidebarOpen)
+  const railOpen = useUI((s) => s.railOpen)
+
   return (
-    <div className="app">
+    <div className={`app${sidebarOpen ? ' sidebar-open' : ''}${railOpen ? ' rail-open' : ''}`}>
       <Sidebar />
       <main className="main">
         <Header />

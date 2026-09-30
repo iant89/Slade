@@ -6,7 +6,7 @@ import type { MenuAnchor } from '../../lib/menuPlacement'
 import type { Conversation } from '../../types'
 import { RenameInput } from '../common/RenameInput'
 import { ConversationMenu, type ConversationMenuState } from './ConversationMenu'
-import { IconChevronRight, IconMoreHorizontal, IconPlus, IconTrash, IconX } from '../icons'
+import { IconChevronRight, IconMoreHorizontal, IconPlus, IconStarburst, IconTrash, IconX } from '../icons'
 
 interface RowProps {
   conv: Conversation
@@ -181,7 +181,8 @@ export function Sidebar() {
       <aside className={`sidebar${sidebarOpen ? ' open' : ''}`} aria-label="Conversations">
         <div className="sidebar-head">
           <span className="logo" aria-hidden="true">
-            SLADE
+            <IconStarburst size={17} className="logo-mark" />
+            <span className="logo-text">Slade</span>
           </span>
           <button className="icon-btn only-mobile" onClick={toggleSidebar} aria-label="Close sidebar" type="button">
             <IconX size={16} />
