@@ -1,6 +1,5 @@
 import { useEffect } from 'react'
 import { useSettings } from './store/settings'
-import { useChat } from './store/chat'
 import { useUI } from './store/ui'
 import { Sidebar } from './components/layout/Sidebar'
 import { Header } from './components/layout/Header'
@@ -9,7 +8,6 @@ import { ChatView } from './components/chat/ChatView'
 import { Composer } from './components/chat/Composer'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { GitHubPanel } from './components/github/GitHubPanel'
-import { GitHubActivityFeed } from './components/github/GitHubActivity'
 import { FilesPanel } from './components/fs/FilesPanel'
 import { PublishDialog } from './components/github/PublishDialog'
 import { Lightbox } from './components/artifacts/Lightbox'
@@ -95,16 +93,6 @@ function useHotkeys() {
   }, [])
 }
 
-/** First run: open with a fresh conversation so the empty state shows. */
-function useBootstrapConversation() {
-  useEffect(() => {
-    const chat = useChat.getState()
-    if (!chat.currentId || !chat.conversations[chat.currentId]) {
-      chat.newConversation()
-    }
-  }, [])
-}
-
 function DragDropOverlay() {
   const active = useUI((s) => s.dragActive)
   if (!active) return null
@@ -123,7 +111,6 @@ export default function App() {
   useAppearanceEffects()
   useOnlineEffects()
   useHotkeys()
-  useBootstrapConversation()
 
   // Root-level state classes drive the animated sidebar / rail collapse.
   const sidebarOpen = useUI((s) => s.sidebarOpen)
@@ -134,9 +121,8 @@ export default function App() {
       <Sidebar />
       <main className="main">
         <Header />
+        {/* The scrollable chat panel: messages, then the session's GitHub cards. */}
         <ChatView />
-        {/* One card per GitHub API call, as it happens. */}
-        <GitHubActivityFeed />
         <Composer />
       </main>
       <ModelRail />

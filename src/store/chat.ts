@@ -97,6 +97,13 @@ export interface ChatState {
   currentId: string
 
   newConversation: (modelId?: string) => string
+  /**
+   * The id of the open conversation, creating a fresh one when there is none
+   * (first run, or the last chat was just deleted or archived). The chat panel
+   * calls this so there is always a conversation for its log — messages, and
+   * the GitHub Actions appended to the panel — to belong to.
+   */
+  ensureConversation: () => string
   selectConversation: (id: string) => void
   deleteConversation: (id: string) => void
   /** Blank titles are ignored. Renaming is not chat activity: `updatedAt` is left alone. */
@@ -175,6 +182,12 @@ export const useChat = create<ChatState>((set, get) => {
       }))
       persistSoon()
       return id
+    },
+
+    ensureConversation: () => {
+      const { currentId, conversations } = get()
+      if (currentId && conversations[currentId]) return currentId
+      return get().newConversation()
     },
 
     selectConversation: (id) => set({ currentId: id }),

@@ -33,8 +33,8 @@ export interface GitHubActionEntry extends GitHubActionInfo {
   count: number
   /**
    * The agent run that caused this call, when one was running. Cards carrying a
-   * scope render inline with that run's answer; cards without one are the
-   * GitHub calls you made yourself and render in the strip above the composer.
+   * scope render inside that run's answer; cards without one are the GitHub
+   * calls you made yourself and are appended to the chat panel.
    */
   scope?: string
 }

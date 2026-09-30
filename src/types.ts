@@ -275,9 +275,9 @@ export interface AgentRun {
   /** Aggregate local file system operations performed across this run. */
   fsOps?: FsOpRecord[]
   /**
-   * Identifies the GitHub cards this run produced, so they render inline with
-   * the run's answer instead of the strip above the composer (see
-   * `useGitHubActivity` and `GitHubRunActivity`).
+   * Identifies the GitHub cards this run produced, so they render inside the
+   * run's answer rather than in the chat panel (see `useGitHubActivity`,
+   * `GitHubRunActivity` and `../components/chat/panel`).
    */
   githubScope?: string
   /**
