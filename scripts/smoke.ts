@@ -89,6 +89,7 @@ import { executePublish, PublishPreflightError, publishErrorMessage } from '../s
 import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
 import { useFs, fsArtifactId } from '../src/store/fs'
+import { createFsArchive, readFsArchive } from '../src/lib/fs-archive'
 import {
   buildFsTree,
   extractFsActions,
@@ -3141,6 +3142,20 @@ async function testAgentLocalFsIntegration() {
   }
 }
 
+async function testFsArchiveRoundTrip() {
+  const binary = btoa(String.fromCharCode(0, 1, 2, 127, 255))
+  const blob = await createFsArchive([
+    { path: 'notes/plan.md', content: '# Plan\n\nKeep the folder path.', encoding: 'utf8' },
+    { path: 'assets/sample.bin', content: binary, encoding: 'base64' },
+  ])
+  const result = await readFsArchive(new File([blob], 'workspace.zip', { type: 'application/zip' }))
+  const text = result.entries.find((entry) => entry.path === 'notes/plan.md')
+  const data = result.entries.find((entry) => entry.path === 'assets/sample.bin')
+  check('workspace ZIP round-trips nested UTF-8 file paths and contents', text?.content === '# Plan\n\nKeep the folder path.' && text?.encoding === 'utf8')
+  check('workspace ZIP round-trips binary bytes without corruption', data?.content === binary && data.encoding === 'base64')
+  check('workspace ZIP importer returns no skipped files for a clean archive', result.entries.length === 2 && result.skippedUnsafe === 0 && result.skippedLarge === 0)
+}
+
 function testLocalFsUiRenders() {
   console.log('local file system ui renders:')
 
@@ -3181,13 +3196,14 @@ function testLocalFsUiRenders() {
     fsInit.selectedPath = null
     fsInit.filter = ''
     const empty = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
-    check('files drawer renders empty state when no files exist', empty.includes('No files stored yet') && empty.includes('Local Files'), empty.slice(0, 160))
+    check('files drawer renders its workspace empty state', empty.includes('No files stored yet') && empty.includes('YOUR WORKSPACE'), empty.slice(0, 160))
+    check('files drawer offers zip import and export actions', empty.includes('Import ZIP') && empty.includes('Export ZIP'))
 
     fsInit.files = { [sampleFile.path]: sampleFile }
     fsInit.selectedPath = sampleFile.path
     const populated = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
     check('files drawer renders directory tree and file row', populated.includes('src/') && populated.includes('runner.ts'), populated.slice(0, 240))
-    check('files drawer shows file count and version badge', populated.includes('1 file') && populated.includes('v2'))
+    check('files drawer shows workspace file count and version badge', populated.includes('<strong>1</strong>') && populated.includes('v2'))
     check('files drawer renders selected file preview and provenance', populated.includes('src/agent/runner.ts') && populated.includes('Simulacron Pro') && populated.includes('runAgent'))
 
     fsInit.filter = 'runAgent'
@@ -4897,6 +4913,7 @@ async function main() {
   testRoadmapUi()
   testRoadmapContextPriority()
   testLocalFsUiRenders()
+  await testFsArchiveRoundTrip()
   await testGitLocalFsReadWriteAcross()
   await testRoadmapFromGitHub()
   testInlineThoughtsRendering()

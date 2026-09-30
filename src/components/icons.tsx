@@ -111,6 +111,14 @@ export const IconArchiveRestore = (p: P) => (
     <path d="M12 12v9" />
   </I>
 )
+export const IconArchiveExport = (p: P) => (
+  <I {...p}>
+    <rect x="2" y="3" width="20" height="5" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <path d="M12 20V11" />
+    <path d="m8 15 4-4 4 4" />
+  </I>
+)
 export const IconMoreHorizontal = (p: P) => (
   <I {...p}>
     <circle cx="5" cy="12" r="1.3" fill="currentColor" />
