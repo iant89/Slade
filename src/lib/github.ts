@@ -671,6 +671,9 @@ export async function deleteRemoteFile(fullName: string, path: string, o: Delete
   return { commitSha: res?.commit?.sha }
 }
 
+/** The modes Slade will record for a blob. */
+export type GitFileMode = '100644' | '100755'
+
 export interface CommitTreeEntryInput {
   path: string
   /** UTF-8 text content, or omit when `base64` or `deleted` is set. */
@@ -679,6 +682,28 @@ export interface CommitTreeEntryInput {
   base64?: string
   /** True to delete this file from the Git tree. */
   deleted?: boolean
+  /**
+   * File mode to record. Omit to keep the mode the path already has on the
+   * branch (`100644` / `100755`); new files default to `100644`.
+   */
+  mode?: GitFileMode
+}
+
+/**
+ * Which mode to write for a blob entry.
+ *
+ * Local Files has no concept of a file mode, so a commit that wrote `100644`
+ * for everything would strip the executable bit off every file it touched —
+ * including files the user never edited. Carrying the mode the path already has
+ * on the branch is what makes an edit a *content* change.
+ *
+ * Only regular-file modes are carried over: `120000` (symlink) and `160000`
+ * (submodule) describe something that is not a blob's contents, so writing file
+ * content under them would corrupt the entry.
+ */
+function blobModeFor(path: string, explicit: GitFileMode | undefined, baseModes: Map<string, string>): GitFileMode {
+  if (explicit) return explicit
+  return baseModes.get(path) === '100755' ? '100755' : '100644'
 }
 
 export interface CommitTreeOptions extends GhRequest {
@@ -721,10 +746,20 @@ export async function commitTree(fullName: string, o: CommitTreeOptions): Promis
   )
   const baseTreeSha = baseCommit?.tree?.sha ?? baseCommitSha
 
+  // Read the modes the branch already has, so a commit can't clear the
+  // executable bit by omission. Only fetched when an entry has no explicit mode.
+  const baseModes = new Map<string, string>()
+  if (o.entries.some((e) => !e.deleted && !e.mode)) {
+    const base = await getTree(fullName, baseTreeSha, reqOpts)
+    for (const entry of base.entries) {
+      if (entry.type === 'blob') baseModes.set(entry.path, entry.mode)
+    }
+  }
+
   const fileShas: Record<string, string> = {}
   const treeItems: Array<{
     path: string
-    mode: '100644'
+    mode: GitFileMode
     type: 'blob'
     content?: string
     sha?: string | null
@@ -742,9 +777,14 @@ export async function commitTree(fullName: string, o: CommitTreeOptions): Promis
         body: { content: entry.base64, encoding: 'base64' },
       })
       fileShas[cleanPath] = blob.sha
-      treeItems.push({ path: cleanPath, mode: '100644', type: 'blob', sha: blob.sha })
+      treeItems.push({ path: cleanPath, mode: blobModeFor(cleanPath, entry.mode, baseModes), type: 'blob', sha: blob.sha })
     } else {
-      treeItems.push({ path: cleanPath, mode: '100644', type: 'blob', content: entry.content ?? '' })
+      treeItems.push({
+        path: cleanPath,
+        mode: blobModeFor(cleanPath, entry.mode, baseModes),
+        type: 'blob',
+        content: entry.content ?? '',
+      })
     }
   }
 

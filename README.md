@@ -205,7 +205,8 @@ included in JSON backups (**Settings → Data**):
   mentioned repo files into `useFs` before planning/execution, track local modifications
   and deletions (`dirty` / `synced` badges), and let you commit & push single or multiple
   files (additions, modifications, and deletions) back to a GitHub branch in one atomic
-  Git Data API commit (`commitTree`).
+  Git Data API commit (`commitTree`). Commits carry each path's existing **file mode**
+  over from the branch, so editing a script never clears its executable bit.
 - **Cross-step visibility** — files written by earlier worker steps are immediately stored
   and exposed to subsequent worker steps and the final synthesizer, and each step's file
   operations (`create`, `update`, `append`, `move`, `delete`) appear as interactive chips

@@ -31,6 +31,7 @@ import { classifyHttp } from '../src/providers/base'
 import type { ProviderError } from '../src/providers/base'
 import { mockAdapter } from '../src/providers/mock'
 import {
+  commitTree,
   createBranch,
   createGist,
   createIssue,
@@ -1616,6 +1617,87 @@ function testRepoIdentifiers() {
   check('language hint is derived', guessLanguage('src/main.rs') === 'rust')
 }
 
+/**
+ * Local Files cannot represent a file mode, so `commitTree` has to read the
+ * modes off the branch — otherwise every commit rewrites the paths it touches as
+ * 100644 and silently clears the executable bit (and would corrupt a symlink by
+ * writing file content under mode 120000).
+ */
+async function testCommitTreeModes() {
+  console.log('git commit tree modes:')
+  const sha = 'ghp_' + 'd'.repeat(24)
+  let posted: { base_tree?: string; tree?: { path: string; mode?: string; type?: string; sha?: string | null }[] } | undefined
+  const fake = await startFakeGitHub({
+    '/repos/octo/demo/git/ref/heads/main': () => ({ status: 200, json: { object: { sha: 'head1' } } }),
+    '/repos/octo/demo/git/commits/head1': () => ({ status: 200, json: { sha: 'head1', tree: { sha: 'tree1' } } }),
+    '/repos/octo/demo/git/trees/tree1': () => ({
+      status: 200,
+      json: {
+        truncated: false,
+        tree: [
+          { path: 'bin/tool.sh', mode: '100755', type: 'blob', sha: 'sh1', size: 10 },
+          { path: 'link.sh', mode: '120000', type: 'blob', sha: 'ln1', size: 9 },
+          { path: 'plain.txt', mode: '100644', type: 'blob', sha: 'p1', size: 6 },
+          { path: 'vendor/lib', mode: '160000', type: 'commit', sha: 'sub1' },
+        ],
+      },
+    }),
+    '/repos/octo/demo/git/trees': (body) => {
+      posted = body as typeof posted
+      return { status: 201, json: { sha: 'tree2', tree: [] } }
+    },
+    '/repos/octo/demo/git/commits': () => ({
+      status: 201,
+      json: { sha: 'commit2', html_url: 'https://github.com/octo/demo/commit/commit2' },
+    }),
+    '/repos/octo/demo/git/refs/heads/main': () => ({ status: 200, json: { object: { sha: 'commit2' } } }),
+  })
+  try {
+    const res = await commitTree('octo/demo', {
+      token: sha,
+      baseUrl: fake.base,
+      branch: 'main',
+      message: 'content edits only',
+      entries: [
+        { path: 'bin/tool.sh', content: '#!/bin/sh\necho v2\n' },
+        { path: 'link.sh', content: 'this used to be a symlink\n' },
+        { path: 'plain.txt', content: 'plain v2\n' },
+        { path: 'added.txt', content: 'brand new\n' },
+        { path: 'gone.txt', deleted: true },
+      ],
+    })
+    const modeOf = (path: string) => posted?.tree?.find((e) => e.path === path)?.mode
+    check('an edited executable keeps 100755', modeOf('bin/tool.sh') === '100755', String(modeOf('bin/tool.sh')))
+    check('an edited plain file stays 100644', modeOf('plain.txt') === '100644', String(modeOf('plain.txt')))
+    check('a new file defaults to 100644', modeOf('added.txt') === '100644', String(modeOf('added.txt')))
+    check('a symlink mode is not carried onto file content', modeOf('link.sh') === '100644', String(modeOf('link.sh')))
+    check('a delete is still sha: null', posted?.tree?.find((e) => e.path === 'gone.txt')?.sha === null)
+    check(
+      'the base tree is read for its modes',
+      fake.seen.filter((r) => r.url.startsWith('/repos/octo/demo/git/trees/tree1')).length === 1,
+      JSON.stringify(fake.seen.map((r) => r.url)),
+    )
+    check('the commit lands on the branch', res.commitSha === 'commit2' && res.branch === 'main', JSON.stringify(res))
+
+    const cut = fake.seen.length
+    await commitTree('octo/demo', {
+      token: sha,
+      baseUrl: fake.base,
+      branch: 'main',
+      message: 'explicit mode',
+      entries: [{ path: 'added.sh', content: '#!/bin/sh\n', mode: '100755' }],
+    })
+    check(
+      'an explicit mode wins, without a mode lookup',
+      modeOf('added.sh') === '100755' &&
+        !fake.seen.slice(cut).some((r) => r.url.startsWith('/repos/octo/demo/git/trees/tree1')),
+      String(modeOf('added.sh')),
+    )
+  } finally {
+    fake.close()
+  }
+}
+
 /** Every REST call Slade makes, against a fake api.github.com. */
 async function testGitHubClient() {
   console.log('github REST client:')
@@ -2388,6 +2470,11 @@ async function testGitHubActionCards() {
     '/repos/octo/demo/branches': () => ({ status: 200, json: [{ name: 'main', commit: { sha: 's1' } }] }),
     '/repos/octo/demo/git/ref/heads/main': () => ({ status: 200, json: { object: { sha: 'c0ffee1234' } } }),
     '/repos/octo/demo/git/commits/c0ffee1234': () => ({ status: 200, json: { sha: 'c0ffee1234', tree: { sha: 'tree-base' } } }),
+    // The commit path reads the base tree for its modes before writing one.
+    '/repos/octo/demo/git/trees/tree-base': () => ({
+      status: 200,
+      json: { truncated: false, tree: [{ path: 'docs/roadmap.md', mode: '100644', type: 'blob', sha: 'blob0', size: 12 }] },
+    }),
     '/repos/octo/demo/git/trees': () => ({ status: 201, json: { sha: 'tree-new', tree: [{ path: 'docs/answer.md', sha: 'blob1' }] } }),
     '/repos/octo/demo/git/commits': () => ({ status: 201, json: { sha: 'c0ffee9999', html_url: 'https://github.com/octo/demo/commit/c0ffee9999' } }),
     '/repos/octo/demo/git/refs': () => ({ status: 201, json: { ref: 'refs/heads/main', object: { sha: 'c0ffee9999' } } }),
@@ -3307,12 +3394,25 @@ async function testGitLocalFsReadWriteAcross() {
       status: 200,
       json: [{ name: 'main', commit: { sha: 'head_sha_1' } }],
     }),
+    // `src/math.ts` is executable on the branch — the commit path has to notice
+    // and keep 100755, including when the agent edits only its contents.
     '/repos/octo/demo/git/trees/main': () => ({
       status: 200,
       json: {
         truncated: false,
         tree: [
-          { path: 'src/math.ts', mode: '100644', type: 'blob', sha: 'sha_math_1', size: initialMathTs.length },
+          { path: 'src/math.ts', mode: '100755', type: 'blob', sha: 'sha_math_1', size: initialMathTs.length },
+          { path: 'src/legacy.ts', mode: '100644', type: 'blob', sha: 'sha_leg_1', size: initialLegacyTs.length },
+        ],
+      },
+    }),
+    // Same tree, addressed by sha — what commitTree reads modes from.
+    '/repos/octo/demo/git/trees/base_tree_sha_1': () => ({
+      status: 200,
+      json: {
+        truncated: false,
+        tree: [
+          { path: 'src/math.ts', mode: '100755', type: 'blob', sha: 'sha_math_1', size: initialMathTs.length },
           { path: 'src/legacy.ts', mode: '100644', type: 'blob', sha: 'sha_leg_1', size: initialLegacyTs.length },
         ],
       },
@@ -3503,6 +3603,22 @@ async function testGitLocalFsReadWriteAcross() {
           postedTree?.tree?.some((e) => e.path === 'src/legacy.ts' && e.sha === null),
       ),
       JSON.stringify(postedTree),
+    )
+    const postedMode = (path: string) => postedTree?.tree?.find((e) => e.path === path)?.mode
+    check(
+      'an edited executable keeps mode 100755 (a content edit, not a mode change)',
+      postedMode('src/math.ts') === '100755',
+      `${postedMode('src/math.ts')} — ${JSON.stringify(postedTree?.tree)}`,
+    )
+    check(
+      'a file created by the run is 100644',
+      postedMode('src/math.test.ts') === '100644',
+      `${postedMode('src/math.test.ts')}`,
+    )
+    check(
+      'the base tree is read for its modes',
+      fakeGh.seen.some((r) => r.method === 'GET' && r.url.startsWith('/repos/octo/demo/git/trees/base_tree_sha_1')),
+      JSON.stringify(fakeGh.seen.map((r) => r.url)),
     )
     check(
       'Git commit referenced base head SHA and updated branch ref',
@@ -4898,6 +5014,7 @@ async function main() {
   await testPlannerNearJsonRun()
   await testRoadmapSimulator()
   testRepoIdentifiers()
+  await testCommitTreeModes()
   await testGitHubClient()
   await testGitHubErrors()
   await testGitHubRelay()
