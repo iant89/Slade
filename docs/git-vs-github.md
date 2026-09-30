@@ -178,7 +178,79 @@ is right, and P1 buys most of what a shell would: `git.status`, `git.diff`, `git
 and offline. Executing the *binary* is neither necessary nor the point. Emulating the
 *binary's semantics for the operations Slade offers* is.
 
-## 6. One-line summary
+## 6. Appendix: the `100644` bug, in full
+
+§5 mentioned it in one line; here it is properly, because it is the best available
+evidence for why the split is worth doing.
+
+**What the code does.** `commitTree()` writes a literal `mode: '100644'` into every
+tree item it builds — `src/lib/github.ts:727` (the type), `:737` (deletions), `:745`
+(base64/binary), `:747` (text). Not a typo in one branch: all four, unconditionally.
+Every path Slade commits becomes a regular, non-executable file.
+
+**It isn't a typo, it's structural.** There is no correct value available anywhere:
+
+| Layer | Carries a mode? |
+| --- | --- |
+| GitHub's tree API (`GitHubTreeEntry.mode`) | yes — and `grep -rn "\.mode\b" src/` finds **no reader** |
+| `RemoteFile` (the pull path) | no — `readFile` never asks |
+| `FsFile` (Local Files) | no — the type has no such field |
+| `CommitTreeEntryInput` | no — the caller can't express one |
+
+So the mode is fetched, discarded, and then re-invented at commit time as a constant.
+
+**Verified consequence** (real `git`, same blob, mode forced to `100644` — exactly what
+Slade sends):
+
+```
+$ git diff-tree -r --summary HEAD $NEW
+ mode change 100755 => 100644 run.sh
+$ ls -l run.sh
+-rw-r--r-- run.sh
+```
+
+The file's *contents* are identical — the blob sha is unchanged — so nothing in
+Slade's UI, and nothing in its artifact cards, can tell you it happened. A fresh clone
+checks out `run.sh` without `+x` and CI dies on `./run.sh: Permission denied`, in a
+commit authored by the user's own token.
+
+**Reachable in two clicks.** Pull an executable file, edit one line, commit. `readFile`
+dropped the mode on the way in, so the round-trip cannot preserve it even in principle.
+Worse, the "Commit & Push" button in Local Files (`FilesPanel.tsx:648`) passes no
+`paths`, which lands on this fallback in `store/github.ts`:
+
+```ts
+const changed = allFiles.filter((f) => f.dirty || !f.remote || f.remote.repo !== repo)
+filesToCommit = changed.length > 0 ? changed : allFiles
+```
+
+When nothing is dirty, that is *every file in Local Files* — so a commit that changes
+nothing can still strip the exec bit from files the user never touched. The agent's
+explicit `paths:` path (`AgentPlanCard.tsx:154`) is narrower but equally mode-blind.
+
+The symlink case is the same root cause with a spookier result: `120000` entries can't
+be pulled (`readFile` rejects non-`file` types), but a local file at a path that is a
+symlink upstream will be committed as `100644` — the link becomes a regular file
+containing the target path.
+
+**Why the tests didn't catch it.** `scripts/smoke.ts` types the captured payload as
+`mode: string` and then asserts only on `path`, `content`, and `sha: null`. The mode is
+in the harness's type and in none of its assertions, so the suite passes with the bug,
+and would pass again if it were reintroduced.
+
+**Fix shape.** Carry the mode end to end — `readFile` → `RemoteFile` → `FsFile` →
+`CommitTreeEntryInput`, defaulting to `100644` only when there is genuinely nothing to
+preserve. A cheaper first cut: in `commitTree`, read the base tree (already being
+fetched for `base_tree`) and reuse the existing mode for each path, so an edit can
+never silently change a mode it didn't mean to. Either way, add the assertion the
+harness is missing.
+
+One spelling trap for whoever does it: GitHub's tree API wants `040000` for a subtree,
+while git's own tree *object* stores `40000`. Get it wrong and every oid is wrong while
+the UI looks perfect — the same trap §3 describes, which is why this needs `git` as the
+reference in tests, not a rendered page.
+
+## 7. One-line summary
 
 Split it — into transport, Git objects, and forge — and aim for **100% object-format
 compatibility and 100% coverage of the operations Slade performs**, not 100% of a
