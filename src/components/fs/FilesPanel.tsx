@@ -10,6 +10,7 @@ import { downloadUrl } from '../../lib/clipboard'
 import { guessLanguage } from '../../lib/github'
 import { buildFsTree, fsExt, isFsError, type FsDirNode } from '../../lib/fs'
 import { fileToDataURL } from '../../store/artifacts'
+import { createFsArchive, readFsArchive } from '../../lib/fs-archive'
 import { CodeArtifact } from '../artifacts/CodeArtifact'
 import { SheetTable } from '../artifacts/SheetTable'
 import { Markdown } from '../chat/Markdown'
@@ -19,6 +20,8 @@ import {
   IconChevronRight,
   IconCode,
   IconDownload,
+  IconArchiveExport,
+  IconArchiveRestore,
   IconExternal,
   IconFile,
   IconFileText,
@@ -39,11 +42,16 @@ import {
 
 function FileKindIcon({ file }: { file: FsFile }) {
   const ext = fsExt(file.path)
-  if (file.kind === 'image') return <IconImage size={13} />
-  if (file.kind === 'sheet' || ext === 'csv' || ext === 'tsv') return <IconTable size={13} />
-  if (file.kind === 'code') return <IconCode size={13} />
-  if (file.kind === 'doc') return <IconFileText size={13} />
-  return <IconFile size={13} />
+  const icon = file.kind === 'image'
+    ? <IconImage size={13} />
+    : file.kind === 'sheet' || ext === 'csv' || ext === 'tsv'
+      ? <IconTable size={13} />
+      : file.kind === 'code'
+        ? <IconCode size={13} />
+        : file.kind === 'doc'
+          ? <IconFileText size={13} />
+          : <IconFile size={13} />
+  return <span className={`fs-kind-icon ${file.kind}`}>{icon}</span>
 }
 
 /**
@@ -88,7 +96,10 @@ export function FilesPanel() {
   const [renaming, setRenaming] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
   const [rawView, setRawView] = useState(false)
+  const [archiveBusy, setArchiveBusy] = useState<'export' | 'import' | null>(null)
+  const [archiveProgress, setArchiveProgress] = useState(0)
   const uploadRef = useRef<HTMLInputElement>(null)
+  const archiveRef = useRef<HTMLInputElement>(null)
 
   const files = useMemo(
     () => Object.values(filesMap).sort((a, b) => a.path.localeCompare(b.path)),
@@ -238,6 +249,86 @@ export function FilesPanel() {
     }
   }
 
+  const exportWorkspace = async () => {
+    if (!files.length || archiveBusy) return
+    setArchiveBusy('export')
+    setArchiveProgress(0)
+    try {
+      const blob = await createFsArchive(files, setArchiveProgress)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `slade-workspace-${new Date().toISOString().slice(0, 10)}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
+      toast({ kind: 'success', title: 'Workspace exported', detail: `${files.length} files · ${formatBytes(totalBytes)}` })
+    } catch (err) {
+      toast({ kind: 'error', title: 'Could not export workspace', detail: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setArchiveBusy(null)
+      setArchiveProgress(0)
+    }
+  }
+
+  const importWorkspace = async (file: File | undefined) => {
+    if (!file || archiveBusy) return
+    setArchiveBusy('import')
+    try {
+      const archive = await readFsArchive(file)
+      if (!archive.entries.length) {
+        toast({
+          kind: 'error',
+          title: 'No importable files found',
+          detail: archive.skippedUnsafe || archive.skippedLarge
+            ? `${archive.skippedUnsafe} unsafe and ${archive.skippedLarge} oversized files skipped.`
+            : 'The zip archive is empty.',
+        })
+        return
+      }
+
+      const existing = useFs.getState().files
+      const conflicts = archive.entries.filter((entry) => Boolean(existing[entry.path])).length
+      if (conflicts > 0 && !window.confirm(
+        `This archive contains ${archive.entries.length} files, including ${conflicts} that already exist. Replace the existing files?`,
+      )) return
+
+      let imported = 0
+      let failed = 0
+      for (const entry of archive.entries) {
+        try {
+          useFs.getState().writeFile(entry.path, entry.content, {
+            encoding: entry.encoding,
+            mime: entry.mime,
+            source: { origin: 'user' },
+            syncArtifact: true,
+          })
+          imported++
+        } catch {
+          failed++
+        }
+      }
+      const firstPath = archive.entries.find((entry) => useFs.getState().files[entry.path])?.path
+      if (firstPath) useFs.getState().selectFile(firstPath)
+      const skipped = archive.skippedUnsafe + archive.skippedLarge
+      toast({
+        kind: failed || skipped ? 'info' : 'success',
+        title: `Imported ${imported} file${imported === 1 ? '' : 's'}`,
+        detail: [
+          conflicts ? `${conflicts} existing file${conflicts === 1 ? '' : 's'} replaced` : '',
+          failed ? `${failed} files could not be stored` : '',
+          skipped ? `${skipped} unsafe or oversized entries skipped` : '',
+        ].filter(Boolean).join(' · ') || file.name,
+      })
+    } catch (err) {
+      toast({ kind: 'error', title: 'Could not import zip archive', detail: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setArchiveBusy(null)
+      if (archiveRef.current) archiveRef.current.value = ''
+    }
+  }
+
   const downloadFile = (file: FsFile) => {
     const url =
       file.encoding === 'base64'
@@ -349,34 +440,11 @@ export function FilesPanel() {
     <>
       <div className="gh-drawer-backdrop only-mobile" onClick={close} aria-hidden="true" />
       <aside className="github-drawer files-drawer" aria-label="Local file system">
-        <header className="gh-head">
+        <header className="gh-head fs-drawer-head">
           <h2>
-            <IconFolder size={14} /> Local Files
+            <span className="fs-brand-mark"><IconFolder size={15} /></span> Workspace
           </h2>
-          {files.length > 0 ? (
-            <span className="gh-identity" title="Files stored in the browser local file system">
-              {files.length} file{files.length === 1 ? '' : 's'} · {formatBytes(totalBytes)}
-            </span>
-          ) : null}
-          <button
-            className="btn ghost small"
-            onClick={() => {
-              setCreating((c) => !c)
-              setCreateError(null)
-            }}
-            title="Create a new file in the local file system"
-            type="button"
-          >
-            <IconPlus size={12} /> New
-          </button>
-          <button
-            className="btn ghost small"
-            onClick={() => uploadRef.current?.click()}
-            title="Upload files into the local file system"
-            type="button"
-          >
-            <IconUpload size={12} /> Upload
-          </button>
+          <span className="gh-identity">Local files</span>
           {files.length > 0 || deletedCount > 0 ? (
             <button
               className="btn ghost small"
@@ -404,6 +472,13 @@ export function FilesPanel() {
               e.target.value = ''
             }}
           />
+          <input
+            ref={archiveRef}
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            hidden
+            onChange={(e) => void importWorkspace(e.target.files?.[0])}
+          />
           <button className="icon-btn" onClick={close} aria-label="Close local file system" type="button">
             <IconX size={16} />
           </button>
@@ -411,6 +486,59 @@ export function FilesPanel() {
 
         <div className="gh-tabpanel">
           <div className="gh-tab-body">
+            <section className="fs-workspace-intro" aria-label="Workspace overview">
+              <div className="fs-workspace-copy">
+                <div className="fs-workspace-kicker"><span className="fs-live-dot" /> YOUR WORKSPACE</div>
+                <h3>{files.length ? 'Everything in its right place.' : 'A fresh space for your next idea.'}</h3>
+                <p>Files your agents create, plus anything you bring into the workspace.</p>
+              </div>
+              <div className="fs-workspace-stats">
+                <div><strong>{files.length}</strong><span>files</span></div>
+                <div><strong>{formatBytes(totalBytes)}</strong><span>in workspace</span></div>
+                <div><strong>{dirtyCount}</strong><span>unsynced</span></div>
+              </div>
+            </section>
+
+            <div className="fs-toolbar" aria-label="Workspace actions">
+              <div className="fs-toolbar-main">
+                <button
+                  className="btn primary small"
+                  onClick={() => { setCreating((value) => !value); setCreateError(null) }}
+                  title="Create a new file in the local file system"
+                  type="button"
+                >
+                  <IconPlus size={13} /> New file
+                </button>
+                <button className="btn ghost small" onClick={() => uploadRef.current?.click()} type="button">
+                  <IconUpload size={13} /> Upload
+                </button>
+                <button
+                  className="btn ghost small"
+                  disabled={Boolean(archiveBusy)}
+                  onClick={() => archiveRef.current?.click()}
+                  title="Import a zip archive into this workspace"
+                  type="button"
+                >
+                  <IconArchiveRestore className="fs-zip-import-icon" size={15} /> Import ZIP
+                </button>
+                <button
+                  className="btn ghost small"
+                  disabled={!files.length || Boolean(archiveBusy)}
+                  onClick={() => void exportWorkspace()}
+                  title="Download all workspace files as a zip archive"
+                  type="button"
+                >
+                  <IconArchiveExport className="fs-zip-export-icon" size={15} /> Export ZIP
+                </button>
+              </div>
+              {archiveBusy ? (
+                <span className="fs-archive-status" role="status">
+                  <span className="spin">◌</span>
+                  {archiveBusy === 'export' ? `Packing ${Math.round(archiveProgress)}%` : 'Reading archive…'}
+                </span>
+              ) : null}
+            </div>
+
             {activeRepo ? (
               <div className="fs-git-bar">
                 <span className="fs-git-repo" title={`Connected GitHub repository: ${activeRepo}@${activeBranch ?? 'HEAD'}`}>

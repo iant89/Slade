@@ -440,14 +440,18 @@ kbd {
   gap: 8px;
 }
 .header-left, .header-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.header-left { flex: 1 1 0; }
+.header-right { flex: 0 0 auto; }
 .header-title {
+  min-width: 0;
   font-weight: 550; font-size: 0.94em;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: normal; overflow: visible; text-overflow: clip;
+  overflow-wrap: anywhere;
 }
 /* The name is a button: click for the conversation menu (rename / archive). */
 .header-title-btn {
   display: inline-flex; align-items: center; gap: 6px;
-  min-width: 0; max-width: 100%;
+  flex: 1 1 auto; min-width: 0; max-width: none;
   /* The negative margin keeps the text where the plain title used to sit. */
   padding: 6px 9px; margin-left: -9px;
   border-radius: var(--radius-s);
@@ -2029,6 +2033,11 @@ input[type='range']::-moz-range-thumb {
 }
 
 @media (max-width: 900px) {
+  /* Keep compact truncation on tablet/phone layouts; desktop headers show the full title. */
+  .header-left { flex: 1 1 auto; }
+  .header-title-btn { flex: 0 1 auto; max-width: 100%; }
+  .header-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+
   .app { grid-template-columns: minmax(0, 1fr); }
   .only-mobile { display: inline-flex !important; }
 
@@ -3601,3 +3610,85 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
   .roadmap-link.is-travelled { border-left-color: var(--ok); }
   .roadmap-link.is-ahead { border-left-style: dashed; }
 }
+
+/* Workspace explorer polish ----------------------------------------- */
+.files-drawer .gh-tab-body { padding: 14px 15px 18px; }
+.fs-drawer-head h2 { color: var(--text); }
+.fs-drawer-head .gh-identity { margin-right: auto; }
+.fs-brand-mark {
+  display: grid; place-items: center; width: 28px; height: 28px; flex: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 9px; color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg-panel));
+}
+.fs-workspace-intro {
+  position: relative; overflow: hidden;
+  padding: 17px 16px 13px; margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 15px;
+  background:
+    radial-gradient(ellipse at 94% 5%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 45%),
+    linear-gradient(140deg, color-mix(in srgb, var(--accent) 7%, var(--bg-panel)), var(--bg-panel));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.fs-workspace-copy { position: relative; z-index: 1; }
+.fs-workspace-kicker {
+  display: flex; align-items: center; gap: 7px;
+  color: var(--accent-ink); font-size: 0.64em; font-weight: 750; letter-spacing: 0.13em;
+}
+.fs-live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 13%, transparent);
+}
+.fs-workspace-intro h3 {
+  margin: 8px 0 4px; font-family: var(--font-serif); font-weight: 600;
+  font-size: 1.2em; letter-spacing: -0.015em; color: var(--text);
+}
+.fs-workspace-intro p { margin: 0; max-width: 36ch; color: var(--text-muted); font-size: 0.77em; line-height: 1.5; }
+.fs-workspace-stats {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px; padding-top: 14px; margin-top: 13px;
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 78%, transparent);
+}
+.fs-workspace-stats > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fs-workspace-stats strong { font-family: var(--font-mono); font-size: 0.93em; font-weight: 650; color: var(--text); }
+.fs-workspace-stats span { color: var(--text-faint); font-size: 0.68em; }
+.fs-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  flex-wrap: wrap; padding: 0 0 10px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.fs-toolbar-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fs-toolbar .btn { min-height: 30px; }
+.fs-toolbar .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.fs-archive-status { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 0.7em; white-space: nowrap; }
+.files-drawer .gh-tree-wrap {
+  border-color: color-mix(in srgb, var(--border-strong) 80%, var(--border));
+  background: color-mix(in srgb, var(--bg-panel) 68%, transparent);
+}
+.files-drawer .gh-tree-row { min-height: 34px; transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease; }
+.files-drawer .gh-tree-row.active { background: color-mix(in srgb, var(--accent) 12%, var(--bg-panel)); }
+.files-drawer .gh-tree-open { gap: 8px; }
+.fs-kind-icon {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 22px; height: 22px; border-radius: 7px;
+  color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel));
+}
+.fs-kind-icon.image { color: #b16ad0; background: color-mix(in srgb, #b16ad0 13%, var(--bg-panel)); }
+.fs-kind-icon.sheet { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--bg-panel)); }
+.fs-kind-icon.code { color: var(--accent-ink); }
+.fs-kind-icon.doc { color: #cb8c47; background: color-mix(in srgb, #cb8c47 13%, var(--bg-panel)); }
+.files-drawer .gh-tree-name { font-size: 0.96em; }
+.files-drawer .gh-tree-row .icon-btn { opacity: 0.55; }
+.files-drawer .gh-tree-row:hover .icon-btn,
+.files-drawer .gh-tree-row:focus-within .icon-btn { opacity: 1; }
+.files-drawer .fs-preview { border-radius: 13px; overflow: hidden; }
+@media (max-width: 520px) {
+  .files-drawer .gh-tab-body { padding: 12px 11px 16px; }
+  .fs-workspace-intro { padding: 14px 13px 12px; }
+  .fs-toolbar { align-items: flex-start; }
+  .fs-toolbar-main { gap: 5px; }
+  .fs-toolbar .btn { padding-inline: 8px; font-size: 0.74em; }
+}
+.fs-zip-import-icon { color: var(--ok); }
+.fs-zip-export-icon { color: var(--accent-ink); }
