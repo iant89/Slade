@@ -361,18 +361,27 @@ against and a status glyph.
 
 - **A run's calls go inline with the run.** When the orchestrator makes GitHub
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
-  cards render inside that run's plan card, under the steps they served, so the
-  work and the calls that did it sit together. That block opens itself while its
-  calls are in flight and folds to `GitHub activity · 12 calls` the moment the
-  last one lands; clicking the line opens it again.
+  cards render in that run's activity timeline, in the order things happened,
+  between the thoughts that led to them.
 - **Your calls are appended to the chat panel.** Calls *you* make (browsing the
   drawer, searching, publishing, signing in) are appended to the end of the
   scrollable chat panel — in the message column, above the composer — so they
   scroll with the conversation instead of sitting outside it in a strip. Each one
   is appended after what was already there: an action never splits a message from
   the reply it caused.
-- **A card never expands.** There is nothing to open: what happened, and to what,
-  is the whole card. Failures keep GitHub's own sentence in the row's tooltip.
+- **More than two in a row fold into a dropdown.** One or two cards stay as rows
+  of their own; three or more in a row collapse into a single **GitHub Actions**
+  row, in both places above. It starts folded and shows how many calls it holds,
+  what they were (`Get File Contents ×4 · Created Commit`), and what is running
+  right now — click the header to open it and see every card, in order. What you
+  must not miss stays on the closed header: a call in flight, a failure
+  (`1 failed`), a cancellation. A thought between two calls ends the streak, so a
+  group never reorders or swallows the reasoning around it, and a group keeps its
+  open or closed state as more calls land.
+- **A card never expands.** There is nothing to open on a card: what happened, and
+  to what, is the whole card. Failures keep GitHub's own sentence in the row's
+  tooltip. (The group row above is the only thing that opens, and all it reveals
+  is the cards.)
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,

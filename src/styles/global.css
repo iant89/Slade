@@ -2735,7 +2735,8 @@ input[type='range']::-moz-range-thumb {
   margin-bottom: var(--msg-gap);
   animation: msg-in 0.26s var(--ease-out);
 }
-.gh-panel-item .gh-action-card {
+.gh-panel-item .gh-action-card,
+.gh-panel-item .gh-action-group {
   width: 100%;
   max-width: var(--chat-max);
 }
@@ -2747,11 +2748,19 @@ input[type='range']::-moz-range-thumb {
   margin: 4px 0 8px;
 }
 
+/* Top and bottom padding of a card row and of a group's header row: 1.25px,
+   75% less than the 5px it used to be. These are one-line status rows that
+   stack, so they stay snug; the 9px at the sides is unchanged. */
+.gh-action-card,
+.gh-action-group {
+  --gh-action-pad-y: 1.25px;
+}
+
 .gh-action-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 9px;
+  padding: var(--gh-action-pad-y) 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
   background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
@@ -2793,7 +2802,8 @@ input[type='range']::-moz-range-thumb {
   color: var(--text-muted);
 }
 
-.gh-action-card.status-running .gh-action-icon {
+.gh-action-card.status-running .gh-action-icon,
+.gh-action-group.status-running > .gh-action-group-head .gh-action-icon {
   color: var(--accent-ink);
 }
 
@@ -2892,14 +2902,108 @@ input[type='range']::-moz-range-thumb {
   color: var(--accent-ink);
 }
 
-.gh-action-card .gh-action-status.running svg {
+.gh-action-card .gh-action-status.running svg,
+.gh-action-group-head .gh-action-status.running svg {
   animation: spin 0.9s linear infinite;
+}
+
+/* ---- Expandable group: more than two cards in a row ----
+
+   Folded, it is one row that looks like a card; opened, it holds the same
+   read-only cards, flattened into the container and divided by hairlines.
+   Its status (live work, then failure, then cancelled) tints the border and
+   header, so a failure never hides behind a closed group. */
+
+.gh-action-group {
+  --gh-group-bg: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+  --gh-group-bg-hover: color-mix(in srgb, var(--bg-hover) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  overflow: hidden;
+  animation: gh-action-in 0.18s var(--ease-out);
+}
+
+.gh-action-group.status-error {
+  --gh-group-bg: color-mix(in srgb, var(--danger) 6%, var(--bg-panel));
+  --gh-group-bg-hover: color-mix(in srgb, var(--danger) 10%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.gh-action-group.status-cancelled {
+  --gh-group-bg: color-mix(in srgb, var(--text-faint) 4%, var(--bg-panel));
+  --gh-group-bg-hover: color-mix(in srgb, var(--text-faint) 8%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--text-faint) 35%, var(--border));
+}
+
+.gh-action-group.status-running {
+  --gh-group-bg: color-mix(in srgb, var(--accent) 5%, var(--bg-panel));
+  --gh-group-bg-hover: color-mix(in srgb, var(--accent) 9%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.gh-action-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: var(--gh-action-pad-y) 9px;
+  background: var(--gh-group-bg);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur-fast) ease;
+}
+
+.gh-action-group-head:hover {
+  background: var(--gh-group-bg-hover);
+}
+
+/* The group clips its corners, so the focus ring has to sit inside it. */
+.gh-action-group-head:focus-visible {
+  outline-offset: -2px;
+}
+
+/* "GitHub Actions" and its count stay together when the lines stack on narrow screens. */
+.gh-action-group-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+}
+
+.gh-action-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+}
+
+.gh-action-group-body {
+  max-height: 340px;
+  overflow-y: auto;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.gh-action-group-body .gh-action-card {
+  border: 0;
+  border-radius: 0;
+}
+
+.gh-action-group-body .gh-action-card + .gh-action-card {
+  border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 
 @media (max-width: 720px) {
   .gh-action-lines {
     flex-direction: column;
     gap: 1px;
+  }
+  /*
+   * Stacked, a group's second line has to be as wide as its column, not as its
+   * own text — otherwise it can never ellipsize and runs under the status glyphs.
+   */
+  .gh-action-group-head .gh-action-lines {
+    align-items: stretch;
   }
   .gh-action-target {
     display: none;
