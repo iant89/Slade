@@ -1,6 +1,7 @@
 import type { Artifact, ChatTurn, Conversation, Message } from '../types'
 import { useArtifacts, fileToDataURL } from '../store/artifacts'
 import { formatBytes } from '../lib/format'
+import { formatDecisionsForModel } from '../lib/questions'
 
 /**
  * Convert a conversation into provider-agnostic chat turns.
@@ -25,7 +26,13 @@ export async function buildTurns(
   for (const msg of visible) {
     if (msg.status === 'error' && !msg.content) continue
     if (msg.role === 'assistant') {
-      if (msg.content.trim()) turns.push({ role: 'assistant', text: msg.content })
+      // A run that paused to ask the user something keeps the exchange on the
+      // message. Folding the answers into the turn is what lets a *later* turn
+      // (or a plain-chain reply) still know what the user decided — the parked
+      // message itself often has an empty body.
+      const decisions = formatDecisionsForModel(msg.agent?.questions)
+      const text = [msg.content.trim(), decisions].filter(Boolean).join('\n\n')
+      if (text) turns.push({ role: 'assistant', text })
       continue
     }
     const { text, images, textFiles, binaryNotes } = await foldAttachments(msg, store.byId)

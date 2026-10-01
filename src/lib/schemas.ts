@@ -239,8 +239,38 @@ const agentTimelineItemSchema = z.discriminatedUnion('type', [
   }),
 ])
 
+/** One clarification question the orchestrator asked, with the user's choice. */
+const agentQuestionSchema = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  detail: z.string().optional(),
+  options: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      hint: z.string().optional(),
+    }),
+  ),
+  allowCustom: z.boolean(),
+  customLabel: z.string().optional(),
+  multiple: z.boolean().optional(),
+  status: z.enum(['pending', 'answered', 'skipped']),
+  answer: z
+    .object({
+      optionIds: z.array(z.string()),
+      labels: z.array(z.string()),
+      custom: z.string().optional(),
+      text: z.string(),
+    })
+    .optional(),
+  note: z.string().optional(),
+  askedAt: z.number(),
+  answeredAt: z.number().optional(),
+  modelId: z.string().optional(),
+})
+
 export const agentRunSchema = z.object({
-  phase: z.enum(['planning', 'executing', 'synthesizing', 'complete', 'error']),
+  phase: z.enum(['planning', 'executing', 'synthesizing', 'complete', 'error', 'awaiting_input']),
   goal: z.string(),
   orchestratorModelId: z.string(),
   steps: z.array(agentStepSchema),
@@ -255,6 +285,10 @@ export const agentRunSchema = z.object({
   // chronological placement survives a reload, independently of live activity.
   timeline: z.array(agentTimelineItemSchema).optional().catch(undefined),
   githubScope: z.string().optional(),
+  // Same tolerance as the timeline: a question that fails to parse is dropped
+  // on its own rather than taking the whole stored conversation list with it.
+  questions: z.array(agentQuestionSchema).optional().catch(undefined),
+  questionRounds: z.number().int().nonnegative().optional().catch(undefined),
   // A stored roadmap report that fails validation is dropped on its own. It
   // must never take the surrounding conversation down with it: the whole
   // conversation list is discarded when any one message fails to parse.

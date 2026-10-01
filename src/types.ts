@@ -283,9 +283,80 @@ export interface FsOpRecord {
 /* Orchestrator agent (agent mode)                                     */
 /* ------------------------------------------------------------------ */
 
-export type AgentPhase = 'planning' | 'executing' | 'synthesizing' | 'complete' | 'error'
+export type AgentPhase =
+  | 'planning'
+  | 'executing'
+  | 'synthesizing'
+  | 'complete'
+  | 'error'
+  /**
+   * The orchestrator stopped before delegating to ask the user something. The
+   * turn is finished (nothing is in flight) and the run resumes in place as
+   * soon as the last question has been answered.
+   */
+  | 'awaiting_input'
 
 export type AgentStepStatus = 'pending' | 'running' | 'complete' | 'error' | 'skipped'
+
+/* ------------------------------------------------------------------ */
+/* Clarification questions (agent asks, user chooses)                  */
+/* ------------------------------------------------------------------ */
+
+/** One selectable choice in a question the agent asked. */
+export interface AgentQuestionOption {
+  id: string
+  label: string
+  /** Optional one-line explanation of what picking this option means. */
+  hint?: string
+}
+
+/** What the user chose. Stored so the answer survives any later re-render. */
+export interface AgentQuestionAnswer {
+  /** Ids of the predefined options that were picked (empty for a typed answer). */
+  optionIds: string[]
+  /** Labels resolved at answer time, so the record outlives the option list. */
+  labels: string[]
+  /** The free-text answer, when the user typed their own instead of choosing. */
+  custom?: string
+  /** Canonical one-line answer, exactly as it is handed back to the model. */
+  text: string
+}
+
+export type AgentQuestionStatus = 'pending' | 'answered' | 'skipped'
+
+/**
+ * One multi-choice question the orchestrator asked before it could plan.
+ * Questions are answered one at a time: an answered question collapses into a
+ * read-only answer card and the next pending one is revealed underneath it.
+ */
+export interface AgentQuestion {
+  id: string
+  /** The question itself. */
+  prompt: string
+  /** Optional context: why the agent needs to know. */
+  detail?: string
+  options: AgentQuestionOption[]
+  /**
+   * Whether the user may type their own answer instead of picking an option.
+   * Almost always true — a choice list that cannot be contradicted is a trap.
+   */
+  allowCustom: boolean
+  /**
+   * Hint for the free-text field, used both under the "type your own answer"
+   * option and as the field's placeholder, e.g. `e.g. "Q2 vs Q2 last year"`.
+   */
+  customLabel?: string
+  /** True when more than one option may be selected. */
+  multiple?: boolean
+  status: AgentQuestionStatus
+  answer?: AgentQuestionAnswer
+  /** Why the question was skipped, when it wasn't the user's own choice. */
+  note?: string
+  askedAt: number
+  answeredAt?: number
+  /** Model that asked, for attribution on the card. */
+  modelId?: string
+}
 
 /** One card in the agent's chronological output: a thought segment or GitHub call. */
 export type AgentTimelineItem =
@@ -362,6 +433,14 @@ export interface AgentRun {
    * run's answer rather than in the chat panel.
    */
   githubScope?: string
+  /**
+   * Clarification questions the orchestrator asked, in the order they were
+   * asked. Answered ones keep their chosen answer, so the whole exchange stays
+   * inspectable after the run continues (and after a reload).
+   */
+  questions?: AgentQuestion[]
+  /** How many ask-rounds this run has already used (capped, see `lib/questions`). */
+  questionRounds?: number
   /**
    * Where the project's roadmap / milestone file stands after this run:
    * previous, current and next step plus overall progress. Present only when

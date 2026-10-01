@@ -53,6 +53,10 @@ you can watch the failover engine work.
    See [The orchestrator (agent mode)](#the-orchestrator-agent-mode). Put a `ROADMAP.md`
    in Local Files first and the finished run ends with a
    [roadmap timeline](#completion-report--roadmap-tracking).
+9. Still in agent mode, send *"ask me a multiple-choice question about the Q3 sales
+   report"* — the run stops, hands you clickable options (plus a field to type your own
+   answer), and continues by itself once you've answered.
+   See [Clarification questions](#clarification-questions-the-agent-asks-you-choose).
 
 ## The orchestrator (agent mode)
 
@@ -100,6 +104,51 @@ history, files attached from GitHub, and Slade's persistent **Local File System*
 automatically stored in Local Files. The runtime does not execute OS shell commands, Git
 checkouts, or test runners, so it cannot independently execute tests or builds against a
 local checkout.
+
+### Clarification questions (the agent asks, you choose)
+
+Sometimes the right plan depends on a decision only you can make — *prototype or
+production?*, *which period do the numbers cover?*, *is a breaking change allowed?* The
+orchestrator can stop **before it delegates** and ask, and Slade renders the ask as
+choices rather than as prose you have to parse and type back:
+
+1. **The run parks.** Its plan card reads **Waiting for you**; nothing is in flight, so
+   Stop, reloads and closing the tab are all safe. The questions are persisted with the
+   message, exactly like the plan and the steps.
+2. **One question at a time.** The first question renders as a block of clickable
+   options, each with an optional one-line hint, plus an **Or type your own answer**
+   option that opens a text field (Enter submits, Shift + Enter adds a line). Arrow keys
+   move through the options; **Skip** declines a question and tells the orchestrator to
+   use the safest interpretation and record the assumption.
+3. **Submit collapses it.** The options you didn't choose are gone for good and the
+   selected answer stays behind as an **artifact card** — the question, the answer, and
+   a *typed by you* marker when you wrote it yourself — with **Copy answer** in its
+   footer.
+4. **The next question renders underneath.** Answering reveals the following question
+   block below the card you just closed, so a multi-question ask reads top to bottom as
+   a list of settled answers.
+5. **The run resumes in place.** The last answer re-issues planning on the *same*
+   message with your choices appended as explicit requirements (and marked so the
+   orchestrator knows not to ask again). The plan card picks up where it left off —
+   Planning → steps → the final answer, with your decisions still visible above it and
+   restated in the report.
+
+Details worth knowing:
+
+- **Questions are bounded.** At most 4 per round with 2–6 options each, and at most 3
+  ask-rounds per run; past that Slade tells the orchestrator to proceed with the safest
+  interpretation and says so on the card. A "question" with one option, or none, is
+  dropped rather than rendered as a dead end.
+- **Multi-select is supported** (`"multiple": true`) — the marks turn square, every
+  option that applies can be ticked, and a typed answer can be added alongside them.
+- **Your answers outrank the model's preference.** They are handed to planning as
+  explicit user requirements and repeated to the synthesis pass, so the final report
+  reflects what you chose rather than what the orchestrator guessed.
+- **Replying in the composer instead supersedes the questions.** They close as skipped
+  with a note, so no card is left offering a choice that would resurrect an old run —
+  and the answers you *had* given still travel with the conversation as context.
+- **Simulators play along**: with no API keys, ask for *"a multiple-choice question"* and
+  the built-in orchestrator asks, waits, plans around your answers and quotes them back.
 
 ### Completion report & roadmap tracking
 
@@ -364,6 +413,10 @@ against and a status glyph.
   agent step. It is labelled as reasoning, never blended into the answer, and can be turned off
   globally (Settings → Defaults) or per model (Settings → Models)
 - Message actions: copy, regenerate, **edit-and-resend**, delete, **branch-from-here**
+- **Answerable questions** — an agent run can park and ask you to choose between options
+  (or type your own); each submitted answer collapses into an artifact card and the next
+  question appears underneath it. See
+  [Clarification questions](#clarification-questions-the-agent-asks-you-choose)
 - Composer: auto-grow input, Enter/Shift-Enter (configurable), char/token counter,
   drag-and-drop & paste-to-attach, slash shortcuts (`/system`, `/model`, `/agent`,
   `/sample`, `/new`)
@@ -503,7 +556,11 @@ fallback, base64 for binaries, every error classification (including
 rate-limit reset times and token redaction), the device-flow state machine
 (pending, slow-down, expired, denied, aborted), the new-branch commit path,
 gist/issue payloads, and the loop that matters most — *attach a repo file →
-its contents appear in the next prompt*.
+its contents appear in the next prompt*. It also drives the orchestrator
+headlessly, including the clarification-question loop: *ask → park → answer one
+question → the card collapses and the next renders → answer the last → the same
+message resumes and finishes*, plus skipping, superseding by a composer reply,
+and the persistence round trip.
 
 ## Layout
 
@@ -512,10 +569,11 @@ src/
   engine/       failover chain walk, routing strategies, turn builder
   providers/    openai · anthropic · google · openrouter · openai-compatible · built-in mock
   store/        zustand stores + persistence + cooldown policy
-  components/   chat (incl. the orchestrator plan card and roadmap timeline), artifacts,
-                settings, layout, github, common
+  components/   chat (incl. the orchestrator plan card, its clarification questions,
+                and the roadmap timeline), artifacts, settings, layout, github, common
   lib/          mime classification, csv, clipboard, schemas, storage,
-                roadmap (parse · diff · timeline), popup-menu placement,
+                roadmap (parse · diff · timeline), questions (normalize · answer · prompt),
+                popup-menu placement,
                 local file system, github (REST client, device flow, publish payloads)
 scripts/
   smoke.ts                  headless test suite

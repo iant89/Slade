@@ -11,6 +11,7 @@ import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { GitHubActionCard } from '../github/GitHubActivity'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
+import { AgentQuestions } from './AgentQuestions'
 import { RoadmapTimeline } from './RoadmapTimeline'
 import {
   IconBranch,
@@ -392,6 +393,10 @@ function AssistantBody({
     <div className="msg-bubble assistant-bubble">
       {pending && <TypingIndicator label={typingOn ? undefined : ''} />}
       {message.agent && <AgentPlanCard run={message.agent} labelOf={labelOf} />}
+      {/* Questions the run asked, and the answers it got — above the answer they shaped. */}
+      {message.agent?.questions?.length ? (
+        <AgentQuestions run={message.agent} messageId={message.id} />
+      ) : null}
       {message.agent && !message.content.trim() && (pending || streaming) && message.agent.steps.length === 0 && (
         <TypingIndicator label={typingOn ? 'The orchestrator is working…' : ''} />
       )}
