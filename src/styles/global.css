@@ -2724,14 +2724,9 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- GitHub action cards (live API activity) ----------
 
-   One card per GitHub API call. A card is a read-only row — icon, action
-   title, the path it touched, a status glyph. It is deliberately *not*
-   expandable: the whole point is that you can read what happened without
-   opening anything.
-
-   Calls you made yourself are appended to the chat panel: each one is a row in
-   the message column, inside the same scroll area as the messages, so the log
-   above the composer holds everything that happened. */
+   Action cards are read-only rows. Agent-run cards are interleaved with the
+   run's thought cards in its message; actions outside a run remain standalone
+   rows in the chat log. */
 
 .gh-panel-item {
   display: flex;
@@ -2745,67 +2740,11 @@ input[type='range']::-moz-range-thumb {
   max-width: var(--chat-max);
 }
 
-/* A run's own cards, inside its answer on the plan card: it sits under a rule
-   like the file-op strip, and keeps its own scroll rather than the panel's. */
-.gh-activity {
-  margin-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.gh-activity-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 2px 4px;
-}
-
-.gh-activity-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 3px 8px 3px 4px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: inherit;
-  font-size: 0.74em;
-  font-weight: 600;
-  cursor: pointer;
-  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease;
-}
-
-.gh-activity-toggle:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
-}
-
-.gh-activity-toggle svg {
-  flex: none;
-}
-
-.gh-activity-summary {
-  white-space: nowrap;
-}
-
-.gh-activity-tail {
-  color: var(--text-faint);
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.gh-activity-list {
+.agent-activity-timeline {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  max-height: 200px;
-  overflow-y: auto;
-  padding-bottom: 6px;
-  scrollbar-width: thin;
+  gap: 2px;
+  margin: 4px 0 8px;
 }
 
 .gh-action-card {
@@ -2834,6 +2773,11 @@ input[type='range']::-moz-range-thumb {
 .gh-action-card.status-error {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   background: color-mix(in srgb, var(--danger) 6%, var(--bg-panel));
+}
+
+.gh-action-card.status-cancelled {
+  border-color: color-mix(in srgb, var(--text-faint) 35%, var(--border));
+  background: color-mix(in srgb, var(--text-faint) 4%, var(--bg-panel));
 }
 
 .gh-action-card.status-running {
@@ -2940,6 +2884,10 @@ input[type='range']::-moz-range-thumb {
   color: var(--danger);
 }
 
+.gh-action-status.cancelled {
+  color: var(--text-faint);
+}
+
 .gh-action-status.running {
   color: var(--accent-ink);
 }
@@ -2955,9 +2903,6 @@ input[type='range']::-moz-range-thumb {
   }
   .gh-action-target {
     display: none;
-  }
-  .gh-activity-list {
-    max-height: 140px;
   }
 }
 

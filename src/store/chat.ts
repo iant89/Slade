@@ -50,9 +50,23 @@ export function hydrateConversations(raw: unknown): {
     list = parsed.data as unknown as Conversation[]
   }
   // Sanitize interrupted streams: anything pending/streaming becomes cancelled.
+  // Live GitHub cards are snapshots on the message, so a request that was still
+  // in flight when the page closed must not keep a spinner after reload.
   for (const c of list) {
     for (const m of c.messages) {
       if (m.status === 'streaming' || m.status === 'pending') m.status = 'cancelled'
+      if (m.agent?.timeline) {
+        m.agent = {
+          ...m.agent,
+          timeline: m.agent.timeline.map((item) => {
+            if (item.type === 'thought' && item.streaming) return { ...item, streaming: false }
+            if (item.type === 'github' && item.card.status === 'running') {
+              return { ...item, card: { ...item.card, status: 'cancelled', error: 'Interrupted before completion' } }
+            }
+            return item
+          }),
+        }
+      }
     }
   }
   const conversations: Record<string, Conversation> = {}

@@ -14,50 +14,8 @@
  * (file contents, base64 blobs) ever reaches the UI.
  */
 
-/** Every GitHub call Slade can make, in one vocabulary. */
-export type GitHubActionKind =
-  /* files */
-  | 'get-file'
-  | 'create-file'
-  | 'update-file'
-  | 'delete-file'
-  | 'get-blob'
-  | 'create-blob'
-  /* trees */
-  | 'get-tree'
-  | 'create-tree'
-  /* branches + refs */
-  | 'create-branch'
-  | 'delete-branch'
-  | 'get-branch'
-  | 'list-branches'
-  | 'update-ref'
-  /* commits */
-  | 'get-commit'
-  | 'create-commit'
-  /* pull requests */
-  | 'create-pr'
-  | 'merge-pr'
-  | 'get-pr'
-  | 'list-prs'
-  /* issues + gists */
-  | 'create-issue'
-  | 'list-issues'
-  | 'create-gist'
-  | 'list-gists'
-  /* search + repos */
-  | 'search-code'
-  | 'search-repos'
-  | 'list-repos'
-  | 'get-repo'
-  | 'clone-repo'
-  /* auth + quota */
-  | 'test-token'
-  | 'rate-limit'
-  | 'sign-in'
-  | 'sign-out'
-  /** Anything not in the vocabulary above — still shown, never hidden. */
-  | 'other'
+import type { GitHubActionInfo, GitHubActionKind } from '../types'
+export type { GitHubActionInfo, GitHubActionKind } from '../types'
 
 /** Short action phrases; `GITHUB_ACTION_TITLE` is what follows "GitHub Action:". */
 export const GITHUB_ACTION_TITLE: Record<GitHubActionKind, string> = {
@@ -102,18 +60,6 @@ export const GITHUB_ACTION_PREFIX = 'GitHub Action:'
 /** "Get File Contents" → "GitHub Action: Get File Contents". */
 export function githubActionTitle(kind: GitHubActionKind): string {
   return `${GITHUB_ACTION_PREFIX} ${GITHUB_ACTION_TITLE[kind]}`
-}
-
-export interface GitHubActionInfo {
-  kind: GitHubActionKind
-  /** Card title, already prefixed. */
-  title: string
-  /** Card sub-title: the path, branch, query or repo the call touched. */
-  subject: string
-  /** `owner/repo` when the call is repo-scoped. */
-  repo?: string
-  /** Branch / tag / sha the call was made against, when known. */
-  ref?: string
 }
 
 /** What a listener sees for one in-flight request. */

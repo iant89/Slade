@@ -22,10 +22,9 @@ const NO_COMPONENT_OVERRIDES = {}
 
 /**
  * The chat panel: everything the conversation holds, in one scroll area above
- * the composer. The messages come first; the GitHub Actions this session made
- * are appended to the end of the same list (`./panel.ts`), so they are part of
- * the log — they scroll with it, and they are never dropped between messages or
- * left outside the panel.
+ * the composer. Standalone GitHub Actions are appended to the end of the same
+ * list (`./panel.ts`); actions from an agent run are already interleaved into
+ * that assistant message's timeline. All of them scroll with the log.
  */
 export function ChatView() {
   const conv = useCurrentConversation()

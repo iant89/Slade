@@ -7,7 +7,6 @@ import { useUI } from '../../store/ui'
 import { formatFsOpSummary } from '../../lib/fs'
 import { Markdown } from './Markdown'
 import { ThinkingBlock } from './MessageBubble'
-import { GitHubRunActivity } from '../github/GitHubActivity'
 import {
   IconAlert,
   IconBot,
@@ -50,6 +49,10 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
     run.phase === 'executing' ? `${PHASE_LABEL[run.phase]} ${done + failed}/${total}` : PHASE_LABEL[run.phase]
 
   const showPlanningThoughts = modelShowsThoughts(settings, run.orchestratorModelId)
+  const timelineThoughtSources = new Set(
+    (run.timeline ?? []).filter((item) => item.type === 'thought').map((item) => item.sourceId),
+  )
+  const planningThoughtInTimeline = timelineThoughtSources.has('planning')
 
   return (
     <div className={`agent-plan phase-${run.phase}`} aria-label="Orchestrator run">
@@ -68,7 +71,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       {run.phase === 'planning' && (
         <>
           <p className="agent-plan-strategy">Delegating the work…</p>
-          {showPlanningThoughts && run.planningReasoning ? (
+          {showPlanningThoughts && run.planningReasoning && !planningThoughtInTimeline ? (
             <div style={{ marginTop: '0.5rem' }}>
               <ThinkingBlock reasoning={run.planningReasoning} streaming={true} />
             </div>
@@ -84,7 +87,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       {run.strategy && run.phase !== 'planning' && (
         <p className="agent-plan-strategy">{run.strategy}</p>
       )}
-      {run.phase !== 'planning' && showPlanningThoughts && run.planningReasoning ? (
+      {run.phase !== 'planning' && showPlanningThoughts && run.planningReasoning && !planningThoughtInTimeline ? (
         <div style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
           <ThinkingBlock reasoning={run.planningReasoning} />
         </div>
@@ -99,6 +102,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
               step={step}
               labelOf={labelOf}
               expanded={open[step.id] ?? (expandDefault && step.status === 'complete')}
+              thoughtInTimeline={timelineThoughtSources.has(`step:${step.id}`)}
               onToggle={() => setOpen((o) => ({ ...o, [step.id]: !(o[step.id] ?? (expandDefault && step.status === 'complete')) }))}
             />
           ))}
@@ -113,8 +117,6 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
 
       {run.fsOps && run.fsOps.length > 0 && <FsOpsStrip ops={run.fsOps} />}
 
-      {/* The GitHub calls this run made, inline with the work that caused them. */}
-      <GitHubRunActivity scope={run.githubScope} />
     </div>
   )
 }
@@ -195,11 +197,13 @@ function StepRow({
   step,
   labelOf,
   expanded,
+  thoughtInTimeline,
   onToggle,
 }: {
   step: AgentStep
   labelOf: (id: string | undefined) => string
   expanded: boolean
+  thoughtInTimeline: boolean
   onToggle: () => void
 }) {
   const settings = useSettings((s) => s.s)
@@ -261,7 +265,7 @@ function StepRow({
               <pre>{brief}</pre>
             </div>
           ) : null}
-          {showThoughts && (step.reasoning || (step.status === 'running' && !step.result)) ? (
+          {showThoughts && !thoughtInTimeline && (step.reasoning || (step.status === 'running' && !step.result)) ? (
             <div style={{ marginBottom: step.result ? '0.5rem' : '0' }}>
               <ThinkingBlock
                 reasoning={step.reasoning}
