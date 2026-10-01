@@ -16,6 +16,7 @@ import {
   IconFolder,
   IconGitCommit,
   IconLoader,
+  IconQuestion,
 } from '../icons'
 
 /* ------------------------------------------------------------------ */
@@ -33,6 +34,8 @@ const PHASE_LABEL: Record<AgentRun['phase'], string> = {
   synthesizing: 'Synthesizing',
   complete: 'Complete',
   error: 'Failed',
+  /** Nothing is in flight: the run is parked on the questions below the card. */
+  awaiting_input: 'Waiting for you',
 }
 
 export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: string | undefined) => string }) {
@@ -64,6 +67,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
           {live && <IconLoader size={11} className="spin" />}
           {run.phase === 'complete' && <IconCheck size={11} />}
           {run.phase === 'error' && <IconAlert size={11} />}
+          {run.phase === 'awaiting_input' && <IconQuestion size={11} />}
           {phaseBadge}
         </span>
       </header>
@@ -94,7 +98,8 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
       ) : null}
       {run.note && <p className="agent-plan-note">{run.note}</p>}
 
-      {run.phase === 'planning' ? null : (
+      {/* Nothing delegated yet — a direct answer, or a run parked on its questions. */}
+      {run.phase === 'planning' || run.steps.length === 0 ? null : (
         <ol className="agent-steps">
           {run.steps.map((step) => (
             <StepRow

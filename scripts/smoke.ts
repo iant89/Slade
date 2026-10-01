@@ -26,7 +26,7 @@ if (typeof URL.createObjectURL !== 'function') {
 import { useSettings } from '../src/store/settings'
 import { firstActiveId, hydrateConversations, MAX_TITLE_LENGTH, normalizeTitle, useChat } from '../src/store/chat'
 import { cooldownMsFor, useHealth } from '../src/store/health'
-import { sendUserMessage, stopGeneration } from '../src/engine/send'
+import { isGenerating, sendUserMessage, stopGeneration } from '../src/engine/send'
 import { classifyHttp } from '../src/providers/base'
 import type { ProviderError } from '../src/providers/base'
 import { mockAdapter } from '../src/providers/mock'
@@ -105,7 +105,30 @@ import {
   tryNormalizeFsPath,
 } from '../src/lib/fs'
 import { buildTurns } from '../src/engine/turns'
-import { parsePlannerReply, resolveWorkerModel } from '../src/engine/agent'
+import {
+  ANSWERS_MARKER,
+  ASK_MARKER,
+  activeAgentQuestion,
+  answerAgentQuestion,
+  expirePendingAgentQuestions,
+  parsePlannerReply,
+  planSystemPrompt,
+  resolveWorkerModel,
+  skipAgentQuestion,
+} from '../src/engine/agent'
+import {
+  MAX_ASK_REFUSALS,
+  MAX_OPTIONS_PER_QUESTION,
+  MAX_QUESTIONS_PER_ROUND,
+  formatAnswersForModel,
+  formatDecisionsForModel,
+  formatQuestionsForModel,
+  nextPendingQuestion,
+  normalizeQuestions,
+  questionProgress,
+  questionsResolved,
+  resolveAnswer,
+} from '../src/lib/questions'
 import { CODING_AGENT_ORCHESTRATOR_PROMPT } from '../src/engine/orchestratorPrompt'
 import { z } from 'zod'
 import { conversationSchema, exportBundleSchema, roadmapReportSchema } from '../src/lib/schemas'
@@ -118,7 +141,7 @@ import {
   snapshotRoadmapFiles,
   tickFirstOpenStep,
 } from '../src/lib/roadmap'
-import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../src/types'
+import type { AgentQuestion, AgentRun, Artifact, Conversation, FsFile, Message, RoadmapReport } from '../src/types'
 // The browser build of react-dom/server avoids the `stream` require that the
 // node build does, which esbuild cannot bundled for ESM.
 import { renderToString } from 'react-dom/server.browser'
@@ -134,6 +157,7 @@ import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
+import { AgentQuestions } from '../src/components/chat/AgentQuestions'
 import { RoadmapTimeline } from '../src/components/chat/RoadmapTimeline'
 import { Toasts } from '../src/components/common/Toasts'
 import { archiveWithUndo, unarchiveWithToast } from '../src/components/layout/ConversationMenu'
@@ -5256,6 +5280,474 @@ function testChatPanelRenders() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Clarification questions (the agent asks, the user chooses)          */
+/* ------------------------------------------------------------------ */
+
+/** Read a message back out of the store, wherever it lives. */
+function readMessage(messageId: string): Message | undefined {
+  for (const conv of Object.values(useChat.getState().conversations)) {
+    const found = conv.messages.find((m) => m.id === messageId)
+    if (found) return found
+  }
+  return undefined
+}
+
+/** The last assistant message in the open conversation (`lastAssistant` finds the first). */
+function latestAssistant(): Message | undefined {
+  const chat = useChat.getState()
+  const conv = chat.conversations[chat.currentId]
+  return [...(conv?.messages ?? [])].reverse().find((m) => m.role === 'assistant')
+}
+
+function testQuestionNormalization() {
+  console.log('agent question normalization:')
+  const [q] = normalizeQuestions(
+    [{ question: ' Which target? ', detail: ' It  changes the plan. ', options: ['Prototype', 'Production', 'prototype'] }],
+    'mock-pro',
+  )
+  check('a usable question survives normalization', Boolean(q))
+  check('options get stable ids', Boolean(q?.options.every((o) => o.id.startsWith('opt_'))))
+  check('duplicate options collapse case-insensitively', q?.options.length === 2, String(q?.options.length))
+  check('whitespace is collapsed in prompt and detail', q?.prompt === 'Which target?' && q?.detail === 'It changes the plan.', q?.detail)
+  check('a typed answer is allowed unless the model says otherwise', q?.allowCustom === true)
+  check('single choice stays single choice', q?.multiple === false)
+  check('the asking model is recorded for attribution', q?.modelId === 'mock-pro')
+  check('a fresh question is pending', q?.status === 'pending' && q.answer === undefined)
+
+  const shaped = normalizeQuestions([{ question: 'Q?', options: [{ label: 'A', hint: 'why A' }, { value: 'B' }, 'C'] }])[0]
+  check('{label, hint} options keep their hint', shaped?.options[0]?.hint === 'why A')
+  check('a {value} option is accepted as a label', shaped?.options[1]?.label === 'B', shaped?.options[1]?.label)
+  check('bare strings and objects can be mixed', shaped?.options.length === 3, String(shaped?.options.length))
+
+  check('one option is not a choice', normalizeQuestions([{ question: 'Q?', options: ['Only'] }]).length === 0)
+  check('a question with no prompt is dropped', normalizeQuestions([{ options: ['A', 'B'] }]).length === 0)
+  check('a question with junk options is dropped', normalizeQuestions([{ question: 'Q?', options: [null, 42, ''] }]).length === 0)
+  check('a non-array normalizes to nothing', normalizeQuestions(undefined).length === 0 && normalizeQuestions('nope').length === 0)
+  check(
+    `at most ${MAX_QUESTIONS_PER_ROUND} questions per round`,
+    normalizeQuestions(Array.from({ length: 9 }, (_, i) => ({ question: `Q${i}?`, options: ['A', 'B'] }))).length ===
+      MAX_QUESTIONS_PER_ROUND,
+  )
+  check(
+    `option lists are capped at ${MAX_OPTIONS_PER_QUESTION}`,
+    normalizeQuestions([{ question: 'Q?', options: Array.from({ length: 14 }, (_, i) => `O${i}`) }])[0]?.options.length ===
+      MAX_OPTIONS_PER_QUESTION,
+  )
+  check('allowCustom:false is honoured', normalizeQuestions([{ question: 'Q?', options: ['A', 'B'], allowCustom: false }])[0]?.allowCustom === false)
+  check('multiple:true survives', normalizeQuestions([{ question: 'Q?', options: ['A', 'B'], multiple: true }])[0]?.multiple === true)
+  check('a custom-field label survives', normalizeQuestions([{ question: 'Q?', options: ['A', 'B'], customLabel: 'e.g. "Q2 vs Q2"' }])[0]?.customLabel === 'e.g. "Q2 vs Q2"')
+  check('a rambling question is clipped', (normalizeQuestions([{ question: 'x'.repeat(900), options: ['A', 'B'] }])[0]?.prompt.length ?? 0) <= 500)
+}
+
+function testQuestionAnswers() {
+  console.log('agent question answers:')
+  const [q] = normalizeQuestions([{ question: 'Which target?', options: ['Prototype', 'Production'] }], 'mock-pro')
+  const proto = q!.options[0]!
+  const prod = q!.options[1]!
+
+  const picked = resolveAnswer(q!, { optionIds: [proto.id] })
+  check('a picked option becomes the answer text', picked?.text === 'Prototype', picked?.text)
+  check('…and records which option it was', picked?.optionIds.join() === proto.id && picked?.labels.join() === 'Prototype')
+  check('the other option can be picked too', resolveAnswer(q!, { optionIds: [prod.id] })?.text === 'Production')
+  check('nothing picked → no answer', resolveAnswer(q!, { optionIds: [] }) === undefined)
+  check('an unknown option id → no answer', resolveAnswer(q!, { optionIds: ['opt_nope'] }) === undefined)
+
+  const typed = resolveAnswer(q!, { optionIds: [], custom: '  A CLI tool with a --json flag  ' })
+  check('a typed answer is trimmed and kept', typed?.text === 'A CLI tool with a --json flag' && typed?.custom === typed?.text, typed?.text)
+  check('a typed answer names no option', typed?.optionIds.length === 0 && typed?.labels.length === 0)
+
+  const closed = normalizeQuestions([{ question: 'Q?', options: ['A', 'B'], allowCustom: false }])[0]!
+  check('a closed question ignores typed text', resolveAnswer(closed, { optionIds: [], custom: 'ignore me' }) === undefined)
+
+  const multi = normalizeQuestions([{ question: 'Which apply?', options: ['Tests', 'Docs', 'Perf'], multiple: true }])[0]!
+  const both = resolveAnswer(multi, { optionIds: [multi.options[0]!.id, multi.options[2]!.id], custom: 'and a benchmark' })
+  check('multi-select keeps every label plus the typed answer', both?.text === 'Tests, Perf, and a benchmark', both?.text)
+  check('…and lists all of them', both?.labels.length === 2 && both?.custom === 'and a benchmark')
+}
+
+function testQuestionFormatting() {
+  console.log('question prompt formatting:')
+  const qs = normalizeQuestions(
+    [
+      { question: 'Which target?', options: ['Prototype', 'Production'] },
+      { question: 'Which apply?', options: ['Tests', 'Docs'], allowCustom: false, multiple: true },
+    ],
+    'mock-pro',
+  )
+  const asked = formatQuestionsForModel(qs)
+  const lines = asked.split('\n')
+  check('the ask is numbered and says what kind of choice it is', lines[0] === '1. Which target? [single choice]', lines[0])
+  check('options are listed with the typed escape hatch', lines[1] === '   Options: Prototype | Production | (their own typed answer)', lines[1])
+  check('a multi-select question says so', asked.includes('2. Which apply? [multi-select]'), asked)
+  check('a closed question does not offer one', !lines[3]!.includes('their own typed answer'), lines[3])
+
+  qs[0]!.status = 'answered'
+  qs[0]!.answer = resolveAnswer(qs[0]!, { optionIds: [qs[0]!.options[1]!.id] })
+  qs[1]!.status = 'skipped'
+  const answers = formatAnswersForModel(qs)
+  check('answers are arrowed per question', answers.includes('1. Which target?\n   → Production'), answers)
+  check('a skipped question tells the model what to do instead', answers.includes('skipped — use the safest interpretation'), answers)
+
+  const decisions = formatDecisionsForModel(qs)
+  check('the decisions block is headed for the model', decisions.startsWith('User decisions'), decisions.slice(0, 60))
+  check('…and carries every settled question', decisions.includes('- Which target?\n  → Production') && decisions.includes('- Which apply?'), decisions)
+  const pending = normalizeQuestions([{ question: 'Q?', options: ['A', 'B'] }])
+  check('pending questions never reach the model', formatDecisionsForModel(pending) === '' && formatDecisionsForModel(undefined) === '')
+
+  check('progress counts settled questions', JSON.stringify(questionProgress(qs)) === '{"resolved":2,"total":2}')
+  check('progress on nothing is zero', JSON.stringify(questionProgress(undefined)) === '{"resolved":0,"total":0}')
+  check('the next pending question is the first unsettled one', nextPendingQuestion(pending)?.id === pending[0]!.id && nextPendingQuestion(qs) === undefined)
+  check('a run may continue only once every question is settled', questionsResolved(qs) && !questionsResolved(pending) && !questionsResolved([]))
+}
+
+function testPlannerAskParsing() {
+  console.log('planner ask parsing:')
+  const ask = parsePlannerReply(
+    '{"mode":"ask","reply":"Two decisions.","questions":[{"question":"Which target?","detail":"It changes the plan.","options":["Prototype","Production"],"allowCustom":true,"multiple":false}]}',
+  )
+  check('ask mode parses', ask?.mode === 'ask')
+  check('…and keeps the question and its options', ask?.mode === 'ask' && ask.questions[0]!.question === 'Which target?' && ask.questions[0]!.options.length === 2)
+  check('…and the one-line reply', ask?.mode === 'ask' && ask.reply === 'Two decisions.')
+  check('{label, hint} options parse', parsePlannerReply('{"mode":"ask","questions":[{"question":"Q?","options":[{"label":"A","hint":"h"},{"label":"B"}]}]}')?.mode === 'ask')
+  check('a fence around the ask is tolerated', parsePlannerReply('```json\n{"mode":"ask","questions":[{"question":"Q?","options":["A","B"]}]}\n```')?.mode === 'ask')
+  check('prose around the ask is tolerated', parsePlannerReply('Let me ask:\n{"mode":"ask","questions":[{"question":"Q?","options":["A","B"]}]}')?.mode === 'ask')
+  check('an ask with no questions is refused', parsePlannerReply('{"mode":"ask","questions":[]}') === undefined)
+  check('an ask with no options is refused', parsePlannerReply('{"mode":"ask","questions":[{"question":"Q?","options":[]}]}') === undefined)
+  check('a question with no text is refused', parsePlannerReply('{"mode":"ask","questions":[{"options":["A","B"]}]}') === undefined)
+  check('a near-JSON ask is still repaired', parsePlannerReply('{"mode":"ask","questions":[{"question":"Q?","options":["A","B"],},]}')?.mode === 'ask')
+}
+
+function testAskPromptContract() {
+  console.log('ask contract in the prompts:')
+  const P = planSystemPrompt(DEFAULT_SETTINGS, DEFAULT_SETTINGS.agent.maxSteps).replace(/\s+/g, ' ')
+  check('the planning contract teaches the ask mode', P.includes('{"mode":"ask"'), P.slice(0, 200))
+  check('…with options, a typed-answer field and multi-select', P.includes('"options"') && P.includes('"allowCustom"') && P.includes('"multiple"'))
+  check('…and carries the ask marker', P.includes(ASK_MARKER))
+  check('answers come back marked, so the orchestrator recognises them', P.includes(ANSWERS_MARKER))
+  check('questions and options are bounded in the contract itself', P.includes('At most 4 questions per round') && P.includes('2 to 6'), P.slice(0, 200))
+  check('the round cap is stated', P.includes('at most 3 rounds'), P.slice(0, 200))
+  check('it forbids asking what the context already answers', P.includes('Never ask what the conversation'))
+  check('it tells the orchestrator not to ask again once answered', P.includes('do not ask again'))
+  check('options must be things a user would say', P.includes('not "Option A"'))
+
+  const role = CODING_AGENT_ORCHESTRATOR_PROMPT.replace(/\s+/g, ' ')
+  check('the orchestrator role says to ask in structured choices', role.includes('structured choices'), role.slice(0, 200))
+  check('…never as "Option A"/"Option B"', role.includes('never as "Option A"/"Option B"'))
+  check('…and a typed escape hatch stays open', role.includes('typed-answer escape hatch'))
+  check('answers outrank the orchestrator’s own preference', role.includes('it outranks your own preference'))
+  check('a skipped question is not a free choice', role.includes('A question the user skipped is not permission'))
+}
+
+function testAgentQuestionUi() {
+  console.log('agent question UI rendering:')
+  const questions = normalizeQuestions(
+    [
+      { question: 'Which target should the implementation aim at?', detail: 'It changes the split.', options: [{ label: 'Prototype', hint: 'fast, throwaway' }, 'Production'] },
+      { question: 'Which apply?', options: ['Tests', 'Docs'], multiple: true },
+      { question: 'Binary only?', options: ['Yes', 'No'], allowCustom: false },
+    ],
+    'mock-pro',
+  ) as AgentQuestion[]
+  const run: AgentRun = {
+    phase: 'awaiting_input',
+    goal: 'ship it',
+    orchestratorModelId: 'mock-pro',
+    steps: [],
+    startedAt: 1,
+    questions,
+    questionRounds: 1,
+    strategy: 'I need three decisions from you.',
+  }
+  const html = (r: AgentRun) => renderToString(createElement(AgentQuestions, { run: r, messageId: 'm_ask' })).replace(/<!-- -->/g, '')
+
+  const open = html(run)
+  check('only the first question is offered', open.split('agent-question-prompt').length - 1 === 1, String(open.split('agent-question-prompt').length - 1))
+  check('the group says how far through it is', open.includes('Question 1 of 3'), open.slice(0, 200))
+  check('a single choice is a radiogroup', open.includes('role="radiogroup"'), open.slice(0, 200))
+  check('options render as unchecked radios', open.includes('role="radio"') && open.includes('aria-checked="false"'))
+  check('an option hint is rendered', open.includes('fast, throwaway'), open.slice(0, 300))
+  check('the typed-answer option is offered', open.includes('Or type your own answer'), open.slice(0, 400))
+  check('the detail explains why it matters', open.includes('It changes the split.'))
+  check('submit is disabled until something is chosen', open.includes('disabled=""'), open.slice(0, 400))
+  check('skipping is offered too', open.includes('>Skip<'), open.slice(0, 400))
+  check('the questions that are not up yet are not rendered', !open.includes('Which apply?') && !open.includes('Binary only?'))
+  check('an unanswered run renders no answer card', !open.includes('artifact-card kind-answer'))
+
+  // Multi-select shape.
+  const multiRun: AgentRun = { ...run, questions: [questions[1]!] }
+  const multi = html(multiRun)
+  check('a multi-select question is a checkbox group', multi.includes('role="group"') && multi.includes('role="checkbox"'), multi.slice(0, 200))
+  check('…and says every option may apply', multi.includes('Select every option that applies'), multi.slice(0, 300))
+
+  // A question that forbids a typed answer offers none.
+  const closedRun: AgentRun = { ...run, questions: [questions[2]!] }
+  const closed = html(closedRun)
+  check('a closed question offers no typed answer', !closed.includes('type your own answer') && !closed.includes('<textarea'), closed.slice(0, 400))
+  check('…and says to choose one option', closed.includes('Choose one option'), closed.slice(0, 300))
+
+  // Answered: the options are gone and the choice is an artifact card.
+  questions[0]!.status = 'answered'
+  questions[0]!.answer = resolveAnswer(questions[0]!, { optionIds: [questions[0]!.options[0]!.id] })
+  questions[0]!.answeredAt = 5
+  const answered = html(run)
+  check('the answered question became an artifact card', answered.includes('artifact-card kind-answer'), answered.slice(0, 200))
+  check('…labelled as the user’s answer', answered.includes('Your answer · Question 1 of 3'), answered.slice(0, 300))
+  check('…carrying the chosen option', answered.includes('Prototype'))
+  check('the options that were not chosen are removed', !answered.includes('>Production<'), answered.slice(0, 600))
+  check('the question itself stays on the card', answered.includes('Which target should the implementation aim at?'))
+  check('the next question block rendered underneath', answered.includes('Which apply?') && answered.includes('Question 2 of 3'), answered.slice(0, 200))
+  check('…and the answered one left no form behind', answered.split('agent-question-prompt').length - 1 === 1)
+  check('a typed answer would be labelled as one', !answered.includes('typed by you'))
+
+  // Typed + skipped shapes.
+  questions[1]!.status = 'answered'
+  questions[1]!.answer = resolveAnswer(questions[1]!, { optionIds: [], custom: 'Just the numbers' })
+  questions[2]!.status = 'skipped'
+  questions[2]!.note = 'Superseded by your next message.'
+  const settled = html({ ...run, phase: 'complete' })
+  check('a typed answer is shown as typed', settled.includes('Just the numbers') && settled.includes('typed by you'), settled.slice(0, 400))
+  check('a skipped question renders as skipped', settled.includes('artifact-card kind-answer skipped') && settled.includes('Question skipped'), settled.slice(0, 300))
+  check('…and says why', settled.includes('Superseded by your next message.'), settled.slice(0, 400))
+  check('a settled run offers no form at all', !settled.includes('agent-question-prompt') && !settled.includes('Submit answer'))
+  check('every settled question keeps a card', settled.split('artifact-card kind-answer').length - 1 === 3, String(settled.split('artifact-card kind-answer').length - 1))
+
+  check('a run with no questions renders nothing', html({ ...run, questions: [] }) === '')
+  check('questions on a finished run still render their cards', html({ ...run, phase: 'complete' }).includes('artifact-card kind-answer'))
+}
+
+async function testAgentAsksAndResumes() {
+  console.log('agent asks, the user chooses, the run resumes:')
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+
+  const goal = 'ask me a multiple-choice question about the Q3 sales report'
+  freshAgentConversation()
+  await sendUserMessage(goal, [])
+  const parkedId = latestAssistant()!.id
+  const parked = readMessage(parkedId)!
+  const run = parked.agent
+  const questions = run?.questions ?? []
+
+  check('the turn ended instead of hanging on the user', parked.status === 'complete', `${parked.status}: ${parked.error ?? ''}`)
+  check('…and the run is parked waiting for input', run?.phase === 'awaiting_input', String(run?.phase))
+  check('questions were recorded on the message', questions.length >= 2, String(questions.length))
+  check('every question is still pending', questions.every((q) => q.status === 'pending'))
+  check('each question is a real choice', questions.every((q) => q.options.length >= 2 && q.allowCustom))
+  check('the orchestrator’s sentence leads the ask', Boolean(run?.strategy), run?.strategy)
+  check('the answer body stays empty until the run resumes', parked.content === '', parked.content.slice(0, 80))
+  check('nothing is in flight while the user reads', !isGenerating(useChat.getState().currentId))
+  check('the active question is the first pending one', activeAgentQuestion(run)?.id === questions[0]?.id)
+  check('the ask round was counted', run?.questionRounds === 1, String(run?.questionRounds))
+
+  const markup = (id: string) => renderToString(createElement(MessageBubble, { message: readMessage(id)! })).replace(/<!-- -->/g, '')
+  const first = markup(parkedId)
+  const [q1, q2] = questions
+  check('the plan card says the run is waiting', first.includes('Waiting for you'), first.slice(0, 200))
+  check('the first question renders as a form', first.includes('agent-question-prompt') && first.includes('Submit answer'))
+  check('…with every option clickable', q1!.options.every((o) => first.includes(o.label)))
+  check('…and a typed-answer option', first.includes('Or type your own answer'), first.slice(0, 400))
+  check('the next question is not offered yet', !first.includes(q2!.prompt), q2!.prompt)
+
+  check('an empty selection is refused', answerAgentQuestion(parkedId, q1!.id, { optionIds: [] }) === false)
+  check('an unknown question is refused', answerAgentQuestion(parkedId, 'q_nope', { optionIds: [q1!.options[0]!.id] }) === false)
+
+  // Answer the first question with an option.
+  check('answering records the choice', answerAgentQuestion(parkedId, q1!.id, { optionIds: [q1!.options[0]!.id] }))
+  check('answering the same question twice does nothing', answerAgentQuestion(parkedId, q1!.id, { optionIds: [q1!.options[1]!.id] }) === false)
+  const after1 = readMessage(parkedId)!
+  check('the answer was stored with its text', after1.agent!.questions![0]!.answer?.text === q1!.options[0]!.label, after1.agent!.questions![0]!.answer?.text)
+  check('…and stamped', Boolean(after1.agent!.questions![0]!.answeredAt))
+  check('the run stays parked while questions remain', after1.agent!.phase === 'awaiting_input', String(after1.agent!.phase))
+  check('nothing started streaming yet', !isGenerating(useChat.getState().currentId))
+
+  const second = markup(parkedId)
+  check('the answer collapsed into an artifact card', second.includes('artifact-card kind-answer') && second.includes('Your answer · Question 1 of 3'), second.slice(0, 300))
+  check('the chosen answer is what remains', second.includes(q1!.options[0]!.label))
+  check('the options that were not chosen are gone', !second.includes(q1!.options[1]!.label), q1!.options[1]!.label)
+  check('the next question block rendered underneath', second.includes(q2!.prompt) && second.includes('Question 2 of 3'), second.slice(0, 200))
+  check('…and exactly one form is open', second.split('agent-question-prompt').length - 1 === 1, String(second.split('agent-question-prompt').length - 1))
+
+  // Answer the rest; the last one with a typed answer, which resumes the run.
+  const rest = after1.agent!.questions!.slice(1)
+  const typedAnswer = 'Just the numbers, with a one-line takeaway'
+  rest.forEach((q, i) => {
+    const last = i === rest.length - 1
+    answerAgentQuestion(parkedId, q.id, last ? { optionIds: [], custom: typedAnswer } : { optionIds: [q.options[0]!.id] })
+  })
+  const settling = readMessage(parkedId)!
+  check('every question is settled', settling.agent!.questions!.every((q) => q.status !== 'pending'))
+  check('the typed answer was kept as typed', settling.agent!.questions!.at(-1)!.answer?.custom === typedAnswer, settling.agent!.questions!.at(-1)!.answer?.text)
+  check('answering the last question woke the run up', settling.status === 'pending' || settling.status === 'streaming', settling.status)
+
+  await waitFor(() => {
+    const m = readMessage(parkedId)!
+    return m.status !== 'pending' && m.status !== 'streaming'
+  }, 60_000)
+  const done = readMessage(parkedId)!
+  check('the resumed run completed', done.status === 'complete', `${done.status}: ${done.error ?? ''}`)
+  check('…and is no longer parked', done.agent?.phase === 'complete', String(done.agent?.phase))
+  check('it delegated the work it asked about', (done.agent?.steps.length ?? 0) >= 2, String(done.agent?.steps.length))
+  check('the plan was built around the answers', (done.agent?.steps ?? []).some((s) => s.title.includes('decisions')), JSON.stringify(done.agent?.steps.map((s) => s.title)))
+  check('the final answer arrived on the same message', done.content.length > 50 && done.id === parkedId)
+  check('the answer reflects the decisions', done.content.includes('Your decisions'), done.content.slice(0, 240))
+  check('the typed answer reached the model', done.content.includes(typedAnswer), done.content.slice(0, 400))
+  check('the questions and answers stayed on the run', (done.agent?.questions?.length ?? 0) === questions.length && done.agent!.questions!.every((q) => q.status !== 'pending'))
+  check('the goal survived the round trip', done.agent?.goal === goal, done.agent?.goal)
+  check('the run did not ask again', done.agent?.questionRounds === 1, String(done.agent?.questionRounds))
+  check('the exchange stayed on one message', useChat.getState().conversations[useChat.getState().currentId]!.messages.filter((m) => m.role === 'assistant').length === 1)
+
+  const finished = markup(parkedId)
+  check('every settled question renders as an answer card', finished.split('artifact-card kind-answer').length - 1 === questions.length, String(finished.split('artifact-card kind-answer').length - 1))
+  check('no form is left open', !finished.includes('Submit answer') && !finished.includes('agent-question-prompt'))
+  check('the typed answer is on its card', finished.includes(typedAnswer) && finished.includes('typed by you'))
+
+  // A reload must keep the whole exchange.
+  const parsed = conversationSchema.safeParse(JSON.parse(JSON.stringify(useChat.getState().conversations[useChat.getState().currentId])))
+  check('the conversation still validates with its questions', parsed.success, parsed.success ? '' : JSON.stringify(parsed.error.issues.slice(0, 3)))
+  const roundTripped = parsed.success ? (parsed.data as Conversation).messages.find((m) => m.id === parkedId) : undefined
+  check('answers survive a persistence round trip', Boolean(roundTripped?.agent?.questions?.length === questions.length && roundTripped.agent!.questions!.every((q) => q.status === 'answered' && Boolean(q.answer?.text))))
+  check('the parked phase survives it too', roundTripped?.agent?.phase === 'complete', String(roundTripped?.agent?.phase))
+}
+
+async function testAgentQuestionSkip() {
+  console.log('agent questions: skipping is an answer too:')
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+
+  freshAgentConversation()
+  await sendUserMessage('ask me a multiple-choice question about the release notes', [])
+  const parkedId = latestAssistant()!.id
+  const questions = readMessage(parkedId)!.agent!.questions!
+  check('the simulator asked again for a new run', questions.length >= 1 && readMessage(parkedId)!.agent?.phase === 'awaiting_input')
+
+  check('skipping a question is accepted', skipAgentQuestion(parkedId, questions[0]!.id))
+  check('…and cannot be skipped twice', skipAgentQuestion(parkedId, questions[0]!.id) === false)
+  check('a skipped question is settled without an answer', readMessage(parkedId)!.agent!.questions![0]!.status === 'skipped' && !readMessage(parkedId)!.agent!.questions![0]!.answer)
+
+  for (const q of readMessage(parkedId)!.agent!.questions!.slice(1)) skipAgentQuestion(parkedId, q.id)
+  await waitFor(() => {
+    const m = readMessage(parkedId)!
+    return m.status !== 'pending' && m.status !== 'streaming'
+  }, 60_000)
+  const done = readMessage(parkedId)!
+  check('skipping the last question resumes the run', done.status === 'complete' && done.agent?.phase === 'complete', `${done.status}/${done.agent?.phase}: ${done.error ?? ''}`)
+  check('the model is told a skip means "use the safest interpretation"', done.content.includes('skipped — use the safest interpretation'), done.content.slice(0, 300))
+  check('every skipped question still has a card', done.agent!.questions!.every((q) => q.status === 'skipped'))
+}
+
+async function testAgentQuestionSuperseded() {
+  console.log('agent questions: a composer reply supersedes them:')
+  useHealth.getState().markHealthy('mock-pro')
+  useHealth.getState().markHealthy('mock-lite')
+  useSettings.getState().setModel('mock-pro', { simulate: 'ok' })
+  useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
+
+  freshAgentConversation()
+  await sendUserMessage('ask me a multiple-choice question about the Q3 sales report', [])
+  const convId = useChat.getState().currentId
+  const parkedId = latestAssistant()!.id
+  check('parked with open questions', readMessage(parkedId)!.agent?.phase === 'awaiting_input')
+
+  // Answering one, then replying in the composer instead of finishing.
+  const first = readMessage(parkedId)!.agent!.questions![0]!
+  answerAgentQuestion(parkedId, first.id, { optionIds: [first.options[0]!.id] })
+  await sendUserMessage('never mind — just generate the CSV', [])
+
+  const parked = readMessage(parkedId)!
+  check('the answered question kept its answer', parked.agent!.questions![0]!.status === 'answered')
+  check('the open questions were closed out', parked.agent!.questions!.slice(1).every((q) => q.status === 'skipped'), JSON.stringify(parked.agent!.questions!.map((q) => q.status)))
+  check('…with a note that says why', parked.agent!.questions!.slice(1).every((q) => (q.note ?? '').includes('Superseded')), JSON.stringify(parked.agent!.questions!.map((q) => q.note)))
+  check('the superseded run is no longer waiting', parked.agent?.phase === 'complete', String(parked.agent?.phase))
+  check('and the card says what happened', (parked.agent?.note ?? '').includes('before answering every question'), parked.agent?.note)
+  const html = renderToString(createElement(MessageBubble, { message: parked })).replace(/<!-- -->/g, '')
+  check('no form is offered for a superseded question', !html.includes('Submit answer') && !html.includes('agent-question-prompt'))
+  check('the closed question renders as a skipped card', html.includes('artifact-card kind-answer skipped'))
+  check('answering a superseded question does nothing', answerAgentQuestion(parkedId, readMessage(parkedId)!.agent!.questions![1]!.id, { optionIds: [] }) === false)
+  check('the newer turn ran on its own', latestAssistant()!.id !== parkedId && latestAssistant()!.status === 'complete', String(latestAssistant()?.status))
+  check('the newer turn’s answers did not leak into it', !(latestAssistant()!.agent?.questions?.length))
+
+  // Expiring a conversation with nothing pending is a no-op.
+  expirePendingAgentQuestions(convId)
+  check('expiring twice changes nothing', readMessage(parkedId)!.agent!.questions!.filter((q) => q.status === 'answered').length === 1)
+}
+
+async function testAgentAskRefusalBound() {
+  console.log('agent questions: an unusable ask is refused, not rendered:')
+  const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+  // A "question" with one option is not a choice: rendering it would be a dead
+  // end, so the engine refuses it and tells the orchestrator to proceed. This
+  // one refuses every time, which is exactly the loop that has to be bounded.
+  const stub = '{"mode":"ask","reply":"One decision.","questions":[{"question":"Which target?","options":["Prototype"]}]}'
+
+  await withScriptedAgent(script, async ({ seen }) => {
+    script.plans.push(stub, stub, stub, stub, stub, stub)
+    script.workers.push('Delivered against the safest interpretation.')
+    script.synths.push('SUMMARY\nProceeded with the safest interpretation.\n\nSTATUS\nIN_PROGRESS')
+    freshAgentConversation()
+    await sendUserMessage('build the thing', [])
+
+    const msg = lastAssistant()
+    const run = msg.agent
+    const planCalls = seen.filter((s) => s.kind === 'plan').length
+    check('the run finished instead of looping forever', msg.status === 'complete' && run?.phase === 'complete', `${msg.status}/${run?.phase}: ${msg.error ?? ''}`)
+    check(`planning was re-issued at most ${MAX_ASK_REFUSALS + 1} times`, planCalls === MAX_ASK_REFUSALS + 1, `${planCalls} planning calls`)
+    check('no dead-end question reached the user', !run?.questions?.length, String(run?.questions?.length))
+    check('the card says the question could not be rendered', (run?.note ?? '').includes('could not render'), run?.note)
+    check('…and that Slade ran the task itself after the refusals', (run?.note ?? '').includes('kept asking instead of planning'), run?.note)
+    check('it fell back to a single execution step', run?.steps.length === 1 && run.steps[0]!.status === 'complete', JSON.stringify(run?.steps.map((s) => s.status)))
+    check('the answer still arrived', msg.content.includes('safest interpretation'), msg.content.slice(0, 120))
+  })
+}
+
+async function testAgentQuestionRounds() {
+  console.log('agent questions: rounds accumulate, then the cap stops it:')
+  const script = { plans: [] as string[], workers: [] as string[], synths: [] as string[] }
+  const ask = (n: number) =>
+    `{"mode":"ask","reply":"Round ${n}.","questions":[{"question":"Round ${n} decision?","options":["A${n}","B${n}"]}]}`
+
+  await withScriptedAgent(script, async ({ seen }) => {
+    // Three ask-rounds are granted; the fourth is refused and the run proceeds.
+    script.plans.push(ask(1), ask(2), ask(3), ask(4), ask(4), ask(4))
+    script.workers.push('Built to the decisions.')
+    script.synths.push('SUMMARY\nBuilt to your decisions.\n\nSTATUS\nCOMPLETE')
+
+    freshAgentConversation()
+    await sendUserMessage('build the thing', [])
+    const parkedId = lastAssistant().id
+    const questionsOf = () => readMessage(parkedId)!.agent!.questions ?? []
+
+    for (let round = 1; round <= 3; round++) {
+      const qs = questionsOf()
+      check(`round ${round}: the run parked on a new question`, readMessage(parkedId)!.agent?.phase === 'awaiting_input' && qs.length === round, `${qs.length} questions`)
+      check(`round ${round}: earlier answers are kept alongside it`, qs.slice(0, -1).every((q) => q.status === 'answered' && Boolean(q.answer?.text)))
+      check(`round ${round}: the round counter advanced`, readMessage(parkedId)!.agent?.questionRounds === round, String(readMessage(parkedId)!.agent?.questionRounds))
+      check(`round ${round}: only the new question is offered`, renderToString(createElement(MessageBubble, { message: readMessage(parkedId)! })).split('agent-question-prompt').length - 1 === 1)
+      answerAgentQuestion(parkedId, qs[qs.length - 1]!.id, { optionIds: [qs[qs.length - 1]!.options[1]!.id] })
+      await waitFor(() => {
+        const agent = readMessage(parkedId)!.agent
+        return agent?.phase === 'awaiting_input' ? (agent.questions?.length ?? 0) > round : agent?.phase === 'complete'
+      }, 20_000)
+    }
+
+    const msg = readMessage(parkedId)!
+    const run = msg.agent
+    const planCalls = seen.filter((s) => s.kind === 'plan').length
+    check('the fourth round was refused at the cap', run?.questionRounds === 3, String(run?.questionRounds))
+    check('…and the card says so', (run?.note ?? '').includes('already asked 3 rounds'), run?.note)
+    check('the capped run still finished', msg.status === 'complete' && run?.phase === 'complete', `${msg.status}/${run?.phase}: ${msg.error ?? ''}`)
+    check('planning was called once per round plus the bounded refusals', planCalls === 3 + MAX_ASK_REFUSALS + 1, `${planCalls} planning calls`)
+    check('every answered round is still on the message', run?.questions?.length === 3 && run.questions.every((q) => q.status === 'answered'), JSON.stringify(run?.questions?.map((q) => q.status)))
+    check('the later answers are the ones that were picked', run?.questions?.map((q) => q.answer?.text).join() === 'B1,B2,B3', run?.questions?.map((q) => q.answer?.text).join())
+    check('all three rounds render as settled cards', renderToString(createElement(MessageBubble, { message: msg })).split('artifact-card kind-answer').length - 1 === 3)
+    check('the resumed run delegated and answered', (run?.steps.length ?? 0) >= 1 && msg.content.includes('your decisions'), msg.content.slice(0, 120))
+  })
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -5273,6 +5765,17 @@ async function main() {
   await testStop()
   testOrchestratorPrompt()
   testPlannerParsing()
+  testQuestionNormalization()
+  testQuestionAnswers()
+  testQuestionFormatting()
+  testPlannerAskParsing()
+  testAskPromptContract()
+  testAgentQuestionUi()
+  await testAgentAsksAndResumes()
+  await testAgentQuestionSkip()
+  await testAgentQuestionSuperseded()
+  await testAgentAskRefusalBound()
+  await testAgentQuestionRounds()
   testWorkerResolution()
   testRoadmapPaths()
   testRoadmapParsing()

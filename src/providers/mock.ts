@@ -19,6 +19,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export const ORCHESTRATOR_PLAN_MARKER = '[SLADE:ORCHESTRATOR:PLAN]'
 export const ORCHESTRATOR_SYNTH_MARKER = '[SLADE:ORCHESTRATOR:SYNTH]'
+export const ORCHESTRATOR_ASK_MARKER = '[SLADE:ORCHESTRATOR:ASK]'
+/** Present on the user turn that carries the answers to a paused run's questions. */
+export const ORCHESTRATOR_ANSWERS_MARKER = '[SLADE:ORCHESTRATOR:ANSWERS]'
 
 interface MockPlan {
   mode: 'plan'
@@ -26,8 +29,105 @@ interface MockPlan {
   subtasks: { title: string; model: string; prompt: string }[]
 }
 
+interface MockAsk {
+  mode: 'ask'
+  reply: string
+  questions: {
+    question: string
+    detail?: string
+    options: string[]
+    multiple?: boolean
+    allowCustom?: boolean
+    customLabel?: string
+  }[]
+}
+
+/**
+ * The simulator's version of "I cannot plan this responsibly yet": a real
+ * orchestrator asks when two interpretations would produce materially different
+ * work, so the simulator asks the same kind of thing about the same goal it
+ * would otherwise plan for. Two questions, one of them data-shaped when the goal
+ * is, plus a typed-answer escape hatch on each.
+ */
+function mockQuestions(goal: string): MockAsk {
+  const g = goal.trim().replace(/\s+/g, ' ')
+  const wantsData = /csv|data(set)?|spreadsheet|table|report|metrics|numbers|sales|revenue|q[1-4]\b/i.test(g)
+  const wantsCode = /code|app|script|function|component|api|build|implement|program|react|python|typescript/i.test(g)
+
+  const questions: MockAsk['questions'] = [
+    {
+      question: wantsCode
+        ? 'What should the implementation aim at?'
+        : wantsData
+          ? 'What should the deliverable be?'
+          : 'What should I actually produce?',
+      detail: 'It changes how I split the work between the worker models.',
+      options: wantsCode
+        ? ['A minimal working prototype', 'A production-ready module with tests', 'A design doc and interfaces only']
+        : wantsData
+          ? ['A full report with analysis', 'A short summary I can forward', 'The raw data only (CSV)']
+          : ['A detailed write-up', 'A short summary', 'An outline I can expand myself'],
+      allowCustom: true,
+    },
+    {
+      question: 'How much detail do you want in the final answer?',
+      options: ['Executive summary', 'Detailed, with the reasoning', 'Everything, including the working notes'],
+      allowCustom: true,
+    },
+  ]
+
+  if (wantsData) {
+    questions.push({
+      question: 'Which period should the numbers cover?',
+      options: ['Last quarter (Q3)', 'Year to date', 'A rolling 12 months'],
+      allowCustom: true,
+      customLabel: 'e.g. "Q2 this year vs Q2 last year"',
+    })
+  }
+
+  return {
+    mode: 'ask',
+    reply: `Before I delegate this, I need ${questions.length} decisions from you — pick an option or type your own.`,
+    questions,
+  }
+}
+
+/**
+ * Goals the simulator should stop and ask about. Narrow on purpose: the point is
+ * to demo the mechanism ("ask me a multiple-choice question about the report"),
+ * not to make every simulated task interrogate the user.
+ */
+function wantsQuestions(goal: string): boolean {
+  return /\b(ask me|ask the user|ask a question|multiple.?choice|multi.?choice|quiz|survey|clarif\w*)\b/i.test(goal)
+}
+
+/** The goal out of a resumed planning turn, which leads with the answers block. */
+function goalFrom(text: string): string {
+  const match = /^Goal: (.+)$/m.exec(text)
+  return match?.[1]?.trim() || text
+}
+
+/**
+ * The answers the user picked, out of either place they travel: the resumed
+ * planning turn ("My answers:") and the synthesis request ("User decisions…").
+ * Both are one indented arrow per question; the block is read to its known
+ * terminator so worker output in a synthesis request can't leak into it.
+ */
+function decisionsFrom(text: string): { question: string; answer: string }[] {
+  const heading = /^(?:User decisions[^\n]*|My answers):$/m.exec(text)
+  if (!heading) return []
+  const from = heading.index + heading[0].length
+  const rest = text.slice(from)
+  const end = /\n(?:Those are explicit requirements|Subtask results)/.exec(rest)
+  const block = end ? rest.slice(0, end.index) : rest
+  return [...block.matchAll(/^(?:-|\d+\.)\s+(.+?)\n\s+→\s+(.+)$/gm)].map((m) => ({
+    question: m[1]!.trim(),
+    answer: m[2]!.trim(),
+  }))
+}
+
 /** Decompose the goal the way the planner prompt asks real models to. */
-function mockPlan(goal: string): MockPlan {
+function mockPlan(goal: string, decisions: { question: string; answer: string }[] = []): MockPlan {
   const g = goal.trim().replace(/\s+/g, ' ')
   const wantsData = /csv|data(set)?|spreadsheet|table|report|metrics|numbers|sales|revenue|q[1-4]\b/i.test(g)
   const wantsCode = /code|app|script|function|component|api|build|implement|program|react|python|typescript/i.test(g)
@@ -65,6 +165,20 @@ function mockPlan(goal: string): MockPlan {
       prompt: `Draft the deliverable for this task: "${g}". Make it complete and ready to hand over.`,
     })
   }
+  // A resumed run plans *around* what the user chose: the decisions lead, so
+  // the demo shows the answers actually shaping the work instead of being
+  // decorative.
+  if (decisions.length > 0) {
+    subtasks.unshift({
+      title: 'Turn the user’s decisions into requirements',
+      model: '',
+      prompt:
+        `The user answered these questions about the task "${g}":\n` +
+        `${decisions.map((d) => `- ${d.question} → ${d.answer}`).join('\n')}\n` +
+        'Restate what each decision requires of the deliverable, concretely, and flag any that conflict.',
+    })
+  }
+
   subtasks.push({
     title: 'Review & polish',
     model: '',
@@ -73,7 +187,9 @@ function mockPlan(goal: string): MockPlan {
 
   return {
     mode: 'plan',
-    reply: `On it — I'll break this into ${subtasks.length} steps and route each to the best available model, then assemble the final result.`,
+    reply: decisions.length
+      ? `Your ${decisions.length} decision${decisions.length === 1 ? '' : 's'} settle it — I'll plan ${subtasks.length} steps around them and route each to the best available model.`
+      : `On it — I'll break this into ${subtasks.length} steps and route each to the best available model, then assemble the final result.`,
     subtasks,
   }
 }
@@ -119,13 +235,18 @@ function mockSynthesis(requestText: string, model: ModelDef, systemPrompt = ''):
   const goal = goalMatch?.[1]?.trim() ?? 'your task'
   const steps = [...requestText.matchAll(/^## \[(\d+)\] (.+?) —/gm)].map((m) => m[2]!)
   const hasCsv = /```csv:/i.test(requestText)
+  const decisions = decisionsFrom(requestText)
 
   const recap = steps.length
     ? steps.map((t, i) => `| ${i + 1} | ${t} | done |`).join('\n')
     : '| 1 | Execute the task | done |'
 
-  return `Done — **${goal}** is complete. I delegated ${steps.length || 1} step${steps.length === 1 ? '' : 's'} across the model chain, and every worker reported back.
+  const decided = decisions.length
+    ? `\n### Your decisions\n\n${decisions.map((d) => `- **${d.question}** → ${d.answer}`).join('\n')}\n\nI planned and delegated around exactly those, and the deliverable above follows them.\n`
+    : ''
 
+  return `Done — **${goal}** is complete. I delegated ${steps.length || 1} step${steps.length === 1 ? '' : 's'} across the model chain, and every worker reported back.
+${decided}
 ### What the team produced
 
 | # | Step | Status |
@@ -352,9 +473,18 @@ export class MockAdapter implements ProviderAdapter {
     // it), and the synthesizer assembles the final answer from step results.
     let reply: string
     if (cfg.systemPrompt.includes(ORCHESTRATOR_PLAN_MARKER)) {
-      reply = GREETING_RE.test(lastText.trim())
-        ? JSON.stringify({ mode: 'answer', answer: mockReply(lastText, attachments, model) })
-        : JSON.stringify(mockPlan(lastText))
+      // A resumed planning call leads with the answers the user picked, so the
+      // simulator must recognise it — otherwise it would ask the same questions
+      // again and the run would loop instead of delegating.
+      const answered = lastText.includes(ORCHESTRATOR_ANSWERS_MARKER)
+      const goal = answered ? goalFrom(lastText) : lastText
+      const decisions = answered ? decisionsFrom(lastText) : []
+      reply =
+        !answered && wantsQuestions(goal)
+          ? JSON.stringify(mockQuestions(goal))
+          : GREETING_RE.test(goal.trim())
+            ? JSON.stringify({ mode: 'answer', answer: mockReply(goal, attachments, model) })
+            : JSON.stringify(mockPlan(goal, decisions))
     } else if (cfg.systemPrompt.includes(ORCHESTRATOR_SYNTH_MARKER)) {
       reply = mockSynthesis(lastText, model, cfg.systemPrompt)
     } else {
@@ -374,7 +504,11 @@ export class MockAdapter implements ProviderAdapter {
     // Stream mock reasoning for pro models
     if (model.id.includes('pro') || model.apiModel.includes('pro')) {
       const thoughts = cfg.systemPrompt.includes(ORCHESTRATOR_PLAN_MARKER)
-        ? `Analyzing user request: "${lastText.slice(0, 50)}..."\nEvaluating task scope and model capabilities.\nFormulating multi-step execution plan.`
+        ? lastText.includes(ORCHESTRATOR_ANSWERS_MARKER)
+          ? `Reading the user's answers to my questions.\nTreating each decision as an explicit requirement.\nFormulating the execution plan around them.`
+          : wantsQuestions(lastText)
+            ? `This request has more than one reasonable reading.\nDeciding what I genuinely cannot pick for the user.\nFraming the choices so each one leads to different work.`
+            : `Analyzing user request: "${lastText.slice(0, 50)}..."\nEvaluating task scope and model capabilities.\nFormulating multi-step execution plan.`
         : `Analyzing goal and user context.\nSynthesizing requirements and structuring clear response.\nValidating response fidelity.`
       const thoughtTokens = thoughts.match(/\s*\S+/g) ?? [thoughts]
       for (const tok of thoughtTokens) {

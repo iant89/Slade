@@ -9,7 +9,7 @@ import { buildTurns } from './turns'
 import { failureSummary, handoff, mergeUsage, newAssistantPlaceholder, routeCandidates, skippedModels } from './strategy'
 import { escalateTokens } from './completion'
 import { finishRun, getRun, registerRun, stopGeneration, isGenerating, type ActiveRun } from './active'
-import { applyAgentOutputWithGit, prepareAgentWorkspaceContext, runAgentTurn } from './agent'
+import { applyAgentOutputWithGit, expirePendingAgentQuestions, prepareAgentWorkspaceContext, runAgentTurn } from './agent'
 import { uid } from '../lib/id'
 import { announceResponse, currentAnnouncement, setAnnouncer } from './announce'
 import { providerTokens } from '../lib/providerCatalog'
@@ -83,6 +83,10 @@ function dispatchTurn(
   userMessageId: string,
   assistantMessageId: string,
 ): Promise<void> {
+  // A new turn supersedes any question the agent was still waiting on, so its
+  // card stops offering a choice that would resume a run nobody wants anymore.
+  // (Answering a question resumes that run directly and never comes through here.)
+  expirePendingAgentQuestions(conversationId)
   const conv = useChat.getState().conversations[conversationId]
   if (conv?.agentEnabled) return runAgentTurn(conversationId, userMessageId, assistantMessageId)
   return runChain(conversationId, userMessageId, assistantMessageId)
