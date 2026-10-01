@@ -6,9 +6,10 @@ import { useSettings, modelShowsThoughts } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { copyText } from '../../lib/clipboard'
 import { formatCount, formatTime } from '../../lib/format'
+import { foldActionRuns } from '../../lib/github-actions'
 import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { GitHubActionCard } from '../github/GitHubActivity'
+import { GitHubActionCard, GitHubActionGroup } from '../github/GitHubActivity'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
 import { AgentQuestions } from './AgentQuestions'
@@ -37,6 +38,15 @@ import {
 /** The card is always called "Thoughts" — and always wears the brain icon. */
 export const THOUGHTS_LABEL = 'Thoughts'
 
+/**
+ * Whether a thought card draws anything at all: it needs text to show, or to be
+ * mid-stream. `ThinkingBlock` renders nothing otherwise, and the run timeline
+ * uses the same answer to decide whether a thought separates two GitHub cards.
+ */
+function thoughtDraws(reasoning: string | undefined, streaming: boolean): boolean {
+  return Boolean(reasoning?.trim()) || streaming
+}
+
 export function ThinkingBlock({
   reasoning,
   streaming = false,
@@ -47,7 +57,7 @@ export function ThinkingBlock({
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
   const isExpanded = userToggled !== null ? userToggled : (streaming ? true : false)
 
-  if (!reasoning?.trim() && !streaming) return null
+  if (!thoughtDraws(reasoning, streaming)) return null
 
   const trimmed = reasoning?.trim() ?? ''
   const wordCount = trimmed ? trimmed.split(/\s+/).length : 0
@@ -86,27 +96,47 @@ export function ThinkingBlock({
   )
 }
 
-/** Render the agent's thoughts and GitHub cards in the order they happened. */
+type GitHubTimelineItem = Extract<AgentTimelineItem, { type: 'github' }>
+
+const isGitHubTimelineItem = (item: AgentTimelineItem): item is GitHubTimelineItem => item.type === 'github'
+
+/**
+ * Render the agent's thoughts and GitHub cards in the order they happened.
+ *
+ * More than two GitHub cards in a row fold into one expandable group. The fold
+ * runs over what is actually on screen: a thought that is switched off (or has
+ * nothing to show) draws nothing, so the calls on either side of it are
+ * neighbours and group together. A visible thought still splits two streaks.
+ */
 function AgentActivityTimeline({ run, status }: { run: AgentRun; status: Message['status'] }) {
   const settings = useSettings((s) => s.s)
   const items = run.timeline ?? []
   if (items.length === 0) return null
 
+  const shown = items.filter(
+    (item) =>
+      item.type === 'github' ||
+      (modelShowsThoughts(settings, item.modelId) &&
+        thoughtDraws(item.text, status === 'streaming' && Boolean(item.streaming))),
+  )
+
   return (
     <div className="agent-activity-timeline" aria-label="Agent activity">
-      {items.map((item: AgentTimelineItem) =>
-        item.type === 'thought' ? (
-          modelShowsThoughts(settings, item.modelId) ? (
-            <ThinkingBlock
-              key={item.id}
-              reasoning={item.text}
-              streaming={status === 'streaming' && Boolean(item.streaming)}
-            />
-          ) : null
+      {foldActionRuns(shown, isGitHubTimelineItem).map((fold) => {
+        if (fold.kind === 'group') {
+          return <GitHubActionGroup key={fold.id} cards={fold.items.map((item) => item.card)} />
+        }
+        const item = fold.item
+        return item.type === 'thought' ? (
+          <ThinkingBlock
+            key={item.id}
+            reasoning={item.text}
+            streaming={status === 'streaming' && Boolean(item.streaming)}
+          />
         ) : (
           <GitHubActionCard key={item.id} entry={item.card} />
-        ),
-      )}
+        )
+      })}
     </div>
   )
 }

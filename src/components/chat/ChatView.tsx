@@ -6,7 +6,7 @@ import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { currentAnnouncement, setAnnouncer } from '../../engine/send'
 import { MessageBubble, TypingIndicator } from './MessageBubble'
-import { GitHubActionItem } from '../github/GitHubActivity'
+import { GitHubActionGroupItem, GitHubActionItem } from '../github/GitHubActivity'
 import { buildPanelItems, useSessionGitHubActions } from './panel'
 import { IconArrowDown, IconStarburst, IconWifiOff } from '../icons'
 
@@ -23,8 +23,9 @@ const NO_COMPONENT_OVERRIDES = {}
 /**
  * The chat panel: everything the conversation holds, in one scroll area above
  * the composer. Standalone GitHub Actions are appended to the end of the same
- * list (`./panel.ts`); actions from an agent run are already interleaved into
- * that assistant message's timeline. All of them scroll with the log.
+ * list (`./panel.ts`, more than two in a row folded into one dropdown); actions
+ * from an agent run are already interleaved into that assistant message's
+ * timeline. All of them scroll with the log.
  */
 export function ChatView() {
   const conv = useCurrentConversation()
@@ -76,6 +77,8 @@ export function ChatView() {
           itemContent={(_, item) =>
             item.kind === 'message' ? (
               <MessageBubble message={item.message} />
+            ) : item.kind === 'github-group' ? (
+              <GitHubActionGroupItem entries={item.entries} />
             ) : (
               <GitHubActionItem entry={item.entry} />
             )
