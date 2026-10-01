@@ -203,6 +203,42 @@ export const roadmapReportSchema = z.object({
   ),
 })
 
+const githubActionArtifactSchema = z.object({
+  id: z.string(),
+  kind: z.enum([
+    'get-file', 'create-file', 'update-file', 'delete-file', 'get-blob', 'create-blob',
+    'get-tree', 'create-tree', 'create-branch', 'delete-branch', 'get-branch', 'list-branches',
+    'update-ref', 'get-commit', 'create-commit', 'create-pr', 'merge-pr', 'get-pr', 'list-prs',
+    'create-issue', 'list-issues', 'create-gist', 'list-gists', 'search-code', 'search-repos',
+    'list-repos', 'get-repo', 'clone-repo', 'test-token', 'rate-limit', 'sign-in', 'sign-out', 'other',
+  ]),
+  title: z.string(),
+  subject: z.string(),
+  repo: z.string().optional(),
+  ref: z.string().optional(),
+  status: z.enum(['running', 'done', 'error', 'cancelled']),
+  at: z.number(),
+  elapsedMs: z.number().optional(),
+  error: z.string().optional(),
+  count: z.number().int().positive(),
+})
+
+const agentTimelineItemSchema = z.discriminatedUnion('type', [
+  z.object({
+    id: z.string(),
+    type: z.literal('thought'),
+    sourceId: z.string(),
+    modelId: z.string(),
+    text: z.string(),
+    streaming: z.boolean().optional(),
+  }),
+  z.object({
+    id: z.string(),
+    type: z.literal('github'),
+    card: githubActionArtifactSchema,
+  }),
+])
+
 export const agentRunSchema = z.object({
   phase: z.enum(['planning', 'executing', 'synthesizing', 'complete', 'error']),
   goal: z.string(),
@@ -215,8 +251,9 @@ export const agentRunSchema = z.object({
   startedAt: z.number(),
   finishedAt: z.number().optional(),
   fsOps: z.array(fsOpRecordSchema).optional(),
-  // Added with inline GitHub activity: the run's cards live in the live ledger,
-  // so a reloaded conversation simply has no scope to look them up by.
+  // Thought segments and GitHub cards are persisted with the run so their
+  // chronological placement survives a reload, independently of live activity.
+  timeline: z.array(agentTimelineItemSchema).optional().catch(undefined),
   githubScope: z.string().optional(),
   // A stored roadmap report that fails validation is dropped on its own. It
   // must never take the surrounding conversation down with it: the whole

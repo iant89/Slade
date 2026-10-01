@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Message } from '../../types'
+import type { AgentRun, AgentTimelineItem, Message } from '../../types'
 import { FAILURE_LABEL } from '../../types'
 import { useChat } from '../../store/chat'
 import { useSettings, modelShowsThoughts } from '../../store/settings'
@@ -8,6 +8,7 @@ import { copyText } from '../../lib/clipboard'
 import { formatCount, formatTime } from '../../lib/format'
 import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
+import { GitHubActionCard } from '../github/GitHubActivity'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
 import { RoadmapTimeline } from './RoadmapTimeline'
@@ -79,6 +80,31 @@ export function ThinkingBlock({
             {streaming && <StreamCursor />}
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+/** Render the agent's thoughts and GitHub cards in the order they happened. */
+function AgentActivityTimeline({ run, status }: { run: AgentRun; status: Message['status'] }) {
+  const settings = useSettings((s) => s.s)
+  const items = run.timeline ?? []
+  if (items.length === 0) return null
+
+  return (
+    <div className="agent-activity-timeline" aria-label="Agent activity">
+      {items.map((item: AgentTimelineItem) =>
+        item.type === 'thought' ? (
+          modelShowsThoughts(settings, item.modelId) ? (
+            <ThinkingBlock
+              key={item.id}
+              reasoning={item.text}
+              streaming={status === 'streaming' && Boolean(item.streaming)}
+            />
+          ) : null
+        ) : (
+          <GitHubActionCard key={item.id} entry={item.card} />
+        ),
       )}
     </div>
   )
@@ -328,6 +354,16 @@ function AssistantBody({
   const pending = message.status === 'pending'
   const typingOn = settings.defaults.typingIndicator
   const showThoughts = modelShowsThoughts(settings, message.modelId ?? message.chain?.[0])
+  const agentTimeline = message.agent?.timeline ?? []
+  const synthesisThoughtInTimeline = agentTimeline.some((item) => item.type === 'thought' && item.sourceId === 'synthesis')
+  const reasoningIsPlanning = Boolean(message.agent?.planningReasoning && message.reasoning === message.agent.planningReasoning)
+  const showFallbackThought = showThoughts &&
+    (message.agent
+      ? Boolean(
+          (message.reasoning && !synthesisThoughtInTimeline && !reasoningIsPlanning) ||
+            (agentTimeline.length === 0 && streaming && !message.content.trim()),
+        )
+      : Boolean(message.reasoning || (streaming && !message.content.trim())))
   const error = message.status === 'error'
   const cancelled = message.status === 'cancelled'
 
@@ -359,7 +395,8 @@ function AssistantBody({
       {message.agent && !message.content.trim() && (pending || streaming) && message.agent.steps.length === 0 && (
         <TypingIndicator label={typingOn ? 'The orchestrator is working…' : ''} />
       )}
-      {showThoughts && (message.reasoning || (streaming && !message.content.trim())) ? (
+      {message.agent ? <AgentActivityTimeline run={message.agent} status={message.status} /> : null}
+      {showFallbackThought ? (
         <ThinkingBlock
           reasoning={message.reasoning}
           streaming={streaming && !message.content.trim()}

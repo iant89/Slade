@@ -124,10 +124,11 @@ import type { Artifact, Conversation, FsFile, Message, RoadmapReport } from '../
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
-import { GitHubActionCard, GitHubActionItem, GitHubRunActivity } from '../src/components/github/GitHubActivity'
+import { GitHubActionCard, GitHubActionItem } from '../src/components/github/GitHubActivity'
 import { buildPanelItems, sessionGitHubActions, usePanelHasContent } from '../src/components/chat/panel'
 import { ChatView } from '../src/components/chat/ChatView'
 import { useGitHubActivity, logGitHubAction, logGitHubActionDone, finishGitHubAction } from '../src/store/githubActivity'
+import { appendAgentThought } from '../src/store/agentTimeline'
 import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
@@ -2490,7 +2491,7 @@ async function testGitHubActionCards() {
 
   const observed: string[] = []
   const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
-  useGitHubActivity.setState({ entries: [], total: 0, scopes: [] })
+  useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
   try {
     useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo', 'gist'], repos: [], tree: undefined, preview: undefined })
 
@@ -2547,7 +2548,14 @@ async function testGitHubActionCards() {
       observed.filter((o) => o.startsWith('start:')).length === observed.filter((o) => o.startsWith('end:')).length,
       JSON.stringify(observed.slice(0, 4)),
     )
-    check('the log never grows past its cap', useGitHubActivity.getState().entries.length <= 60)
+    const firstLoggedCardId = useGitHubActivity.getState().entries[0]?.id
+    for (let i = 0; i < 65; i++) logGitHubActionDone({ kind: 'other', subject: `retained-${i}` })
+    check(
+      'the activity ledger never prunes cards, even after more than sixty calls',
+      useGitHubActivity.getState().entries.length > 60 &&
+        Boolean(firstLoggedCardId && useGitHubActivity.getState().entries.some((entry) => entry.id === firstLoggedCardId)),
+      String(useGitHubActivity.getState().entries.length),
+    )
 
     // GitHub actions that are not api.github.com calls are logged by hand.
     const signOutLogin = useGitHub.getState().login
@@ -2578,6 +2586,7 @@ async function testGitHubActionCards() {
     check('the card says which repo it touched', card.includes('octo/demo@main'), card.slice(0, 320))
     check('the card is NOT expandable', !card.includes('aria-expanded') && !card.includes('<button') && !card.includes('chevron'), card.slice(0, 240))
     check('the card is a div, not a disclosure', card.includes('gh-action-card status-done'), card.slice(0, 120))
+    check('the activity store has no per-card removal operation', !('remove' in useGitHubActivity.getState()))
 
     const activityInit = useGitHubActivity.getInitialState() as unknown as {
       entries: ReturnType<typeof useGitHubActivity.getState>['entries']
@@ -2587,12 +2596,7 @@ async function testGitHubActionCards() {
     const seed = () => {
       activityInit.entries = useGitHubActivity.getState().entries
     }
-    const runHtml = (scope: string) => {
-      seed()
-      return renderToString(createElement(GitHubRunActivity, { scope })).replace(/<!-- -->/g, '')
-    }
-
-    /* ---- the panel: your calls are appended to the chat log ---- */
+    /* ---- the panel: standalone calls are appended to the chat log ---- */
 
     const now = Date.now()
     const userMessage: Message = {
@@ -2659,52 +2663,81 @@ async function testGitHubActionCards() {
     )
     finishGitHubAction(liveId, { status: 'done' })
 
-    /* ---- a run’s cards render in the run’s answer, not in the panel ---- */
-    useGitHubActivity.getState().enterScope('scope_run_1')
+    /* ---- run calls split the thought timeline in-place and are never removable ---- */
+    const runMessage: Message = {
+      id: 'msg_run_timeline',
+      role: 'assistant',
+      conversationId: 'conv_run_timeline',
+      content: 'The final answer follows.',
+      createdAt: now,
+      status: 'streaming',
+      modelId: 'mock-pro',
+      agent: {
+        phase: 'synthesizing',
+        goal: 'update a repository',
+        orchestratorModelId: 'mock-pro',
+        steps: [],
+        startedAt: now,
+        githubScope: 'scope_run_1',
+        timeline: [],
+      },
+    }
+    seedConversations([convFixture('conv_run_timeline', 'Run timeline', now, { messages: [runMessage] })], 'conv_run_timeline')
+    useGitHubActivity.getState().enterScope('scope_run_1', runMessage.id)
+    appendAgentThought(runMessage.id, 'synthesis', 'mock-pro', 'Thought before the GitHub call.')
     const inRun = logGitHubAction({ kind: 'get-file', subject: '/src/math.ts', repo: 'octo/demo', ref: 'main' })
+    appendAgentThought(runMessage.id, 'synthesis', 'mock-pro', 'Thought after the GitHub call.')
     const runCards = useGitHubActivity.getState().entries.filter((e) => e.id === inRun)
-    check('a card logged during a run carries the scope', runCards[0]?.scope === 'scope_run_1', JSON.stringify(runCards))
+    check('a card logged during a run carries its scope and message', runCards[0]?.scope === 'scope_run_1' && runCards[0]?.messageId === runMessage.id, JSON.stringify(runCards))
 
-    const inlineLive = runHtml('scope_run_1')
+    seed()
+    const timelineHtml = renderToString(
+      createElement(MessageBubble, {
+        message: useChat.getState().conversations.conv_run_timeline!.messages[0]!,
+      }),
+    ).replace(/<!-- -->/g, '')
+    const firstThought = timelineHtml.indexOf('thought-block')
+    const actionCard = timelineHtml.indexOf('gh-action-card')
+    const secondThought = timelineHtml.indexOf('thought-block', firstThought + 1)
     check(
-      'a run’s calls render inside the run’s own block',
-      inlineLive.includes('GitHub activity · 1 call') &&
-        inlineLive.includes('gh-activity-list') &&
-        inlineLive.includes('/src/math.ts') &&
-        !inlineLive.includes('/live.ts'),
-      inlineLive.slice(0, 300),
+      'a GitHub call splits the thought into thought → action → thought cards',
+      firstThought >= 0 && firstThought < actionCard && actionCard < secondThought,
+      timelineHtml.slice(Math.max(0, firstThought - 80), secondThought + 120),
     )
+    check('the in-message action card has no remove or dismiss button', !timelineHtml.slice(actionCard).split('</div>')[0]?.includes('<button'), timelineHtml.slice(actionCard, actionCard + 240))
     check(
-      '…and the panel does not repeat them',
-      !panelItems().some((i) => i.kind === 'github' && i.id === inRun),
-      JSON.stringify(panelItems().map((i) => i.id)),
+      'a run action is not repeated as a panel row',
+      !panelItems().some((item) => item.kind === 'github' && item.id === inRun),
+      JSON.stringify(panelItems().map((item) => item.id)),
     )
+
     finishGitHubAction(inRun, { status: 'done' })
+    const cancelledId = logGitHubAction({ kind: 'get-file', subject: '/cancelled.ts', repo: 'octo/demo', ref: 'main' })
+    finishGitHubAction(cancelledId, { status: 'cancelled', error: 'Cancelled' })
+    const runMessageAfter = useChat.getState().conversations.conv_run_timeline!.messages[0]!
+    const cancelledCard = runMessageAfter.agent?.timeline?.find((item) => item.type === 'github' && item.card.id === cancelledId)
+    check('a cancelled action remains in both the ledger and message timeline',
+      useGitHubActivity.getState().entries.some((entry) => entry.id === cancelledId) && cancelledCard?.type === 'github' && cancelledCard.card.status === 'cancelled',
+      JSON.stringify(cancelledCard),
+    )
+    const persistedRun = conversationSchema.safeParse(useChat.getState().conversations.conv_run_timeline)
+    check(
+      'thought/action cards pass conversation persistence validation',
+      persistedRun.success && Boolean(persistedRun.data.messages[0]?.agent?.timeline?.some((item) => item.type === 'github' && item.card.id === cancelledId)),
+      persistedRun.success ? JSON.stringify(persistedRun.data.messages[0]?.agent?.timeline?.map((item) => item.type)) : String(persistedRun.error),
+    )
     useGitHubActivity.getState().exitScope('scope_run_1')
     check('the scope stack is released again', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
-    const inlineFolded = runHtml('scope_run_1')
-    check(
-      '…and fold to the count line once the run goes quiet',
-      inlineFolded.includes('GitHub activity · 1 call') && !inlineFolded.includes('gh-activity-list'),
-      inlineFolded.slice(0, 200),
-    )
-    check('a scope with no calls renders nothing', runHtml('scope_nothing') === '')
+    check('a scope with no calls does not create a chat row', !panelItems().some((item) => item.kind === 'github' && item.id === 'scope_nothing'))
 
-    useGitHubActivity.getState().clear()
-    activityInit.entries = []
-    const clearedPanel = panelItems()
-    check(
-      'clearing the ledger leaves the panel with just the conversation',
-      clearedPanel.length === 2 && clearedPanel.every((i) => i.kind === 'message'),
-      JSON.stringify(clearedPanel.map((i) => i.kind)),
-    )
     check('the card title escapes nothing weird', card.includes('octo/demo@main'))
   } finally {
     off()
     globalThis.fetch = realFetch
     fake.close()
     useGitHub.getState().setPublishDefaults({ repo: undefined, branch: undefined, prefix: '' })
-    useGitHubActivity.getState().clear()
+    useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
+    useChat.getState().clearAllConversations()
     useFs.getState().deleteFile('docs/roadmap.md')
     useFs.getState().deleteFile('src/lib/util.ts')
   }
@@ -3679,7 +3712,7 @@ async function testGitLocalFsReadWriteAcross() {
         Object.keys(useFs.getState().deletedRemotes).length === 0,
     )
 
-    /* ---- the run's GitHub calls are attributed to its message ---- */
+    /* ---- the run's GitHub cards are persisted in its message timeline ---- */
 
     const runMsg = useChat.getState().conversations[useChat.getState().currentId]!.messages.find(
       (m) => m.agent?.githubScope,
@@ -3689,9 +3722,9 @@ async function testGitLocalFsReadWriteAcross() {
     check('the run released its scope when it finished', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
     const scoped = useGitHubActivity.getState().entries.filter((e) => e.scope === scope)
     check(
-      'the files the run pulled from GitHub are logged under that scope',
-      scoped.some((e) => e.kind === 'get-file' && e.subject === '/src/math.ts'),
-      JSON.stringify(scoped.map((e) => `${e.title} ${e.subject}`)),
+      'the files the run pulled from GitHub are logged under that scope and message',
+      scoped.some((e) => e.kind === 'get-file' && e.subject === '/src/math.ts' && e.messageId === runMsg?.id),
+      JSON.stringify(scoped.map((e) => `${e.title} ${e.subject} → ${e.messageId}`)),
     )
     check(
       'the commit the button triggered afterwards is NOT part of the run',
@@ -3699,24 +3732,25 @@ async function testGitLocalFsReadWriteAcross() {
         !useGitHubActivity.getState().entries.some((e) => e.scope === scope && e.kind === 'create-commit'),
       JSON.stringify(useGitHubActivity.getState().entries.map((e) => `${e.kind}:${e.scope ? 'run' : 'manual'}`)),
     )
-    // SSR hands React each store's *initial* snapshot, so seed the ledger the
-    // way the live session would have it before rendering the message.
-    const activityInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
-    activityInit.entries = useGitHubActivity.getState().entries
+    const inlineArtifacts = runMsg?.agent?.timeline?.filter((item) => item.type === 'github') ?? []
+    check(
+      'the run message owns a snapshot of every scoped GitHub action',
+      inlineArtifacts.length === scoped.length && inlineArtifacts.some((item) => item.type === 'github' && item.card.subject === '/src/math.ts'),
+      JSON.stringify(inlineArtifacts.map((item) => item.type === 'github' ? `${item.card.title} ${item.card.subject}` : item.type)),
+    )
     const inlineRun = renderToString(createElement(MessageBubble, { message: runMsg! })).replace(/<!-- -->/g, '')
     check(
-      'the run’s message carries its GitHub calls inline, folded to the count',
-      inlineRun.includes('gh-activity is-inline') &&
-        inlineRun.includes('GitHub activity · 1 call') &&
-        !inlineRun.includes('gh-activity is-inline collapsed aria-hidden'),
-      inlineRun.slice(Math.max(0, inlineRun.indexOf('gh-activity')), inlineRun.indexOf('gh-activity') + 300),
+      'the run message renders action cards in its timeline, not a grouped activity footer',
+      inlineRun.includes('agent-activity-timeline') && inlineRun.includes('gh-action-card') &&
+        inlineRun.includes('/src/math.ts') && !inlineRun.includes('gh-activity'),
+      inlineRun.slice(Math.max(0, inlineRun.indexOf('agent-activity-timeline')), inlineRun.indexOf('agent-activity-timeline') + 500),
     )
     check(
-      '…and the chat panel does not repeat them',
+      'the chat panel does not repeat run-scoped cards',
       !buildPanelItems([], sessionGitHubActions(useGitHubActivity.getState().entries)).some(
-        (i) => i.kind === 'github' && i.entry.subject === '/src/math.ts',
+        (item) => item.kind === 'github' && item.entry.subject === '/src/math.ts',
       ),
-      JSON.stringify(sessionGitHubActions(useGitHubActivity.getState().entries).map((e) => `${e.title} ${e.subject}`)),
+      JSON.stringify(sessionGitHubActions(useGitHubActivity.getState().entries).map((entry) => `${entry.title} ${entry.subject}`)),
     )
   } finally {
     globalThis.fetch = realFetch
@@ -4685,6 +4719,40 @@ function testConversationHelpers() {
   check(
     'a conversation saved before archiving existed loads as active',
     legacy.conversations.old?.archived === undefined && legacy.order.join() === 'new,old' && legacy.currentId === 'new',
+  )
+  const interruptedMessage: Message = {
+    id: 'msg_interrupted',
+    role: 'assistant',
+    conversationId: 'interrupted',
+    content: '',
+    createdAt: 10,
+    status: 'streaming',
+    agent: {
+      phase: 'synthesizing',
+      goal: 'test interrupted activity',
+      orchestratorModelId: 'mock-pro',
+      steps: [],
+      startedAt: 10,
+      timeline: [
+        { id: 'thought_live', type: 'thought', sourceId: 'synthesis', modelId: 'mock-pro', text: 'still thinking', streaming: true },
+        {
+          id: 'gha_live',
+          type: 'github',
+          card: {
+            id: 'gha_live', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts',
+            status: 'running', at: 11, count: 1,
+          },
+        },
+      ],
+    },
+  }
+  const interrupted = hydrateConversations(asStored([convFixture('interrupted', 'Interrupted', 10, { messages: [interruptedMessage] })]))
+  const restored = interrupted.conversations.interrupted?.messages[0]
+  check(
+    'reload closes live thought cards and preserves interrupted GitHub cards as cancelled',
+    restored?.status === 'cancelled' && restored.agent?.timeline?.[0]?.type === 'thought' &&
+      !restored.agent.timeline[0].streaming && restored.agent.timeline[1]?.type === 'github' &&
+      restored.agent.timeline[1].card.status === 'cancelled',
   )
   const newestArchived = hydrateConversations(asStored([convFixture('old', 'Old', 5), convFixture('arch', 'Newest but archived', 99, { archived: true })]))
   check(

@@ -20,6 +20,7 @@ import { useUI } from '../store/ui'
 import { useFs } from '../store/fs'
 import { useGitHub } from '../store/github'
 import { useGitHubActivity } from '../store/githubActivity'
+import { appendAgentThought, closeAgentThought } from '../store/agentTimeline'
 import { extractFsActions, formatFsContextForAgent, formatGitHubTreeForAgent } from '../lib/fs'
 import { buildRoadmapReport, describeRoadmapReport, snapshotRoadmapFiles, type RoadmapFileSnapshot } from '../lib/roadmap'
 import { buildTurns } from './turns'
@@ -486,10 +487,9 @@ export async function runAgentTurn(
   const signal = controller.signal
 
   /**
-   * Every GitHub call this run makes is tagged with this scope, so the cards
-   * render inside the run's answer (the plan card) rather than in the chat
-   * panel, whose appended cards are left to the calls you make yourself.
-   * Entered inside the try so the finally below always releases it.
+   * Every GitHub call this run makes is tagged with its message scope. The live
+   * card snapshot is inserted into that message's timeline at the moment the
+   * call starts. Entered inside the try so the finally below always releases it.
    */
   const githubScope = uid('ghs')
 
@@ -534,7 +534,7 @@ export async function runAgentTurn(
   }
 
   try {
-    useGitHubActivity.getState().enterScope(githubScope)
+    useGitHubActivity.getState().enterScope(githubScope, assistantMessageId)
 
     /* ---------------- planning ---------------- */
 
@@ -561,6 +561,7 @@ export async function runAgentTurn(
       onReasoning: (t) => {
         planReasoning += t
         setRun(assistantMessageId, { ...baseRun, planningReasoning: planReasoning })
+        appendAgentThought(assistantMessageId, 'planning', orchestrator.id, t)
       },
     })
     collectAttempts(planResult.attempts)
@@ -568,6 +569,8 @@ export async function runAgentTurn(
     signal.throwIfAborted()
 
     const finalPlanReasoning = planResult.reasoning ?? (planReasoning.trim() ? planReasoning : undefined)
+    appendMissingThoughtTail(assistantMessageId, 'planning', orchestrator.id, planReasoning, finalPlanReasoning)
+    closeAgentThought(assistantMessageId, 'planning')
     let plannerReply = parsePlannerReply(planResult.text)
     let note: string | undefined
 
@@ -712,11 +715,20 @@ export async function runAgentTurn(
           },
           onReasoning: (t) => {
             stepReasoning += t
+            appendAgentThought(assistantMessageId, `step:${step.id}`, step.modelId, t)
             flush()
           },
         })
         collectAttempts(result.attempts)
         usageAcc.current = mergeUsage(usageAcc.current, result.usage)
+        appendMissingThoughtTail(
+          assistantMessageId,
+          `step:${step.id}`,
+          result.model.id,
+          stepReasoning,
+          result.reasoning,
+        )
+        closeAgentThought(assistantMessageId, `step:${step.id}`)
         const stepLabel = modelLabel(settings.models, result.model.id)
         const stepFsOps = useLocalFs
           ? await applyAgentOutputWithGit(result.text, {
@@ -790,6 +802,7 @@ export async function runAgentTurn(
 
     let content = ''
     let synthReasoning = ''
+    let streamedSynthReasoning = ''
     let synthTruncated = false
     let synthModelId = orchestrator.id
     const synthFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
@@ -808,7 +821,9 @@ export async function runAgentTurn(
         },
         onReasoning: (t) => {
           synthReasoning += t
+          streamedSynthReasoning += t
           useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, reasoning: synthReasoning }))
+          appendAgentThought(assistantMessageId, 'synthesis', orchestrator.id, t)
         },
       })
       collectAttempts(synth.attempts)
@@ -817,6 +832,14 @@ export async function runAgentTurn(
       synthModelId = synth.model.id
       synthTruncated = Boolean(synth.truncated)
       if (synth.reasoning) synthReasoning = synth.reasoning
+      appendMissingThoughtTail(
+        assistantMessageId,
+        'synthesis',
+        synth.model.id,
+        streamedSynthReasoning,
+        synthReasoning,
+      )
+      closeAgentThought(assistantMessageId, 'synthesis')
     } catch (err) {
       if (err instanceof ProviderError && err.failure === 'aborted') throw err
       // Synthesis failed on every candidate — stitch the worker output
@@ -931,11 +954,46 @@ export async function runAgentTurn(
 /* ------------------------------------------------------------------ */
 
 function finalize(assistantMessageId: string, patch: Partial<Message>): void {
-  useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, ...patch }))
+  useChat.getState().mutateMessage(assistantMessageId, (message) => {
+    const mergedAgent = patch.agent
+      ? { ...patch.agent, timeline: patch.agent.timeline ?? message.agent?.timeline }
+      : message.agent
+    const terminal = patch.status != null && patch.status !== 'streaming'
+    const agent =
+      terminal && mergedAgent?.timeline
+        ? {
+            ...mergedAgent,
+            timeline: mergedAgent.timeline.map((item) =>
+              item.type === 'thought' && item.streaming ? { ...item, streaming: false } : item,
+            ),
+          }
+        : mergedAgent
+    return { ...message, ...patch, agent }
+  })
 }
 
 function setRun(assistantMessageId: string, run: AgentRun): void {
-  useChat.getState().mutateMessage(assistantMessageId, (m) => ({ ...m, agent: run }))
+  useChat.getState().mutateMessage(assistantMessageId, (message) => ({
+    ...message,
+    agent: { ...run, timeline: run.timeline ?? message.agent?.timeline },
+  }))
+}
+
+function appendMissingThoughtTail(
+  messageId: string,
+  sourceId: string,
+  modelId: string,
+  streamed: string,
+  finalText: string | undefined,
+): void {
+  if (!finalText) return
+  if (!streamed) {
+    appendAgentThought(messageId, sourceId, modelId, finalText)
+    return
+  }
+  if (finalText.startsWith(streamed)) {
+    appendAgentThought(messageId, sourceId, modelId, finalText.slice(streamed.length))
+  }
 }
 
 function patchStep(assistantMessageId: string, stepId: string, patch: Partial<AgentStep>): void {

@@ -118,6 +118,65 @@ export interface ChatTurn {
 /* Artifacts                                                           */
 /* ------------------------------------------------------------------ */
 
+/** Every GitHub call Slade can surface as an in-chat activity card. */
+export type GitHubActionKind =
+  | 'get-file'
+  | 'create-file'
+  | 'update-file'
+  | 'delete-file'
+  | 'get-blob'
+  | 'create-blob'
+  | 'get-tree'
+  | 'create-tree'
+  | 'create-branch'
+  | 'delete-branch'
+  | 'get-branch'
+  | 'list-branches'
+  | 'update-ref'
+  | 'get-commit'
+  | 'create-commit'
+  | 'create-pr'
+  | 'merge-pr'
+  | 'get-pr'
+  | 'list-prs'
+  | 'create-issue'
+  | 'list-issues'
+  | 'create-gist'
+  | 'list-gists'
+  | 'search-code'
+  | 'search-repos'
+  | 'list-repos'
+  | 'get-repo'
+  | 'clone-repo'
+  | 'test-token'
+  | 'rate-limit'
+  | 'sign-in'
+  | 'sign-out'
+  | 'other'
+
+export interface GitHubActionInfo {
+  kind: GitHubActionKind
+  /** Card title, already prefixed. */
+  title: string
+  /** The path, branch, query, or repo the call touched. */
+  subject: string
+  repo?: string
+  ref?: string
+}
+
+export type GitHubActionStatus = 'running' | 'done' | 'error' | 'cancelled'
+
+/** Persistable, read-only content for one GitHub action card. */
+export interface GitHubActionArtifact extends GitHubActionInfo {
+  id: string
+  status: GitHubActionStatus
+  at: number
+  elapsedMs?: number
+  error?: string
+  /** How many identical calls this card stands for. */
+  count: number
+}
+
 export type ArtifactKind =
   | 'image'
   | 'code'
@@ -228,6 +287,24 @@ export type AgentPhase = 'planning' | 'executing' | 'synthesizing' | 'complete' 
 
 export type AgentStepStatus = 'pending' | 'running' | 'complete' | 'error' | 'skipped'
 
+/** One card in the agent's chronological output: a thought segment or GitHub call. */
+export type AgentTimelineItem =
+  | {
+      id: string
+      type: 'thought'
+      /** Planning, synthesis, or the id of the worker step that produced it. */
+      sourceId: string
+      modelId: string
+      text: string
+      /** True only while this contiguous thought segment is being streamed. */
+      streaming?: boolean
+    }
+  | {
+      id: string
+      type: 'github'
+      card: GitHubActionArtifact
+    }
+
 /**
  * One subtask the orchestrator delegated to a worker model. Persisted with
  * the message so the whole run stays inspectable after a reload.
@@ -275,9 +352,14 @@ export interface AgentRun {
   /** Aggregate local file system operations performed across this run. */
   fsOps?: FsOpRecord[]
   /**
+   * Thought and GitHub cards in the exact order they were emitted. Thought
+   * segments split around GitHub calls, so a live call appears between the
+   * thought card that was open and the next thought card.
+   */
+  timeline?: AgentTimelineItem[]
+  /**
    * Identifies the GitHub cards this run produced, so they render inside the
-   * run's answer rather than in the chat panel (see `useGitHubActivity`,
-   * `GitHubRunActivity` and `../components/chat/panel`).
+   * run's answer rather than in the chat panel.
    */
   githubScope?: string
   /**

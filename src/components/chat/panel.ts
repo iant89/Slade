@@ -2,12 +2,9 @@
  * What the chat panel holds, in order.
  *
  * The panel is the scrollable log between the header and the composer. It holds
- * the open conversation's messages, and then the GitHub Actions this session
- * made on your behalf — appended after the last message, in the order they
- * happened. Appending is the whole rule: an action is never interleaved by
- * timestamp, so it can never split a message from the reply it caused, and a
- * run's own calls (which render inside that run's answer) are never repeated
- * down here.
+ * the open conversation's messages, followed by standalone GitHub Actions made
+ * outside an agent response. An agent run's calls are written into that
+ * assistant message's thought/action timeline and are never repeated here.
  */
 
 import { useMemo } from 'react'
@@ -27,7 +24,7 @@ export function sessionGitHubActions(entries: readonly GitHubActionEntry[]): Git
   return entries.filter((e) => !e.scope)
 }
 
-/** Messages in order, then every action appended at the end. */
+/** Messages in order, followed by standalone actions that have no agent message. */
 export function buildPanelItems(
   messages: readonly Message[],
   actions: readonly GitHubActionEntry[],
