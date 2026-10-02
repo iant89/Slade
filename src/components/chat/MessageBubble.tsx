@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentRun, AgentTimelineItem, Message } from '../../types'
+import type { AgentRun, Message } from '../../types'
 import { FAILURE_LABEL } from '../../types'
 import { useChat } from '../../store/chat'
 import { useFs } from '../../store/fs'
@@ -7,10 +7,9 @@ import { useSettings, modelShowsThoughts } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { copyText } from '../../lib/clipboard'
 import { formatCount, formatTime } from '../../lib/format'
-import { foldActionRuns } from '../../lib/github-actions'
 import { regenerateFromUserMessage, retryAssistant } from '../../engine/send'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
-import { GitHubActionCard, GitHubActionGroup } from '../github/GitHubActivity'
+import { GitHubActionCard } from '../github/GitHubActivity'
 import { Markdown } from './Markdown'
 import { AgentPlanCard } from './AgentPlanCard'
 import { AgentQuestions } from './AgentQuestions'
@@ -97,17 +96,11 @@ export function ThinkingBlock({
   )
 }
 
-type GitHubTimelineItem = Extract<AgentTimelineItem, { type: 'github' }>
-
-const isGitHubTimelineItem = (item: AgentTimelineItem): item is GitHubTimelineItem => item.type === 'github'
-
 /**
  * Render the agent's thoughts and GitHub cards in the order they happened.
- *
- * More than two GitHub cards in a row fold into one expandable group. The fold
- * runs over what is actually on screen: a thought that is switched off (or has
- * nothing to show) draws nothing, so the calls on either side of it are
- * neighbours and group together. A visible thought still splits two streaks.
+ * Every card is a row of its own — nothing folds, nothing expands — so a call
+ * always sits between the thoughts it actually happened between. A thought that
+ * is switched off (or has nothing to show) simply draws nothing.
  */
 function AgentActivityTimeline({ run, status }: { run: AgentRun; status: Message['status'] }) {
   const settings = useSettings((s) => s.s)
@@ -123,12 +116,8 @@ function AgentActivityTimeline({ run, status }: { run: AgentRun; status: Message
 
   return (
     <div className="agent-activity-timeline" aria-label="Agent activity">
-      {foldActionRuns(shown, isGitHubTimelineItem).map((fold) => {
-        if (fold.kind === 'group') {
-          return <GitHubActionGroup key={fold.id} cards={fold.items.map((item) => item.card)} />
-        }
-        const item = fold.item
-        return item.type === 'thought' ? (
+      {shown.map((item) =>
+        item.type === 'thought' ? (
           <ThinkingBlock
             key={item.id}
             reasoning={item.text}
@@ -136,8 +125,8 @@ function AgentActivityTimeline({ run, status }: { run: AgentRun; status: Message
           />
         ) : (
           <GitHubActionCard key={item.id} entry={item.card} />
-        )
-      })}
+        ),
+      )}
     </div>
   )
 }
@@ -201,6 +190,26 @@ function Attachments({ ids, conversationId }: { ids?: string[]; conversationId: 
 }
 
 /* ------------------------------------------------------------------ */
+/* GitHub action message                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A call to `api.github.com` logged as a conversation message. The card is the
+ * whole message: no author line, no body, no copy/retry/branch row — one call
+ * reads as one line that scrolls and is saved with the chat.
+ */
+function GitHubActionMessage({ message }: { message: Message }) {
+  const entry = message.githubAction!
+  return (
+    <article className="msg msg-assistant msg-gh-action" aria-label={entry.title}>
+      <div className="msg-main">
+        <GitHubActionCard entry={entry} />
+      </div>
+    </article>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Message bubble                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -209,6 +218,8 @@ export function MessageBubble({ message }: { message: Message }) {
   const [editing, setEditing] = useState(false)
   const labelOf = (id: string | undefined) => settings.models.find((m) => m.id === id)?.label ?? id ?? ''
   const isUser = message.role === 'user'
+
+  if (message.githubAction) return <GitHubActionMessage message={message} />
 
   return (
     <article

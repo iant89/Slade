@@ -205,6 +205,9 @@ export interface RemoteSource {
 /** Maximum size of one user-curated memory note. */
 export const MAX_MEMORY_ENTRY_CHARS = 4_000
 
+/** Id prefix of the artifact cards that mark a saved memory note. */
+export const MEMORY_ARTIFACT_PREFIX = 'art_memory_'
+
 /** Durable, user-managed note included in model context across conversations. */
 export interface MemoryEntry {
   id: string
@@ -240,6 +243,13 @@ export interface Artifact {
   durationSec?: number
   /** True when the artifact exists only for this session (large files). */
   ephemeral?: boolean
+  /**
+   * A card that is nothing but its name and, when it has one, its preview: no
+   * `Document · 21 B · From you` subtitle and no footer actions. The Memory
+   * Added card sets this — the saved note is the whole point, and none of the
+   * artifact actions (send back, publish, save to files, download) apply to it.
+   */
+  minimal?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -591,6 +601,14 @@ export interface Message {
   truncated?: boolean
   /** Present when this reply was produced by the orchestrator agent. */
   agent?: AgentRun
+  /**
+   * A GitHub API call, in the place of a body: one compact card per call,
+   * appended to the conversation by the activity log so it scrolls (and is
+   * saved) with the chat instead of living in a runtime-only list. The card
+   * carries no buttons, and the message it rides on has no text of its own —
+   * `buildTurns` folds nothing into the model's context for it.
+   */
+  githubAction?: GitHubActionArtifact
 }
 
 export interface Conversation {

@@ -239,8 +239,8 @@ Slade keeps user-curated notes in persistent **Memory** (`slade.memory.v1`) and 
 relevant model context across conversations, even when Local Files is turned off. Open the
 Memory dialog from the header or `/memory`; add a note directly, or use **Remember** on a chat
 message to prefill it. Entries can be edited or deleted, and the Data backup includes them.
-Every new note also creates a **Memory Added** artifact card in the active conversation; expand
-the card to see the exact text that was saved.
+Every new note also creates a **Memory Added** card in the active conversation: one line, no
+subtitle and no actions, with the exact text that was saved behind its expand toggle.
 
 ## Local file system (`Ctrl/Cmd + E` or `/files`)
 
@@ -339,8 +339,9 @@ halves, both wired into the thread:
   read files, search code with GitHub's own index, and attach whatever you find
   straight into the composer. Attached repo files become artifact cards and fold
   into the prompt exactly like an upload, with the source recorded.
-- **Publishing** — every artifact card and every message has *Publish to
-  GitHub*: create a **gist** (secret by default), **commit a file** into a repo
+- **Publishing** — every artifact card (bar the one-line Memory Added card) and
+  every message has *Publish to GitHub*: create a **gist** (secret by default),
+  **commit a file** into a repo
   (binary files too; existing paths update in place, or commit onto a fresh
   branch with one toggle), or open an **issue** with the content in the body and
   a provenance block underneath.
@@ -377,42 +378,29 @@ Every request Slade sends to `api.github.com` — plus the GitHub actions that g
 somewhere else (the OAuth device flow, signing out, cloning a repo's files into
 Local Files) — shows up as a **GitHub Action card**: the GitHub mark, the action
 ("`GitHub Action: Get File Contents`"), and the thing it touched
-(`/src/lib/util.ts`) on the second line, with the `owner/repo@branch` it ran
-against and a status glyph.
+(`/src/lib/util.ts`) on the second line. That is the whole card — no buttons, no
+status glyph, nothing to expand.
 
+- **A call is inserted like a saved memory.** Each card becomes an entry of its
+  own in the conversation, so it scrolls with the chat and is saved with it:
+  reload the page and the log is still there, in the order the calls happened.
 - **A run's calls go inline with the run.** When the orchestrator makes GitHub
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
   cards render in that run's activity timeline, in the order things happened,
-  between the thoughts that led to them.
-- **Your calls are appended to the chat panel.** Calls *you* make (browsing the
-  drawer, searching, publishing, signing in) are appended to the end of the
-  scrollable chat panel — in the message column, above the composer — so they
-  scroll with the conversation instead of sitting outside it in a strip. Each one
-  is appended after what was already there: an action never splits a message from
-  the reply it caused.
-- **More than two in a row fold into a dropdown.** One or two cards stay as rows
-  of their own; three or more in a row collapse into a single **GitHub Actions**
-  row, in both places above. It starts folded and shows how many calls it holds,
-  what they were (`Get File Contents ×4 · Created Commit`), and what is running
-  right now — click the header to open it and see every card, in order. What you
-  must not miss stays on the closed header: a call in flight, a failure
-  (`1 failed`), a cancellation. A thought between two calls ends the streak, so a
-  group never reorders or swallows the reasoning around it, and a group keeps its
-  open or closed state as more calls land.
-- **A card never expands.** There is nothing to open on a card: what happened, and
-  to what, is the whole card. Failures keep GitHub's own sentence in the row's
-  tooltip. (The group row above is the only thing that opens, and all it reveals
-  is the cards.)
+  between the thoughts that led to them, and are saved with the run's answer.
+- **Nothing folds, nothing hides.** One call is one card; a streak of them is a
+  streak of cards. A failure (or a call still in flight) is tinted, and the repo,
+  branch, timing, call count and GitHub's own error stay in the card's tooltip.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,
   gists, issues, token checks, rate-limit checks, sign-in, sign-out, cloning.
   Anything unmapped still gets a card with its path, so no call can slip past
   unlogged.
-- Identical calls in a burst (pulling 25 files) fold into one card with a `×25`
-  counter instead of burying the log, the panel keeps the last 60, and a request
-  cancelled mid-flight (a search you typed over) drops its card rather than
-  showing a failure.
+- A repeat of the newest identical call (the same file pulled twice in a few
+  seconds) folds into that card rather than adding a second one; the count and
+  everything else about it sit in the tooltip. A call cancelled mid-flight keeps
+  its card, cancelled, instead of vanishing.
 
 ### What the token is used for
 

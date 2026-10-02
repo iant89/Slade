@@ -347,6 +347,7 @@ export const messageSchema = z.object({
   ttftMs: z.number().optional(),
   truncated: z.boolean().optional(),
   agent: agentRunSchema.optional(),
+  githubAction: githubActionArtifactSchema.optional(),
 })
 
 export const memoryEntrySchema = z.object({
@@ -385,6 +386,8 @@ export const artifactSchema = z.object({
   rows: z.array(z.array(z.string())).optional(),
   durationSec: z.number().optional(),
   ephemeral: z.boolean().optional(),
+  /** Name-and-preview-only cards (the Memory Added card); see `Artifact`. */
+  minimal: z.boolean().optional(),
 })
 
 export const conversationSchema = z.object({

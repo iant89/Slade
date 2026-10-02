@@ -11,7 +11,6 @@ import { orchestratorFor } from '../../engine/agent'
 import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { RepoBranchPickers } from './RepoBranchPickers'
-import { usePanelHasContent } from './panel'
 import { IconArrowUp, IconBot, IconBrain, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
 
 /* ------------------------------------------------------------------ */
@@ -218,7 +217,9 @@ async function attachSample(name: string): Promise<void> {
 
 export function Composer() {
   const conv = useCurrentConversation()
-  const hasPanelContent = usePanelHasContent()
+  // The greeting centers itself only while the panel is truly empty; once the
+  // chat holds a message (a GitHub action card is one), the composer docks.
+  const hasPanelContent = useChat((s) => Boolean(s.currentId && s.conversations[s.currentId]?.messages.length))
   const enterToSend = useSettings((s) => s.s.appearance.enterToSend)
   const pendingIds = useUI((s) => s.pendingAttachmentIds)
   const removePending = useUI((s) => s.removePendingAttachment)
