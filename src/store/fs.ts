@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { z } from 'zod'
 import type { Artifact, ArtifactSource, FsFile, FsFileEncoding, FsOpRecord, RemoteSource } from '../types'
-import { KEYS, loadRaw, saveJSON } from '../lib/storage'
+import { KEYS, loadRaw, removeKey, saveJSON } from '../lib/storage'
 import { fsFileSchema } from '../lib/schemas'
 import { classifyArtifact, mimeFromName } from '../lib/mime'
 import { parseCSV } from '../lib/csv'
@@ -14,11 +14,25 @@ import {
   FsError,
 } from '../lib/fs'
 import { useArtifacts } from './artifacts'
+import { useChat } from './chat'
 import { useUI } from './ui'
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
+
+/** Temporary owner for files imported before the first chat has been created. */
+const LEGACY_WORKSPACE_ID = '__slade_legacy_workspace__'
+
+export interface FsWorkspace {
+  files: Record<string, FsFile>
+  deletedRemotes: Record<string, RemoteSource>
+  selectedPath: string | null
+}
+
+function emptyWorkspace(): FsWorkspace {
+  return { files: {}, deletedRemotes: {}, selectedPath: null }
+}
 
 function hashPath(s: string): string {
   let h = 5381
@@ -26,8 +40,9 @@ function hashPath(s: string): string {
   return h.toString(36)
 }
 
-export function fsArtifactId(path: string): string {
-  return `art_fs_${hashPath(path)}`
+/** Artifact ids include the workspace so same-named files in different chats cannot overwrite each other. */
+export function fsArtifactId(path: string, conversationId?: string): string {
+  return `art_fs_${hashPath(`${conversationId ?? ''}\u0000${path}`)}`
 }
 
 function byteSizeOf(content: string, encoding: FsFileEncoding = 'utf8'): number {
@@ -39,7 +54,7 @@ function byteSizeOf(content: string, encoding: FsFileEncoding = 'utf8'): number 
 }
 
 function buildArtifactForFsFile(file: FsFile): Artifact {
-  const id = fsArtifactId(file.path)
+  const id = fsArtifactId(file.path, file.conversationId)
   const isBase64 = file.encoding === 'base64'
   const dataURL = isBase64
     ? `data:${file.mime};base64,${file.content}`
@@ -55,6 +70,7 @@ function buildArtifactForFsFile(file: FsFile): Artifact {
     provenance: file.updatedBy,
     remote: file.remote,
     localPath: file.path,
+    conversationId: file.conversationId,
     dataURL,
     text: isBase64 ? undefined : file.content,
     ephemeral: false,
@@ -69,21 +85,70 @@ function buildArtifactForFsFile(file: FsFile): Artifact {
   return artifact
 }
 
-function hydrate(): Record<string, FsFile> {
-  const raw = loadRaw<unknown>(KEYS.fs, [])
-  const parsed = z.array(fsFileSchema).safeParse(raw)
-  const list = parsed.success ? (parsed.data as FsFile[]) : []
-  const byPath: Record<string, FsFile> = {}
-  for (const f of list) {
-    const norm = tryNormalizeFsPath(f.path)
-    if (norm) byPath[norm] = { ...f, path: norm, name: fsBaseName(norm) }
-  }
-  return byPath
+function workspaceFor(workspaces: Record<string, FsWorkspace>, conversationId: string): FsWorkspace {
+  return workspaces[conversationId] ?? emptyWorkspace()
 }
 
-function persistFiles(files: Record<string, FsFile>): void {
-  const list = Object.values(files).sort((a, b) => a.path.localeCompare(b.path))
+function normalizeOwnerId(conversationId: string | undefined, fallbackId: string): string {
+  return conversationId && conversationId !== LEGACY_WORKSPACE_ID ? conversationId : fallbackId
+}
+
+function persistWorkspaces(workspaces: Record<string, FsWorkspace>): void {
+  const list = Object.entries(workspaces).flatMap(([conversationId, workspace]) =>
+    Object.values(workspace.files).map((file) => ({
+      ...file,
+      conversationId: conversationId === LEGACY_WORKSPACE_ID ? undefined : conversationId,
+    })),
+  )
+  list.sort(
+    (a, b) =>
+      (a.conversationId ?? '').localeCompare(b.conversationId ?? '') || a.path.localeCompare(b.path),
+  )
   saveJSON(KEYS.fs, list)
+}
+
+/**
+ * Read the new scoped file list, or upgrade the old global list on first load.
+ * Legacy files that already carry a conversation id retain that owner; older
+ * unscoped files are assigned to the currently open conversation.
+ */
+export function hydrateWorkspaces(defaultConversationId: string): Record<string, FsWorkspace> {
+  const currentRaw = loadRaw<unknown>(KEYS.fs, null)
+  let parsed = z.array(fsFileSchema).safeParse(currentRaw)
+  let migrated = false
+
+  if (!parsed.success) {
+    const legacyRaw = loadRaw<unknown>(KEYS.fsLegacy, [])
+    parsed = z.array(fsFileSchema).safeParse(legacyRaw)
+    migrated = parsed.success
+  }
+
+  const byConversation: Record<string, FsWorkspace> = {}
+  const list = parsed.success ? (parsed.data as FsFile[]) : []
+  for (const file of list) {
+    const path = tryNormalizeFsPath(file.path)
+    if (!path) continue
+    const ownerId = normalizeOwnerId(file.conversationId, defaultConversationId)
+    const workspace = byConversation[ownerId] ?? emptyWorkspace()
+    workspace.files[path] = {
+      ...file,
+      path,
+      name: fsBaseName(path),
+      conversationId: ownerId === LEGACY_WORKSPACE_ID ? undefined : ownerId,
+    }
+    byConversation[ownerId] = workspace
+  }
+
+  if (migrated && typeof localStorage !== 'undefined') {
+    persistWorkspaces(byConversation)
+    removeKey(KEYS.fsLegacy)
+  }
+  return byConversation
+}
+
+function stateWorkspace(state: Pick<FsState, 'workspaces' | 'currentConversationId'>, conversationId?: string): FsWorkspace {
+  const ownerId = conversationId ?? state.currentConversationId
+  return workspaceFor(state.workspaces, ownerId)
 }
 
 /* ------------------------------------------------------------------ */
@@ -94,6 +159,13 @@ export interface FsSearchHit {
   file: FsFile
   pathMatch: boolean
   lines: { line: number; text: string }[]
+}
+
+export interface FsWorkspaceSnapshot {
+  conversationId: string
+  files: Record<string, FsFile>
+  deletedRemotes: Record<string, RemoteSource>
+  selectedPath: string | null
 }
 
 export interface WriteFileOptions {
@@ -109,25 +181,36 @@ export interface WriteFileOptions {
 }
 
 export interface FsState {
-  /** All files in the local file system, keyed by normalized path. */
+  /** Current conversation's files, keyed by normalized path (convenience projection). */
   files: Record<string, FsFile>
-  /** Files with an upstream Git remote that were deleted locally since last sync. */
+  /** All isolated conversation workspaces, keyed by conversation id. */
+  workspaces: Record<string, FsWorkspace>
+  /** Conversation whose workspace is currently projected in `files`. */
+  currentConversationId: string
+  /** Files with an upstream Git remote that were deleted in the current workspace. */
   deletedRemotes: Record<string, RemoteSource>
   /** Path currently open in the Files workspace drawer. */
   selectedPath: string | null
   /** Filter/search query in the Files workspace drawer. */
   filter: string
 
-  /* File system operations */
+  /* Conversation workspace management */
+  setCurrentConversation: (conversationId: string) => void
+  forkWorkspace: (sourceConversationId: string, targetConversationId: string) => void
+  getWorkspace: (conversationId?: string) => FsWorkspaceSnapshot
+  listAllFiles: () => FsFile[]
+  getDeletedRemotes: (conversationId?: string) => Record<string, RemoteSource>
+
+  /* File system operations (default to the current conversation) */
   writeFile: (path: string, content: string, opts?: WriteFileOptions) => FsFile
   appendFile: (path: string, content: string, opts?: WriteFileOptions) => FsFile
-  readFile: (path: string) => FsFile | undefined
-  exists: (path: string) => boolean
-  deleteFile: (path: string) => boolean
-  deleteDirectory: (dirPath: string) => number
-  moveFile: (fromPath: string, toPath: string, source?: ArtifactSource) => FsFile | null
-  listFiles: (dirPrefix?: string) => FsFile[]
-  search: (query: string) => FsSearchHit[]
+  readFile: (path: string, conversationId?: string) => FsFile | undefined
+  exists: (path: string, conversationId?: string) => boolean
+  deleteFile: (path: string, conversationId?: string) => boolean
+  deleteDirectory: (dirPath: string, conversationId?: string) => number
+  moveFile: (fromPath: string, toPath: string, source?: ArtifactSource, conversationId?: string) => FsFile | null
+  listFiles: (dirPrefix?: string, conversationId?: string) => FsFile[]
+  search: (query: string, conversationId?: string) => FsSearchHit[]
 
   /* Agent & Artifact bridge */
   applyAgentOutput: (
@@ -138,9 +221,10 @@ export interface FsState {
       messageId?: string
     },
   ) => FsOpRecord[]
-  saveArtifact: (artifact: Artifact, targetPath?: string) => FsFile | null
-  toArtifact: (path: string) => Artifact | null
-  attachFile: (path: string, opts?: { silent?: boolean }) => Artifact | null
+  saveArtifact: (artifact: Artifact, targetPath?: string, conversationId?: string) => FsFile | null
+  toArtifact: (path: string, conversationId?: string) => Artifact | null
+  attachFile: (path: string, opts?: { silent?: boolean; conversationId?: string }) => Artifact | null
+  setFileRemote: (path: string, remote: RemoteSource, dirty: boolean, conversationId?: string) => boolean
 
   /* Bulk, Git sync & UI state */
   markSyncedWithRemote: (
@@ -149,10 +233,12 @@ export interface FsState {
     committedPaths: readonly string[],
     fileShas?: Record<string, string>,
     deletedPaths?: readonly string[],
+    conversationId?: string,
   ) => void
-  importFiles: (entries: FsFile[]) => void
+  importFiles: (entries: FsFile[], conversationId?: string) => void
+  clearWorkspace: (conversationId?: string) => void
   clearAll: () => void
-  selectFile: (path: string | null) => void
+  selectFile: (path: string | null, conversationId?: string) => void
   setFilter: (v: string) => void
 }
 
@@ -160,411 +246,599 @@ export interface FsState {
 /* Store                                                               */
 /* ------------------------------------------------------------------ */
 
-export const useFs = create<FsState>((set, get) => ({
-  files: hydrate(),
-  deletedRemotes: {},
-  selectedPath: null,
-  filter: '',
+const chatAtStartup = useChat.getState()
+const initialConversationId = chatAtStartup.currentId || LEGACY_WORKSPACE_ID
+const initialWorkspaces = hydrateWorkspaces(initialConversationId)
+const initialWorkspace = workspaceFor(initialWorkspaces, initialConversationId)
 
-  writeFile: (rawPath, content, opts) => {
-    const path = normalizeFsPath(rawPath)
-    const encoding: FsFileEncoding = opts?.encoding ?? 'utf8'
-    const size = byteSizeOf(content, encoding)
-    if (size > MAX_FS_FILE_BYTES) {
-      throw new FsError('too_large', `File "${path}" exceeds the 5 MB local file system limit.`, path)
-    }
-
-    const name = fsBaseName(path)
-    const mime = opts?.mime || mimeFromName(name, encoding === 'base64' ? 'application/octet-stream' : 'text/plain')
-    const kind = classifyArtifact(name, mime)
-    const now = Date.now()
-    const source: ArtifactSource = opts?.source ?? { origin: 'user' }
-    const existing = get().files[path]
-    const remote = opts?.remote ?? existing?.remote
-    const dirty =
-      opts?.dirty !== undefined
-        ? opts.dirty
-        : opts?.remote
-          ? false
-          : existing?.remote
-            ? existing.content !== content || Boolean(existing.dirty)
-            : true
-
-    const file: FsFile = {
-      path,
-      name,
-      content,
-      encoding,
-      mime,
-      kind,
-      size,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      createdBy: existing?.createdBy ?? source,
-      updatedBy: source,
-      version: opts?.remote && !existing ? 1 : existing ? existing.version + (opts?.remote && existing.content === content ? 0 : 1) : 1,
-      conversationId: opts?.conversationId ?? existing?.conversationId,
-      messageId: opts?.messageId ?? existing?.messageId,
-      remote,
-      dirty,
-    }
-
-    set((st) => {
-      const next = { ...st.files, [path]: file }
-      const nextDeleted = { ...st.deletedRemotes }
-      delete nextDeleted[path]
-      persistFiles(next)
-      return { files: next, deletedRemotes: nextDeleted }
-    })
-
-    if (opts?.syncArtifact) {
-      const artifact = buildArtifactForFsFile(file)
-      useArtifacts.getState().add(artifact)
-    }
-
-    return file
-  },
-
-  appendFile: (rawPath, extraContent, opts) => {
-    const path = normalizeFsPath(rawPath)
-    const existing = get().files[path]
-    let combined = extraContent
-    if (existing && existing.encoding !== 'base64') {
-      const sep =
-        existing.content.length === 0 || existing.content.endsWith('\n') || extraContent.startsWith('\n')
-          ? ''
-          : '\n'
-      combined = `${existing.content}${sep}${extraContent}`
-    }
-    return get().writeFile(path, combined, opts)
-  },
-
-  readFile: (rawPath) => {
-    const path = tryNormalizeFsPath(rawPath)
-    if (!path) return undefined
-    return get().files[path]
-  },
-
-  exists: (rawPath) => {
-    const path = tryNormalizeFsPath(rawPath)
-    if (!path) return false
-    return Object.prototype.hasOwnProperty.call(get().files, path)
-  },
-
-  deleteFile: (rawPath) => {
-    const path = tryNormalizeFsPath(rawPath)
-    if (!path || !Object.prototype.hasOwnProperty.call(get().files, path)) return false
-    set((st) => {
-      const next = { ...st.files }
-      const nextDeleted = { ...st.deletedRemotes }
-      const removed = next[path]
-      if (removed?.remote) nextDeleted[path] = removed.remote
-      delete next[path]
-      persistFiles(next)
-      return {
-        files: next,
-        deletedRemotes: nextDeleted,
-        selectedPath: st.selectedPath === path ? null : st.selectedPath,
-      }
-    })
-    return true
-  },
-
-  deleteDirectory: (rawDirPath) => {
-    const dir = tryNormalizeFsPath(rawDirPath)
-    if (!dir) return 0
-    const prefix = `${dir}/`
-    const current = get().files
-    const toRemove = Object.keys(current).filter((k) => k === dir || k.startsWith(prefix))
-    if (toRemove.length === 0) return 0
-    set((st) => {
-      const next = { ...st.files }
-      const nextDeleted = { ...st.deletedRemotes }
-      for (const k of toRemove) {
-        const removed = next[k]
-        if (removed?.remote) nextDeleted[k] = removed.remote
-        delete next[k]
-      }
-      persistFiles(next)
-      const clearSel = st.selectedPath && (st.selectedPath === dir || st.selectedPath.startsWith(prefix))
-      return {
-        files: next,
-        deletedRemotes: nextDeleted,
-        selectedPath: clearSel ? null : st.selectedPath,
-      }
-    })
-    return toRemove.length
-  },
-
-  moveFile: (fromRawPath, toRawPath, source) => {
-    const fromPath = tryNormalizeFsPath(fromRawPath)
-    const toPath = tryNormalizeFsPath(toRawPath)
-    if (!fromPath || !toPath) return null
-    const existing = get().files[fromPath]
-    if (!existing) return null
-    if (fromPath === toPath) return existing
-
-    const toName = fsBaseName(toPath)
-    const mime = mimeFromName(toName, existing.mime)
-    const kind = classifyArtifact(toName, mime)
-    const targetExisting = get().files[toPath]
-    const moved: FsFile = {
-      ...existing,
-      path: toPath,
-      name: toName,
-      mime,
-      kind,
-      updatedAt: Date.now(),
-      updatedBy: source ?? existing.updatedBy,
-      version: (targetExisting?.version ?? existing.version) + 1,
-      remote: existing.remote
+export const useFs = create<FsState>((set, get) => {
+  const updateWorkspace = (
+    conversationId: string,
+    update: (workspace: FsWorkspace) => FsWorkspace,
+    persist = true,
+  ) => {
+    set((state) => {
+      const nextWorkspace = update(workspaceFor(state.workspaces, conversationId))
+      const workspaces = { ...state.workspaces, [conversationId]: nextWorkspace }
+      if (persist) persistWorkspaces(workspaces)
+      return state.currentConversationId === conversationId
         ? {
-            ...existing.remote,
-            path: toPath,
-            url: `https://github.com/${existing.remote.repo}/blob/${encodeURIComponent(existing.remote.ref)}/${toPath}`,
+            workspaces,
+            files: nextWorkspace.files,
+            deletedRemotes: nextWorkspace.deletedRemotes,
+            selectedPath: nextWorkspace.selectedPath,
           }
-        : undefined,
-      dirty: existing.remote ? true : existing.dirty,
-    }
-
-    set((st) => {
-      const next = { ...st.files }
-      const nextDeleted = { ...st.deletedRemotes }
-      if (existing.remote) nextDeleted[fromPath] = existing.remote
-      delete nextDeleted[toPath]
-      delete next[fromPath]
-      next[toPath] = moved
-      persistFiles(next)
-      return {
-        files: next,
-        deletedRemotes: nextDeleted,
-        selectedPath: st.selectedPath === fromPath ? toPath : st.selectedPath,
-      }
+        : { workspaces }
     })
-    return moved
-  },
+  }
 
-  listFiles: (dirPrefix) => {
-    const all = Object.values(get().files).sort((a, b) => a.path.localeCompare(b.path))
-    if (!dirPrefix) return all
-    const norm = tryNormalizeFsPath(dirPrefix)
-    if (!norm) return []
-    const prefix = `${norm}/`
-    return all.filter((f) => f.path === norm || f.path.startsWith(prefix))
-  },
+  return {
+    files: initialWorkspace.files,
+    workspaces: initialWorkspaces,
+    currentConversationId: initialConversationId,
+    deletedRemotes: initialWorkspace.deletedRemotes,
+    selectedPath: initialWorkspace.selectedPath,
+    filter: '',
 
-  search: (query) => {
-    const q = query.trim().toLowerCase()
-    if (!q) return []
-    const hits: FsSearchHit[] = []
-    const sorted = get().listFiles()
-    for (const file of sorted) {
-      const pathMatch = file.path.toLowerCase().includes(q)
-      const lines: { line: number; text: string }[] = []
-      if (file.encoding !== 'base64' && file.content) {
-        const rawLines = file.content.split(/\r?\n/)
-        for (let i = 0; i < rawLines.length && lines.length < 5; i++) {
-          if (rawLines[i]!.toLowerCase().includes(q)) {
-            lines.push({ line: i + 1, text: rawLines[i]!.slice(0, 180) })
+    setCurrentConversation: (rawConversationId) => {
+      const conversationId = rawConversationId || LEGACY_WORKSPACE_ID
+      set((state) => {
+        let workspaces = state.workspaces
+        // If the app had no conversation when it loaded, carry any old
+        // unscoped files into the first real chat rather than hiding them.
+        if (conversationId !== LEGACY_WORKSPACE_ID && state.currentConversationId === LEGACY_WORKSPACE_ID) {
+          const legacy = workspaces[LEGACY_WORKSPACE_ID]
+          if (legacy && (Object.keys(legacy.files).length > 0 || Object.keys(legacy.deletedRemotes).length > 0)) {
+            const target = workspaceFor(workspaces, conversationId)
+            const files = { ...legacy.files, ...target.files }
+            for (const [path, file] of Object.entries(files)) {
+              files[path] = { ...file, conversationId }
+            }
+            workspaces = {
+              ...workspaces,
+              [conversationId]: {
+                ...target,
+                files,
+                deletedRemotes: { ...legacy.deletedRemotes, ...target.deletedRemotes },
+              },
+              [LEGACY_WORKSPACE_ID]: emptyWorkspace(),
+            }
+            persistWorkspaces(workspaces)
           }
         }
-      }
-      if (pathMatch || lines.length > 0) {
-        hits.push({ file, pathMatch, lines })
-      }
-    }
-    return hits
-  },
+        const workspace = workspaceFor(workspaces, conversationId)
+        return {
+          workspaces,
+          currentConversationId: conversationId,
+          files: workspace.files,
+          deletedRemotes: workspace.deletedRemotes,
+          selectedPath: workspace.selectedPath,
+        }
+      })
+    },
 
-  applyAgentOutput: (markdown, meta) => {
-    const actions = extractFsActions(markdown)
-    if (actions.length === 0) return []
-    const records: FsOpRecord[] = []
+    forkWorkspace: (sourceConversationId, targetConversationId) => {
+      if (!targetConversationId || sourceConversationId === targetConversationId) return
+      set((state) => {
+        const source = workspaceFor(state.workspaces, sourceConversationId)
+        const existingTarget = workspaceFor(state.workspaces, targetConversationId)
+        const files = { ...source.files, ...existingTarget.files }
+        for (const [path, file] of Object.entries(files)) {
+          files[path] = { ...file, conversationId: targetConversationId }
+        }
+        const workspaces = {
+          ...state.workspaces,
+          [targetConversationId]: {
+            ...existingTarget,
+            files,
+            deletedRemotes: { ...source.deletedRemotes, ...existingTarget.deletedRemotes },
+            selectedPath: null,
+          },
+        }
+        persistWorkspaces(workspaces)
+        const target = workspaces[state.currentConversationId]
+        return state.currentConversationId === targetConversationId && target
+          ? { workspaces, files: target.files, deletedRemotes: target.deletedRemotes, selectedPath: target.selectedPath }
+          : { workspaces }
+      })
+    },
 
-    for (const action of actions) {
-      const at = Date.now()
-      try {
-        if (action.op === 'write') {
-          const existed = get().exists(action.path)
-          // Skip no-op writes when the exact content is already stored at the
-          // same path (e.g. when synthesis echoes a worker's file block verbatim).
-          const prev = get().readFile(action.path)
-          if (prev && prev.encoding !== 'base64' && prev.content === action.content) {
-            const art = buildArtifactForFsFile(prev)
-            useArtifacts.getState().add(art)
-            continue
+    getWorkspace: (conversationId) => {
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, ownerId)
+      return {
+        conversationId: ownerId,
+        files: workspace.files,
+        deletedRemotes: workspace.deletedRemotes,
+        selectedPath: workspace.selectedPath,
+      }
+    },
+
+    listAllFiles: () =>
+      Object.entries(get().workspaces)
+        .flatMap(([conversationId, workspace]) =>
+          Object.values(workspace.files).map((file) => ({
+            ...file,
+            conversationId: conversationId === LEGACY_WORKSPACE_ID ? undefined : conversationId,
+          })),
+        )
+        .sort(
+          (a, b) =>
+            (a.conversationId ?? '').localeCompare(b.conversationId ?? '') || a.path.localeCompare(b.path),
+        ),
+
+    getDeletedRemotes: (conversationId) => {
+      const state = get()
+      return stateWorkspace(state, conversationId).deletedRemotes
+    },
+
+    writeFile: (rawPath, content, opts) => {
+      const path = normalizeFsPath(rawPath)
+      const encoding: FsFileEncoding = opts?.encoding ?? 'utf8'
+      const size = byteSizeOf(content, encoding)
+      if (size > MAX_FS_FILE_BYTES) {
+        throw new FsError('too_large', `File "${path}" exceeds the 5 MB local file system limit.`, path)
+      }
+
+      const state = get()
+      const conversationId = opts?.conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, conversationId)
+      const name = fsBaseName(path)
+      const mime = opts?.mime || mimeFromName(name, encoding === 'base64' ? 'application/octet-stream' : 'text/plain')
+      const kind = classifyArtifact(name, mime)
+      const now = Date.now()
+      const source: ArtifactSource = opts?.source ?? { origin: 'user' }
+      const existing = workspace.files[path]
+      const remote = opts?.remote ?? existing?.remote
+      const dirty =
+        opts?.dirty !== undefined
+          ? opts.dirty
+          : opts?.remote
+            ? false
+            : existing?.remote
+              ? existing.content !== content || Boolean(existing.dirty)
+              : true
+
+      const file: FsFile = {
+        path,
+        name,
+        content,
+        encoding,
+        mime,
+        kind,
+        size,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        createdBy: existing?.createdBy ?? source,
+        updatedBy: source,
+        version: opts?.remote && !existing ? 1 : existing ? existing.version + (opts?.remote && existing.content === content ? 0 : 1) : 1,
+        conversationId: conversationId === LEGACY_WORKSPACE_ID ? undefined : conversationId,
+        messageId: opts?.messageId ?? existing?.messageId,
+        remote,
+        dirty,
+      }
+
+      updateWorkspace(conversationId, (current) => {
+        const next = { ...current.files, [path]: file }
+        const nextDeleted = { ...current.deletedRemotes }
+        delete nextDeleted[path]
+        return { ...current, files: next, deletedRemotes: nextDeleted }
+      })
+
+      if (opts?.syncArtifact) {
+        const artifact = buildArtifactForFsFile(file)
+        useArtifacts.getState().add(artifact)
+      }
+
+      return file
+    },
+
+    appendFile: (rawPath, extraContent, opts) => {
+      const path = normalizeFsPath(rawPath)
+      const state = get()
+      const conversationId = opts?.conversationId ?? state.currentConversationId
+      const existing = workspaceFor(state.workspaces, conversationId).files[path]
+      let combined = extraContent
+      if (existing && existing.encoding !== 'base64') {
+        const sep =
+          existing.content.length === 0 || existing.content.endsWith('\n') || extraContent.startsWith('\n')
+            ? ''
+            : '\n'
+        combined = `${existing.content}${sep}${extraContent}`
+      }
+      return get().writeFile(path, combined, { ...opts, conversationId })
+    },
+
+    readFile: (rawPath, conversationId) => {
+      const path = tryNormalizeFsPath(rawPath)
+      if (!path) return undefined
+      const state = get()
+      return workspaceFor(state.workspaces, conversationId ?? state.currentConversationId).files[path]
+    },
+
+    exists: (rawPath, conversationId) => {
+      const path = tryNormalizeFsPath(rawPath)
+      if (!path) return false
+      const state = get()
+      const files = workspaceFor(state.workspaces, conversationId ?? state.currentConversationId).files
+      return Object.prototype.hasOwnProperty.call(files, path)
+    },
+
+    deleteFile: (rawPath, conversationId) => {
+      const path = tryNormalizeFsPath(rawPath)
+      if (!path) return false
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, ownerId)
+      if (!Object.prototype.hasOwnProperty.call(workspace.files, path)) return false
+      updateWorkspace(ownerId, (current) => {
+        const next = { ...current.files }
+        const nextDeleted = { ...current.deletedRemotes }
+        const removed = next[path]
+        if (removed?.remote) nextDeleted[path] = removed.remote
+        delete next[path]
+        return {
+          ...current,
+          files: next,
+          deletedRemotes: nextDeleted,
+          selectedPath: current.selectedPath === path ? null : current.selectedPath,
+        }
+      })
+      return true
+    },
+
+    deleteDirectory: (rawDirPath, conversationId) => {
+      const dir = tryNormalizeFsPath(rawDirPath)
+      if (!dir) return 0
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, ownerId)
+      const prefix = `${dir}/`
+      const toRemove = Object.keys(workspace.files).filter((path) => path === dir || path.startsWith(prefix))
+      if (toRemove.length === 0) return 0
+      updateWorkspace(ownerId, (current) => {
+        const next = { ...current.files }
+        const nextDeleted = { ...current.deletedRemotes }
+        for (const path of toRemove) {
+          const removed = next[path]
+          if (removed?.remote) nextDeleted[path] = removed.remote
+          delete next[path]
+        }
+        const clearSelection =
+          current.selectedPath && (current.selectedPath === dir || current.selectedPath.startsWith(prefix))
+        return {
+          ...current,
+          files: next,
+          deletedRemotes: nextDeleted,
+          selectedPath: clearSelection ? null : current.selectedPath,
+        }
+      })
+      return toRemove.length
+    },
+
+    moveFile: (fromRawPath, toRawPath, source, conversationId) => {
+      const fromPath = tryNormalizeFsPath(fromRawPath)
+      const toPath = tryNormalizeFsPath(toRawPath)
+      if (!fromPath || !toPath) return null
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, ownerId)
+      const existing = workspace.files[fromPath]
+      if (!existing) return null
+      if (fromPath === toPath) return existing
+
+      const toName = fsBaseName(toPath)
+      const mime = mimeFromName(toName, existing.mime)
+      const kind = classifyArtifact(toName, mime)
+      const targetExisting = workspace.files[toPath]
+      const moved: FsFile = {
+        ...existing,
+        path: toPath,
+        name: toName,
+        mime,
+        kind,
+        updatedAt: Date.now(),
+        updatedBy: source ?? existing.updatedBy,
+        version: (targetExisting?.version ?? existing.version) + 1,
+        remote: existing.remote
+          ? {
+              ...existing.remote,
+              path: toPath,
+              url: `https://github.com/${existing.remote.repo}/blob/${encodeURIComponent(existing.remote.ref)}/${toPath}`,
+            }
+          : undefined,
+        dirty: existing.remote ? true : existing.dirty,
+      }
+
+      updateWorkspace(ownerId, (current) => {
+        const next = { ...current.files }
+        const nextDeleted = { ...current.deletedRemotes }
+        if (existing.remote) nextDeleted[fromPath] = existing.remote
+        delete nextDeleted[toPath]
+        delete next[fromPath]
+        next[toPath] = moved
+        return {
+          ...current,
+          files: next,
+          deletedRemotes: nextDeleted,
+          selectedPath: current.selectedPath === fromPath ? toPath : current.selectedPath,
+        }
+      })
+      return moved
+    },
+
+    listFiles: (dirPrefix, conversationId) => {
+      const state = get()
+      const files = Object.values(
+        workspaceFor(state.workspaces, conversationId ?? state.currentConversationId).files,
+      ).sort((a, b) => a.path.localeCompare(b.path))
+      if (!dirPrefix) return files
+      const norm = tryNormalizeFsPath(dirPrefix)
+      if (!norm) return []
+      const prefix = `${norm}/`
+      return files.filter((file) => file.path === norm || file.path.startsWith(prefix))
+    },
+
+    search: (query, conversationId) => {
+      const q = query.trim().toLowerCase()
+      if (!q) return []
+      const hits: FsSearchHit[] = []
+      const sorted = get().listFiles(undefined, conversationId)
+      for (const file of sorted) {
+        const pathMatch = file.path.toLowerCase().includes(q)
+        const lines: { line: number; text: string }[] = []
+        if (file.encoding !== 'base64' && file.content) {
+          const rawLines = file.content.split(/\r?\n/)
+          for (let i = 0; i < rawLines.length && lines.length < 5; i++) {
+            if (rawLines[i]!.toLowerCase().includes(q)) {
+              lines.push({ line: i + 1, text: rawLines[i]!.slice(0, 180) })
+            }
           }
-          const written = get().writeFile(action.path, action.content, {
-            source: meta.source,
-            conversationId: meta.conversationId,
-            messageId: meta.messageId,
-            syncArtifact: true,
-          })
-          records.push({
-            op: existed ? 'update' : 'create',
-            path: written.path,
-            size: written.size,
-            version: written.version,
-            at,
-          })
-        } else if (action.op === 'append') {
-          const existed = get().exists(action.path)
-          const written = get().appendFile(action.path, action.content, {
-            source: meta.source,
-            conversationId: meta.conversationId,
-            messageId: meta.messageId,
-            syncArtifact: true,
-          })
-          records.push({
-            op: existed ? 'update' : 'create',
-            path: written.path,
-            size: written.size,
-            version: written.version,
-            at,
-          })
-        } else if (action.op === 'delete') {
-          const deleted = get().deleteFile(action.path)
-          if (deleted) {
-            records.push({ op: 'delete', path: action.path, at })
-          }
-        } else if (action.op === 'move') {
-          const moved = get().moveFile(action.fromPath, action.toPath, meta.source)
-          if (moved) {
+        }
+        if (pathMatch || lines.length > 0) hits.push({ file, pathMatch, lines })
+      }
+      return hits
+    },
+
+    applyAgentOutput: (markdown, meta) => {
+      const actions = extractFsActions(markdown)
+      if (actions.length === 0) return []
+      const conversationId = meta.conversationId ?? get().currentConversationId
+      const records: FsOpRecord[] = []
+
+      for (const action of actions) {
+        const at = Date.now()
+        try {
+          if (action.op === 'write') {
+            const existed = get().exists(action.path, conversationId)
+            // Skip no-op writes when the exact content is already stored in this chat's workspace.
+            const prev = get().readFile(action.path, conversationId)
+            if (prev && prev.encoding !== 'base64' && prev.content === action.content) {
+              useArtifacts.getState().add(buildArtifactForFsFile(prev))
+              continue
+            }
+            const written = get().writeFile(action.path, action.content, {
+              source: meta.source,
+              conversationId,
+              messageId: meta.messageId,
+              syncArtifact: true,
+            })
             records.push({
-              op: 'move',
-              fromPath: action.fromPath,
-              path: moved.path,
-              size: moved.size,
-              version: moved.version,
+              op: existed ? 'update' : 'create',
+              path: written.path,
+              size: written.size,
+              version: written.version,
               at,
             })
+          } else if (action.op === 'append') {
+            const existed = get().exists(action.path, conversationId)
+            const written = get().appendFile(action.path, action.content, {
+              source: meta.source,
+              conversationId,
+              messageId: meta.messageId,
+              syncArtifact: true,
+            })
+            records.push({
+              op: existed ? 'update' : 'create',
+              path: written.path,
+              size: written.size,
+              version: written.version,
+              at,
+            })
+          } else if (action.op === 'delete') {
+            const deleted = get().deleteFile(action.path, conversationId)
+            if (deleted) records.push({ op: 'delete', path: action.path, at })
+          } else if (action.op === 'move') {
+            const moved = get().moveFile(action.fromPath, action.toPath, meta.source, conversationId)
+            if (moved) {
+              records.push({
+                op: 'move',
+                fromPath: action.fromPath,
+                path: moved.path,
+                size: moved.size,
+                version: moved.version,
+                at,
+              })
+            }
           }
+        } catch {
+          /* ignore invalid paths or oversized files in agent output */
         }
-      } catch {
-        /* ignore invalid paths or oversized files in agent output */
       }
-    }
 
-    return records
-  },
+      return records
+    },
 
-  saveArtifact: (artifact, targetPath) => {
-    const rawPath = targetPath ?? artifact.localPath ?? artifact.remote?.path ?? artifact.name
-    const path = tryNormalizeFsPath(rawPath)
-    if (!path) return null
+    saveArtifact: (artifact, targetPath, conversationId) => {
+      const rawPath = targetPath ?? artifact.localPath ?? artifact.remote?.path ?? artifact.name
+      const path = tryNormalizeFsPath(rawPath)
+      if (!path) return null
 
-    let content = artifact.text ?? ''
-    let encoding: FsFileEncoding = 'utf8'
+      let content = artifact.text ?? ''
+      let encoding: FsFileEncoding = 'utf8'
 
-    if (artifact.text == null && artifact.dataURL) {
-      const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(artifact.dataURL)
-      if (match) {
-        if (match[2]) {
-          encoding = 'base64'
-          content = match[3] ?? ''
+      if (artifact.text == null && artifact.dataURL) {
+        const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(artifact.dataURL)
+        if (match) {
+          if (match[2]) {
+            encoding = 'base64'
+            content = match[3] ?? ''
+          } else {
+            content = decodeURIComponent(match[3] ?? '')
+          }
         } else {
-          content = decodeURIComponent(match[3] ?? '')
+          return null
         }
-      } else {
+      } else if (artifact.text == null) {
         return null
       }
-    } else if (artifact.text == null) {
-      return null
-    }
 
-    try {
-      const saved = get().writeFile(path, content, {
-        encoding,
-        mime: artifact.mime,
-        source: artifact.provenance,
-        remote: artifact.remote,
-        dirty: false,
-      })
-      useArtifacts.getState().add({ ...artifact, localPath: saved.path })
-      return saved
-    } catch {
-      return null
-    }
-  },
-
-  toArtifact: (rawPath) => {
-    const file = get().readFile(rawPath)
-    if (!file) return null
-    const artifact = buildArtifactForFsFile(file)
-    useArtifacts.getState().add(artifact)
-    return artifact
-  },
-
-  attachFile: (rawPath, opts) => {
-    const artifact = get().toArtifact(rawPath)
-    if (!artifact) return null
-    if (!opts?.silent) {
-      useUI.getState().addPendingAttachment(artifact.id)
-      useUI.getState().toast({
-        kind: 'success',
-        title: `${artifact.name} attached`,
-        detail: `${artifact.localPath ?? artifact.name} · queued for your next message.`,
-      })
-    }
-    return artifact
-  },
-
-  markSyncedWithRemote: (repo, ref, committedPaths, fileShas, deletedPaths) => {
-    set((st) => {
-      const next = { ...st.files }
-      for (const rawPath of committedPaths) {
-        const path = tryNormalizeFsPath(rawPath)
-        if (!path || !next[path]) continue
-        const cur = next[path]!
-        const sha = fileShas?.[path] ?? cur.remote?.sha
-        const url = `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path
-          .split('/')
-          .map(encodeURIComponent)
-          .join('/')}`
-        next[path] = {
-          ...cur,
-          remote: {
-            kind: 'github',
-            repo,
-            ref,
-            path,
-            url,
-            sha,
-          },
+      try {
+        const saved = get().writeFile(path, content, {
+          encoding,
+          mime: artifact.mime,
+          source: artifact.provenance,
+          remote: artifact.remote,
           dirty: false,
+          conversationId: conversationId ?? get().currentConversationId,
+          syncArtifact: true,
+        })
+        return saved
+      } catch {
+        return null
+      }
+    },
+
+    toArtifact: (rawPath, conversationId) => {
+      const file = get().readFile(rawPath, conversationId)
+      if (!file) return null
+      const artifact = buildArtifactForFsFile(file)
+      useArtifacts.getState().add(artifact)
+      return artifact
+    },
+
+    attachFile: (rawPath, opts) => {
+      const artifact = get().toArtifact(rawPath, opts?.conversationId)
+      if (!artifact) return null
+      if (!opts?.silent) {
+        useUI.getState().addPendingAttachment(artifact.id)
+        useUI.getState().toast({
+          kind: 'success',
+          title: `${artifact.name} attached`,
+          detail: `${artifact.localPath ?? artifact.name} · queued for your next message.`,
+        })
+      }
+      return artifact
+    },
+
+    setFileRemote: (rawPath, remote, dirty, conversationId) => {
+      const path = tryNormalizeFsPath(rawPath)
+      if (!path) return false
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const workspace = workspaceFor(state.workspaces, ownerId)
+      const file = workspace.files[path]
+      if (!file) return false
+      updateWorkspace(ownerId, (current) => ({
+        ...current,
+        files: { ...current.files, [path]: { ...file, remote, dirty } },
+      }))
+      return true
+    },
+
+    markSyncedWithRemote: (repo, ref, committedPaths, fileShas, deletedPaths, conversationId) => {
+      const ownerId = conversationId ?? get().currentConversationId
+      updateWorkspace(ownerId, (workspace) => {
+        const next = { ...workspace.files }
+        for (const rawPath of committedPaths) {
+          const path = tryNormalizeFsPath(rawPath)
+          if (!path || !next[path]) continue
+          const current = next[path]!
+          const sha = fileShas?.[path] ?? current.remote?.sha
+          const url = `https://github.com/${repo}/blob/${encodeURIComponent(ref)}/${path
+            .split('/')
+            .map(encodeURIComponent)
+            .join('/')}`
+          next[path] = {
+            ...current,
+            remote: { kind: 'github', repo, ref, path, url, sha },
+            dirty: false,
+          }
         }
-      }
-      const nextDeleted = { ...st.deletedRemotes }
-      for (const delPath of deletedPaths ?? []) {
-        const norm = tryNormalizeFsPath(delPath)
-        if (norm) delete nextDeleted[norm]
-      }
-      persistFiles(next)
-      return { files: next, deletedRemotes: nextDeleted }
-    })
-  },
+        const nextDeleted = { ...workspace.deletedRemotes }
+        for (const deletedPath of deletedPaths ?? []) {
+          const norm = tryNormalizeFsPath(deletedPath)
+          if (norm) delete nextDeleted[norm]
+        }
+        return { ...workspace, files: next, deletedRemotes: nextDeleted }
+      })
+    },
 
-  importFiles: (entries) => {
-    set((st) => {
-      const next = { ...st.files }
-      for (const f of entries) {
-        const norm = tryNormalizeFsPath(f.path)
-        if (norm) next[norm] = { ...f, path: norm, name: fsBaseName(norm) }
-      }
-      persistFiles(next)
-      return { files: next }
-    })
-  },
+    importFiles: (entries, conversationId) => {
+      const state = get()
+      const fallbackId = conversationId ?? state.currentConversationId
+      set((current) => {
+        const workspaces = { ...current.workspaces }
+        for (const file of entries) {
+          const path = tryNormalizeFsPath(file.path)
+          if (!path) continue
+          const ownerId = normalizeOwnerId(file.conversationId, fallbackId)
+          const workspace = workspaceFor(workspaces, ownerId)
+          workspaces[ownerId] = {
+            ...workspace,
+            files: {
+              ...workspace.files,
+              [path]: {
+                ...file,
+                path,
+                name: fsBaseName(path),
+                conversationId: ownerId === LEGACY_WORKSPACE_ID ? undefined : ownerId,
+              },
+            },
+          }
+        }
+        persistWorkspaces(workspaces)
+        const active = workspaceFor(workspaces, current.currentConversationId)
+        return {
+          workspaces,
+          files: active.files,
+          deletedRemotes: active.deletedRemotes,
+          selectedPath: active.selectedPath,
+        }
+      })
+    },
 
-  clearAll: () => {
-    set({ files: {}, deletedRemotes: {}, selectedPath: null })
-    saveJSON(KEYS.fs, [])
-  },
+    clearWorkspace: (conversationId) => {
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      updateWorkspace(ownerId, () => emptyWorkspace())
+    },
 
-  selectFile: (path) => {
-    const norm = path ? tryNormalizeFsPath(path) : null
-    set({ selectedPath: norm })
-  },
+    clearAll: () => {
+      set((state) => ({
+        workspaces: {},
+        files: {},
+        deletedRemotes: {},
+        selectedPath: null,
+        currentConversationId: state.currentConversationId,
+      }))
+      saveJSON(KEYS.fs, [])
+      removeKey(KEYS.fsLegacy)
+    },
 
-  setFilter: (v) => set({ filter: v }),
-}))
+    selectFile: (path, conversationId) => {
+      const state = get()
+      const ownerId = conversationId ?? state.currentConversationId
+      const norm = path ? tryNormalizeFsPath(path) : null
+      updateWorkspace(ownerId, (workspace) => ({ ...workspace, selectedPath: norm }), false)
+    },
+
+    setFilter: (value) => set({ filter: value }),
+  }
+})
+
+// Keep the drawer's convenience projection in sync when the selected chat changes.
+useChat.subscribe((state, previous) => {
+  if (state.currentId !== previous.currentId) useFs.getState().setCurrentConversation(state.currentId)
+})

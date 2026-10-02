@@ -30,7 +30,7 @@ function changeVerb(c: RoadmapChange): string {
 const steps = (n: number) => `${n} step${n === 1 ? '' : 's'}`
 const MAX_CHANGES_SHOWN = 4
 
-export function RoadmapTimeline({ report }: { report: RoadmapReport }) {
+export function RoadmapTimeline({ report, conversationId }: { report: RoadmapReport; conversationId: string }) {
   const { progress, before, changes } = report
   const complete = progress.total > 0 && progress.done === progress.total
   const delta = before ? progress.done - before.done : 0
@@ -48,7 +48,7 @@ export function RoadmapTimeline({ report }: { report: RoadmapReport }) {
   } as CSSProperties
 
   const openRoadmap = () => {
-    useFs.getState().selectFile(report.path)
+    useFs.getState().selectFile(report.path, conversationId)
     useUI.getState().openFiles()
   }
 

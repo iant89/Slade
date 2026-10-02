@@ -99,10 +99,11 @@ everything is persisted with the message.
   built-in models produce plans, worker deliverables, and synthesis.
 
 For software-repository tasks, the orchestrator and worker models can use conversation
-history, files attached from GitHub, and Slade's persistent **Local File System**
-(`slade.fs.v1`) as workspace context, and any path-tagged file blocks they emit are
-automatically stored in Local Files. The runtime does not execute OS shell commands, Git
-checkouts, or test runners, so it cannot independently execute tests or builds against a
+history, files attached from GitHub, and the current conversation's isolated **Local File System**
+workspace (`slade.fs.v2`) as context, and any path-tagged file blocks they emit are
+automatically stored in that conversation's Local Files. New conversations start with an empty workspace; branching a chat copies
+its current workspace into a separate, independently editable one. The runtime does not execute OS shell
+commands, Git checkouts, or test runners, so it cannot independently execute tests or builds against a
 local checkout.
 
 ### Clarification questions (the agent asks, you choose)
@@ -229,14 +230,27 @@ to, and the card appears under the answer.
   their thinking against the same cap. A ceiling costs nothing unless the tokens are used.
 - **Expand worker output** — completed steps show their full result by default.
 - **Store and read files in the local file system** — enabled by default; gives the
-  orchestrator and every worker model a persistent local file system (`slade.fs.v1`)
-  where they can create, update, append, move, and delete files across steps and turns.
+  orchestrator and every worker model a persistent, conversation-isolated local file system
+  (`slade.fs.v2`) where they can create, update, append, move, and delete files across steps and turns.
+
+## Memory (`/memory`)
+
+Slade keeps user-curated notes in persistent **Memory** (`slade.memory.v1`) and adds them to
+relevant model context across conversations, even when Local Files is turned off. Open the
+Memory dialog from the header or `/memory`; add a note directly, or use **Remember** on a chat
+message to prefill it. Entries can be edited or deleted, and the Data backup includes them.
+Every new note also creates a **Memory Added** artifact card in the active conversation; expand
+the card to see the exact text that was saved.
 
 ## Local file system (`Ctrl/Cmd + E` or `/files`)
 
 Slade includes a persistent **Local File System** (`src/lib/fs.ts`, `src/store/fs.ts`,
-`src/components/fs/FilesPanel.tsx`) stored in `localStorage` under `slade.fs.v1` and
-included in JSON backups (**Settings → Data**):
+`src/components/fs/FilesPanel.tsx`) stored in `localStorage` under `slade.fs.v2` and
+included in JSON backups (**Settings → Data**). Each conversation has its own workspace;
+files with the same path in different conversations do not overwrite or appear in each
+other's agent context. Existing `slade.fs.v1` files are migrated once: files with conversation
+metadata stay associated with that chat, while older unscoped files go to the chat that is
+open during migration (or to the first chat created if none is open):
 
 - **Automatic agent workspace** — when **Store and read files in the local file system**
   is enabled in **Settings → Agent**, the planner, every delegated worker step, the
@@ -263,7 +277,14 @@ included in JSON backups (**Settings → Data**):
 - **Local Files drawer** — click the folder icon in the header (`Ctrl/Cmd + E` or `/files`)
   to browse the directory tree, search paths and file contents with line numbers, create
   or upload files, edit or rename files inline, attach files to the next prompt, download
-  them, or publish them to GitHub.
+  them, or publish them to GitHub. These actions, including ZIP archive import/export and
+  GitHub pulls, apply to the open conversation only; **Clear chat files** clears only that
+  conversation's workspace.
+- **Intentional cross-chat actions** — **Settings → Data → Export everything** includes every
+  conversation's files and their ownership metadata. Import preserves those owners; unscoped
+  files go into the currently open chat (or the first chat created if none is open).
+  **Settings → Data → Clear all chat workspaces**
+  is the explicit action that clears files across every conversation.
 
 
 ## The failover engine

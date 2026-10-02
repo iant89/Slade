@@ -4,11 +4,12 @@ import { useSettings } from '../../store/settings'
 import { useHealth } from '../../store/health'
 import { useGitHub } from '../../store/github'
 import { useFs } from '../../store/fs'
+import { useMemory } from '../../store/memory'
 import { useUI } from '../../store/ui'
 import type { MenuAnchor } from '../../lib/menuPlacement'
 import { RenameInput } from '../common/RenameInput'
 import { ConversationMenu, type ConversationMenuState } from './ConversationMenu'
-import { IconChevronDown, IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight, IconPlus } from '../icons'
+import { IconBrain, IconChevronDown, IconFolder, IconGear, IconGithub, IconPanelLeft, IconPanelRight, IconPlus } from '../icons'
 
 /** Local file system workspace toggle — shows a dot when files are stored. */
 function FilesButton() {
@@ -21,16 +22,38 @@ function FilesButton() {
       className={`icon-btn gh-toggle fs-toggle${open ? ' active' : ''}`}
       onClick={toggleFiles}
       aria-pressed={open}
-      aria-label={open ? 'Close the local file system' : 'Open the local file system (Ctrl+E)'}
+      aria-label={open ? 'Close this chat’s local file system' : 'Open this chat’s local file system (Ctrl+E)'}
       title={
         fileCount > 0
-          ? `Local file system (Ctrl+E) — ${fileCount} file${fileCount === 1 ? '' : 's'} stored`
-          : 'Local file system (Ctrl+E)'
+          ? `This chat’s local file system (Ctrl+E) — ${fileCount} file${fileCount === 1 ? '' : 's'} stored`
+          : 'This chat’s local file system (Ctrl+E)'
       }
       type="button"
     >
       <IconFolder size={16} />
       {fileCount > 0 ? <span className="gh-toggle-dot" aria-hidden="true" /> : null}
+    </button>
+  )
+}
+
+/** Persistent notes that can be recalled by any conversation. */
+function MemoryButton() {
+  const open = useUI((s) => s.memoryOpen)
+  const openMemory = useUI((s) => s.openMemory)
+  const memoryCount = useMemory((s) => s.entries.length)
+
+  return (
+    <button
+      className={`icon-btn memory-toggle${open ? ' active' : ''}`}
+      onClick={() => openMemory()}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label="Open Memory"
+      title={`Memory — ${memoryCount} saved ${memoryCount === 1 ? 'note' : 'notes'} shared across conversations`}
+      type="button"
+    >
+      <IconBrain size={16} />
+      <span>Memory</span>
     </button>
   )
 }
@@ -174,6 +197,7 @@ export function Header() {
       </div>
       <div className="header-right">
         <HealthStrip />
+        <MemoryButton />
         <FilesButton />
         <GitHubButton />
         <button

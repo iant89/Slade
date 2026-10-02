@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { motion } from 'framer-motion'
-import type { Artifact } from '../../types'
+import type { Artifact, FsFile } from '../../types'
 import { useArtifacts } from '../../store/artifacts'
 import { useFs } from '../../store/fs'
 import { useSettings } from '../../store/settings'
@@ -41,12 +41,31 @@ const KIND_ICON: Record<Artifact['kind'], typeof IconFile> = {
   unknown: IconFile,
 }
 
-export function ArtifactCard({ artifactId }: { artifactId: string }) {
+function artifactMatchesFile(artifact: Artifact, file: FsFile): boolean {
+  if (artifact.text != null && file.encoding !== 'base64') return artifact.text === file.content
+  if (!artifact.dataURL) return false
+  const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(artifact.dataURL)
+  if (!match) return false
+  if (match[2]) return file.encoding === 'base64' && file.content === match[3]
+  if (file.encoding === 'base64') return false
+  try {
+    return file.content === decodeURIComponent(match[3] ?? '')
+  } catch {
+    return false
+  }
+}
+
+export function ArtifactCard({ artifactId, conversationId }: { artifactId: string; conversationId?: string }) {
   const artifact = useArtifacts((s) => s.byId[artifactId])
   const prefs = useSettings((s) => s.s.artifacts)
   const toast = useUI((s) => s.toast)
+  const activeConversationId = useFs((s) => s.currentConversationId)
+  const workspaceId = conversationId ?? activeConversationId
   const targetFsPath = artifact ? (artifact.localPath ?? tryNormalizeFsPath(artifact.name) ?? undefined) : undefined
-  const storedInFs = useFs((s) => Boolean(targetFsPath && s.files[targetFsPath]))
+  const storedFile = useFs((s) => (targetFsPath ? s.workspaces[workspaceId]?.files[targetFsPath] : undefined))
+  const storedInFs = Boolean(
+    artifact && storedFile && (artifact.conversationId === workspaceId || artifactMatchesFile(artifact, storedFile)),
+  )
 
   const [collapsed, setCollapsed] = useState(prefs.collapsedByDefault)
   useEffect(() => {
@@ -170,13 +189,13 @@ export function ArtifactCard({ artifactId }: { artifactId: string }) {
           className="artifact-action"
           onClick={() => {
             if (storedInFs && targetFsPath) {
-              useFs.getState().selectFile(targetFsPath)
+              useFs.getState().selectFile(targetFsPath, workspaceId)
               useUI.getState().openFiles()
               return
             }
-            const saved = useFs.getState().saveArtifact(artifact, targetFsPath)
+            const saved = useFs.getState().saveArtifact(artifact, targetFsPath, workspaceId)
             if (saved) {
-              useFs.getState().selectFile(saved.path)
+              useFs.getState().selectFile(saved.path, workspaceId)
               useUI.getState().openFiles()
               toast({ kind: 'success', title: `Saved ${saved.path} to Local Files` })
             } else {

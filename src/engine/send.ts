@@ -165,7 +165,7 @@ async function runChain(
       if (controller.signal.aborted) break
       const startedAt = performance.now()
       try {
-        const outcome = await attemptModel({ model, turns, settings, controller, state, assistantMessageId, attempt })
+        const outcome = await attemptModel({ model, turns, settings, controller, state, assistantMessageId, attempt, conversationId })
         if (outcome.truncated) {
           useUI.getState().toast({
             kind: 'warn',
@@ -398,6 +398,7 @@ async function attemptModel(args: {
   state: ChainState
   assistantMessageId: string
   attempt: ActiveRun
+  conversationId: string
 }): Promise<{ truncated: boolean; maxTokensUsed: number }> {
   const { model, settings, controller, state, attempt } = args
   const provider = settings.providers.find((p) => p.id === model.provider)
@@ -514,12 +515,13 @@ async function attemptOnce(args: {
   state: ChainState
   assistantMessageId: string
   attempt: ActiveRun
+  conversationId: string
   maxTokens: number
   provider: ProviderDef
   apiKey: string
   observed: ObservedTurn
 }): Promise<void> {
-  const { model, turns, settings, controller, state, assistantMessageId, maxTokens, provider, apiKey, observed } = args
+  const { model, turns, settings, controller, state, assistantMessageId, conversationId, maxTokens, provider, apiKey, observed } = args
   const adapter = adapterFor(provider.kind)
   const params = effectiveParams(settings, model.id)
   const attemptController = new AbortController()
@@ -592,10 +594,11 @@ async function attemptOnce(args: {
   arm('first-token', settings.defaults.firstTokenTimeoutMs)
   const useLocalFs = settings.agent.useLocalFs ?? true
   const lastUserText = [...turns].reverse().find((t) => t.role === 'user')?.text ?? ''
-  const fsBlock = useLocalFs ? await prepareAgentWorkspaceContext(lastUserText) : ''
-  const systemPrompt = fsBlock
-    ? `${params.systemPrompt}\n\nTo create or update files in Slade's local file system, emit fenced blocks tagged with the target path (\`\`\`lang:path/to/file.ext).\n\n${fsBlock}`
-    : params.systemPrompt
+  const fsBlock = await prepareAgentWorkspaceContext(lastUserText, conversationId, useLocalFs)
+  const fileInstruction = useLocalFs
+    ? "To create or update files in Slade's local file system, emit fenced blocks tagged with the target path (```lang:path/to/file.ext)."
+    : ''
+  const systemPrompt = [params.systemPrompt, fileInstruction, fsBlock].filter(Boolean).join('\n\n')
   try {
     await adapter.run({
       model,

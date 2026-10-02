@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FsFile } from '../../types'
 import { useFs } from '../../store/fs'
+import { useChat } from '../../store/chat'
 import { useGitHub } from '../../store/github'
 import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
@@ -65,6 +66,8 @@ export function FilesPanel() {
   const openSettings = useUI((s) => s.openSettings)
   const openPublish = useUI((s) => s.openPublish)
   const toast = useUI((s) => s.toast)
+  const conversationId = useFs((s) => s.currentConversationId)
+  const conversationTitle = useChat((s) => (s.currentId ? s.conversations[s.currentId]?.title : undefined))
 
   const filesMap = useFs((s) => s.files)
   const deletedRemotes = useFs((s) => s.deletedRemotes)
@@ -100,6 +103,13 @@ export function FilesPanel() {
   const [archiveProgress, setArchiveProgress] = useState(0)
   const uploadRef = useRef<HTMLInputElement>(null)
   const archiveRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    setEditing(false)
+    setRenaming(false)
+    setCommitting(false)
+    setCreating(false)
+  }, [conversationId])
 
   const files = useMemo(
     () => Object.values(filesMap).sort((a, b) => a.path.localeCompare(b.path)),
@@ -141,7 +151,7 @@ export function FilesPanel() {
   const selectedFile = selectedPath ? filesMap[selectedPath] : undefined
 
   const openFile = (path: string) => {
-    useFs.getState().selectFile(path)
+    useFs.getState().selectFile(path, conversationId)
     setEditing(false)
     setRenaming(false)
   }
@@ -156,6 +166,7 @@ export function FilesPanel() {
     if (!selectedFile) return
     useFs.getState().writeFile(selectedFile.path, editDraft, {
       source: { origin: 'user' },
+      conversationId,
       syncArtifact: true,
     })
     setEditing(false)
@@ -175,7 +186,7 @@ export function FilesPanel() {
       setRenaming(false)
       return
     }
-    const moved = useFs.getState().moveFile(selectedFile.path, target, { origin: 'user' })
+    const moved = useFs.getState().moveFile(selectedFile.path, target, { origin: 'user' }, conversationId)
     if (!moved) {
       toast({ kind: 'error', title: 'Invalid file path', detail: target })
       return
@@ -189,12 +200,13 @@ export function FilesPanel() {
     try {
       const created = useFs.getState().writeFile(newPath, newContent, {
         source: { origin: 'user' },
+        conversationId,
         syncArtifact: true,
       })
       setCreating(false)
       setNewPath('')
       setNewContent('')
-      useFs.getState().selectFile(created.path)
+      useFs.getState().selectFile(created.path, conversationId)
       toast({ kind: 'success', title: `Created ${created.path}` })
     } catch (err) {
       setCreateError(isFsError(err) ? err.message : err instanceof Error ? err.message : String(err))
@@ -217,9 +229,10 @@ export function FilesPanel() {
           const saved = useFs.getState().writeFile(f.name, text, {
             mime: f.type || undefined,
             source: { origin: 'user' },
+            conversationId,
             syncArtifact: true,
           })
-          useFs.getState().selectFile(saved.path)
+          useFs.getState().selectFile(saved.path, conversationId)
           count++
         } else {
           const dataUrl = await fileToDataURL(f)
@@ -228,9 +241,10 @@ export function FilesPanel() {
             encoding: 'base64',
             mime: f.type || undefined,
             source: { origin: 'user' },
+            conversationId,
             syncArtifact: true,
           })
-          useFs.getState().selectFile(saved.path)
+          useFs.getState().selectFile(saved.path, conversationId)
           count++
         }
       } catch (err) {
@@ -288,7 +302,7 @@ export function FilesPanel() {
         return
       }
 
-      const existing = useFs.getState().files
+      const existing = useFs.getState().getWorkspace(conversationId).files
       const conflicts = archive.entries.filter((entry) => Boolean(existing[entry.path])).length
       if (conflicts > 0 && !window.confirm(
         `This archive contains ${archive.entries.length} files, including ${conflicts} that already exist. Replace the existing files?`,
@@ -302,6 +316,7 @@ export function FilesPanel() {
             encoding: entry.encoding,
             mime: entry.mime,
             source: { origin: 'user' },
+            conversationId,
             syncArtifact: true,
           })
           imported++
@@ -309,8 +324,8 @@ export function FilesPanel() {
           failed++
         }
       }
-      const firstPath = archive.entries.find((entry) => useFs.getState().files[entry.path])?.path
-      if (firstPath) useFs.getState().selectFile(firstPath)
+      const firstPath = archive.entries.find((entry) => useFs.getState().getWorkspace(conversationId).files[entry.path])?.path
+      if (firstPath) useFs.getState().selectFile(firstPath, conversationId)
       const skipped = archive.skippedUnsafe + archive.skippedLarge
       toast({
         kind: failed || skipped ? 'info' : 'success',
@@ -338,7 +353,7 @@ export function FilesPanel() {
   }
 
   const publishFile = (file: FsFile) => {
-    const art = useFs.getState().toArtifact(file.path)
+    const art = useFs.getState().toArtifact(file.path, conversationId)
     if (art) openPublish({ kind: 'artifact', artifactId: art.id })
   }
 
@@ -410,7 +425,7 @@ export function FilesPanel() {
             </button>
             <button
               className="icon-btn small"
-              onClick={() => useFs.getState().attachFile(file.path)}
+              onClick={() => useFs.getState().attachFile(file.path, { conversationId })}
               aria-label={`Attach ${file.path} to the next message`}
               title="Attach to next message"
               type="button"
@@ -420,7 +435,7 @@ export function FilesPanel() {
             <button
               className="icon-btn small"
               onClick={() => {
-                useFs.getState().deleteFile(file.path)
+                useFs.getState().deleteFile(file.path, conversationId)
                 toast({ kind: 'info', title: `Deleted ${file.path}` })
               }}
               aria-label={`Delete ${file.path}`}
@@ -488,9 +503,9 @@ export function FilesPanel() {
           <div className="gh-tab-body">
             <section className="fs-workspace-intro" aria-label="Workspace overview">
               <div className="fs-workspace-copy">
-                <div className="fs-workspace-kicker"><span className="fs-live-dot" /> YOUR WORKSPACE</div>
+                <div className="fs-workspace-kicker"><span className="fs-live-dot" /> THIS CHAT’S WORKSPACE</div>
                 <h3>{files.length ? 'Everything in its right place.' : 'A fresh space for your next idea.'}</h3>
-                <p>Files your agents create, plus anything you bring into the workspace.</p>
+                <p>Files for {conversationTitle ? <strong>{conversationTitle}</strong> : 'this chat'} only. Other conversations have separate workspaces.</p>
               </div>
               <div className="fs-workspace-stats">
                 <div><strong>{files.length}</strong><span>files</span></div>
@@ -551,7 +566,7 @@ export function FilesPanel() {
                     disabled={pullingRepo || !ghTree}
                     onClick={async () => {
                       setPullingRepo(true)
-                      await useGitHub.getState().pullTreeToFs({ prefix: filter.trim() || undefined })
+                      await useGitHub.getState().pullTreeToFs({ prefix: filter.trim() || undefined, conversationId })
                       setPullingRepo(false)
                     }}
                     title="Pull text files from the open GitHub repository into Local Files"
@@ -650,6 +665,7 @@ export function FilesPanel() {
                         branch: commitBranch || undefined,
                         newBranch: commitNewBranch || undefined,
                         message: commitMessage,
+                        conversationId,
                       })
                       if (res) {
                         setCommitting(false)
@@ -766,7 +782,7 @@ export function FilesPanel() {
                           </button>
                           <button
                             className="icon-btn small"
-                            onClick={() => useFs.getState().attachFile(hit.file.path)}
+                            onClick={() => useFs.getState().attachFile(hit.file.path, { conversationId })}
                             aria-label={`Attach ${hit.file.path}`}
                             title="Attach to next message"
                             type="button"
@@ -872,14 +888,14 @@ export function FilesPanel() {
                       </button>
                       <button
                         className="btn primary small"
-                        onClick={() => useFs.getState().attachFile(selectedFile.path)}
+                        onClick={() => useFs.getState().attachFile(selectedFile.path, { conversationId })}
                         type="button"
                       >
                         <IconPaperclip size={12} /> Attach
                       </button>
                       <button
                         className="btn ghost small"
-                        onClick={() => useFs.getState().selectFile(null)}
+                        onClick={() => useFs.getState().selectFile(null, conversationId)}
                         type="button"
                       >
                         Close
@@ -919,6 +935,7 @@ export function FilesPanel() {
                         className="link-btn"
                         onClick={() =>
                           void useGitHub.getState().pullFileToFs(selectedFile.path, {
+                            conversationId,
                             repo: selectedFile.remote!.repo,
                             ref: selectedFile.remote!.ref,
                           })
@@ -982,12 +999,12 @@ export function FilesPanel() {
               <button
                 className="link-btn"
                 onClick={() => {
-                  useFs.getState().clearAll()
-                  toast({ kind: 'info', title: 'Cleared local file system' })
+                  useFs.getState().clearWorkspace(conversationId)
+                  toast({ kind: 'info', title: 'Cleared this chat’s local files' })
                 }}
                 type="button"
               >
-                Clear all
+                Clear chat files
               </button>
             ) : null}
           </div>

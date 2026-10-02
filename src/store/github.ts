@@ -212,11 +212,11 @@ export interface GitHubState {
   closeFile: () => void
   attachFile: (path: string, opts?: { silent?: boolean }) => Promise<Artifact | null>
   /** Pull one file from a GitHub repo/branch into Slade's local file system (`useFs`). */
-  pullFileToFs: (path: string, opts?: { repo?: string; ref?: string; silent?: boolean }) => Promise<FsFile | null>
+  pullFileToFs: (path: string, opts?: { repo?: string; ref?: string; silent?: boolean; conversationId?: string }) => Promise<FsFile | null>
   /** Pull multiple files (or a directory/repo subset) from the active GitHub repo into `useFs`. */
-  pullTreeToFs: (opts?: { prefix?: string; paths?: string[]; maxFiles?: number; silent?: boolean }) => Promise<FsFile[]>
+  pullTreeToFs: (opts?: { prefix?: string; paths?: string[]; maxFiles?: number; silent?: boolean; conversationId?: string }) => Promise<FsFile[]>
   /** Automatically pull any files from the active GitHub tree mentioned in a prompt into `useFs`. */
-  syncRepoFilesForPrompt: (promptHint: string) => Promise<FsFile[]>
+  syncRepoFilesForPrompt: (promptHint: string, conversationId?: string) => Promise<FsFile[]>
   /** Commit and push local file system changes (`useFs`) to a GitHub repository branch. */
   commitFsToGitHub: (opts: {
     paths?: string[]
@@ -226,6 +226,7 @@ export interface GitHubState {
     newBranch?: string
     message: string
     silent?: boolean
+    conversationId?: string
   }) => Promise<CommitTreeResult | null>
   runSearch: (query: string) => Promise<void>
   clearSearch: () => void
@@ -599,6 +600,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
     pullFileToFs: async (path, opts) => {
       const repo = opts?.repo ?? get().activeRepo
       const ref = opts?.ref ?? get().activeBranch
+      const conversationId = opts?.conversationId ?? useFs.getState().currentConversationId
       if (!repo || !ref) return null
       const normPath = tryNormalizeFsPath(path)
       if (!normPath) return null
@@ -610,6 +612,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
           encoding: textual ? 'utf8' : 'base64',
           mime: file.mime || mimeForPath(normPath),
           source: { origin: 'user' },
+          conversationId,
           remote: {
             kind: 'github',
             repo,
@@ -643,6 +646,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
     pullTreeToFs: async (opts) => {
       const { activeRepo, activeBranch, tree } = get()
+      const conversationId = opts?.conversationId ?? useFs.getState().currentConversationId
       if (!activeRepo || !activeBranch || !tree) return []
       const maxFiles = opts?.maxFiles ?? 25
       let targets: string[] = []
@@ -670,7 +674,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
       })
       const pulled: FsFile[] = []
       for (const p of targets) {
-        const saved = await get().pullFileToFs(p, { repo: activeRepo, ref: activeBranch, silent: true })
+        const saved = await get().pullFileToFs(p, { repo: activeRepo, ref: activeBranch, silent: true, conversationId })
         if (saved) pulled.push(saved)
       }
       const cloneFailed = targets.length > 0 && pulled.length === 0
@@ -700,8 +704,9 @@ export const useGitHub = create<GitHubState>((set, get) => {
       return pulled
     },
 
-    syncRepoFilesForPrompt: async (promptHint) => {
+    syncRepoFilesForPrompt: async (promptHint, requestedConversationId) => {
       const { activeRepo, activeBranch, tree } = get()
+      const conversationId = requestedConversationId ?? useFs.getState().currentConversationId
       if (!activeRepo || !activeBranch || !tree) return []
       const mentioned = promptHint.trim() ? findMentionedRepoPaths(tree.entries, promptHint, 6) : []
       // A roadmap / milestone file is workspace context whether or not the
@@ -711,8 +716,8 @@ export const useGitHub = create<GitHubState>((set, get) => {
       const fs = useFs.getState()
       const pulled: FsFile[] = []
       for (const path of [...mentioned, ...roadmaps]) {
-        if (fs.exists(path) || fs.deletedRemotes[path]) continue
-        const saved = await get().pullFileToFs(path, { repo: activeRepo, ref: activeBranch, silent: true })
+        if (fs.exists(path, conversationId) || fs.getWorkspace(conversationId).deletedRemotes[path]) continue
+        const saved = await get().pullFileToFs(path, { repo: activeRepo, ref: activeBranch, silent: true, conversationId })
         if (saved) pulled.push(saved)
       }
       return pulled
@@ -737,7 +742,9 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
       const branch = (opts.branch ?? get().activeBranch ?? get().publishDefaults.branch ?? '').trim() || undefined
       const fsState = useFs.getState()
-      const allFiles = fsState.listFiles()
+      const conversationId = opts.conversationId ?? fsState.currentConversationId
+      const allFiles = fsState.listFiles(undefined, conversationId)
+      const workspace = fsState.getWorkspace(conversationId)
 
       let filesToCommit: FsFile[]
       if (opts.paths?.length) {
@@ -750,7 +757,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
       const includeDeleted = opts.includeDeleted ?? true
       const deletedPaths = includeDeleted
-        ? Object.entries(fsState.deletedRemotes)
+        ? Object.entries(workspace.deletedRemotes)
             .filter(([, rem]) => rem.repo === repo)
             .map(([p]) => p)
         : []
@@ -786,6 +793,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
           filesToCommit.map((f) => f.path),
           res.fileShas,
           deletedPaths,
+          conversationId,
         )
 
         const publishResult: PublishResult = {
@@ -872,6 +880,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
     publish: async (req) => {
       const token = get().token
+      const conversationId = req.conversationId ?? useFs.getState().currentConversationId
       set({ publishing: true, publishError: undefined, publishStep: undefined })
       try {
         const result = await executePublish(req, {
@@ -883,8 +892,8 @@ export const useGitHub = create<GitHubState>((set, get) => {
         if (req.target === 'file' && req.repo) {
           const targetBranch = req.newBranch?.trim() || req.branch?.trim() || get().activeBranch || 'HEAD'
           const filePath = (req.path ?? req.name).replace(/^\/+/, '')
-          if (filePath && useFs.getState().exists(filePath)) {
-            useFs.getState().markSyncedWithRemote(req.repo, targetBranch, [filePath])
+          if (filePath && useFs.getState().exists(filePath, conversationId)) {
+            useFs.getState().markSyncedWithRemote(req.repo, targetBranch, [filePath], undefined, undefined, conversationId)
           }
         }
         return result

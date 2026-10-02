@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { MAX_MEMORY_ENTRY_CHARS } from '../types'
 import type { ProviderDef, Settings } from '../types'
 import { normalizeProviderDef } from './providerCatalog'
 
@@ -348,6 +349,13 @@ export const messageSchema = z.object({
   agent: agentRunSchema.optional(),
 })
 
+export const memoryEntrySchema = z.object({
+  id: z.string().min(1),
+  content: z.string().trim().min(1).max(MAX_MEMORY_ENTRY_CHARS),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
 export const artifactSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -370,6 +378,7 @@ export const artifactSchema = z.object({
     })
     .optional(),
   localPath: z.string().optional(),
+  conversationId: z.string().optional(),
   dataURL: z.string().optional(),
   text: z.string().optional(),
   columns: z.array(z.string()).optional(),
@@ -458,6 +467,7 @@ export const exportBundleSchema = z.object({
   conversations: z.array(conversationSchema).optional(),
   artifacts: z.array(artifactSchema).optional(),
   files: z.array(fsFileSchema).optional(),
+  memories: z.array(memoryEntrySchema).optional(),
 })
 
 export type ExportBundle = z.infer<typeof exportBundleSchema>

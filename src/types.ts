@@ -202,6 +202,17 @@ export interface RemoteSource {
   sha?: string
 }
 
+/** Maximum size of one user-curated memory note. */
+export const MAX_MEMORY_ENTRY_CHARS = 4_000
+
+/** Durable, user-managed note included in model context across conversations. */
+export interface MemoryEntry {
+  id: string
+  content: string
+  createdAt: number
+  updatedAt: number
+}
+
 export interface Artifact {
   id: string
   name: string
@@ -214,6 +225,8 @@ export interface Artifact {
   remote?: RemoteSource
   /** Set when the artifact is backed by a file in the local file system. */
   localPath?: string
+  /** Conversation workspace that owns a local-file artifact. */
+  conversationId?: string
   /** Small artifacts are persisted as data URLs; larger ones live in memory. */
   dataURL?: string
   /** Runtime object URL (never persisted; recreated from dataURL on load). */
@@ -236,9 +249,9 @@ export interface Artifact {
 export type FsFileEncoding = 'utf8' | 'base64'
 
 /**
- * One file stored in Slade's local file system. Shared across the
- * orchestrator, worker steps, and chat turns so agents can create, inspect,
- * update, and organize persistent files in a workspace.
+ * One file stored in Slade's local file system. Each conversation owns an
+ * isolated persistent workspace shared by its orchestrator, worker steps, and
+ * chat turns.
  */
 export interface FsFile {
   /** Canonical normalized relative path, e.g. "src/app.ts" or "data/sales.csv". */
@@ -257,7 +270,7 @@ export interface FsFile {
   updatedBy: ArtifactSource
   /** Incremented every time the file is written/updated (starts at 1). */
   version: number
-  /** Conversation id that last modified this file, when written during a turn. */
+  /** Conversation workspace that owns this file. */
   conversationId?: string
   /** Message or step id that last modified this file. */
   messageId?: string

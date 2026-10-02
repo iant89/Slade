@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgentRun, AgentTimelineItem, Message } from '../../types'
 import { FAILURE_LABEL } from '../../types'
 import { useChat } from '../../store/chat'
+import { useFs } from '../../store/fs'
 import { useSettings, modelShowsThoughts } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { copyText } from '../../lib/clipboard'
@@ -188,12 +189,12 @@ function HandoffDivider({ fromLabel, toLabel }: { fromLabel: string; toLabel: st
   )
 }
 
-function Attachments({ ids }: { ids?: string[] }) {
+function Attachments({ ids, conversationId }: { ids?: string[]; conversationId: string }) {
   if (!ids?.length) return null
   return (
     <div className="msg-attachments">
       {ids.map((id) => (
-        <ArtifactCard key={id} artifactId={id} />
+        <ArtifactCard key={id} artifactId={id} conversationId={conversationId} />
       ))}
     </div>
   )
@@ -228,7 +229,7 @@ export function MessageBubble({ message }: { message: Message }) {
           </span>
         </header>
 
-        <Attachments ids={message.attachmentIds} />
+        <Attachments ids={message.attachmentIds} conversationId={message.conversationId} />
 
         {isUser ? (
           <UserBody message={message} editing={editing} onDone={() => setEditing(false)} />
@@ -422,7 +423,9 @@ function AssistantBody({
   return (
     <div className="msg-bubble assistant-bubble">
       {pending && <TypingIndicator label={typingOn ? undefined : ''} />}
-      {message.agent && <AgentPlanCard run={message.agent} labelOf={labelOf} />}
+      {message.agent && (
+        <AgentPlanCard run={message.agent} labelOf={labelOf} conversationId={message.conversationId} />
+      )}
       {/* Questions the run asked, and the answers it got — above the answer they shaped. */}
       {message.agent?.questions?.length ? (
         <AgentQuestions run={message.agent} messageId={message.id} />
@@ -443,7 +446,7 @@ function AssistantBody({
             <HandoffDivider fromLabel={seg.fromLabel ?? ''} toLabel={labelOf(seg.handoffTo)} />
           ) : seg.text ? (
             <>
-              <Markdown text={seg.text} provenance={provenance} messageId={message.id} />
+              <Markdown text={seg.text} provenance={provenance} messageId={message.id} conversationId={message.conversationId} />
               {streaming && i === segments.length - 1 ? <StreamCursor /> : null}
             </>
           ) : null}
@@ -451,7 +454,7 @@ function AssistantBody({
       ))}
       {/* Completion footer: where the roadmap stands once the run is done. */}
       {message.agent?.roadmap && message.agent.phase === 'complete' && message.status === 'complete' ? (
-        <RoadmapTimeline report={message.agent.roadmap} />
+        <RoadmapTimeline report={message.agent.roadmap} conversationId={message.conversationId} />
       ) : null}
       {pending ? <span className="sr-only">Assistant is thinking…</span> : null}
       {error ? <ErrorBanner message={message} /> : null}
@@ -579,6 +582,12 @@ function MessageActions({ message, onEdit }: { message: Message; onEdit: () => v
         <IconCopy size={13} />
       </ActionButton>
 
+      {message.content.trim() ? (
+        <ActionButton label="Remember this message" onClick={() => useUI.getState().openMemory(message.content)}>
+          <IconBrain size={13} />
+        </ActionButton>
+      ) : null}
+
       {!isUser ? (
         <ActionButton
           label="Regenerate response"
@@ -606,12 +615,14 @@ function MessageActions({ message, onEdit }: { message: Message; onEdit: () => v
         onClick={() => {
           const chat = useChat.getState()
           const newId = chat.branchFrom(message.conversationId, message.id)
-          if (newId)
+          if (newId) {
+            useFs.getState().forkWorkspace(message.conversationId, newId)
             toast({
               kind: 'success',
               title: 'Branched into a new chat',
-              detail: 'History up to this message was copied.',
+              detail: 'History and the current file workspace were copied into an isolated chat.',
             })
+          }
         }}
       >
         <IconBranch size={13} />

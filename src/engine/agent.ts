@@ -19,6 +19,7 @@ import { useSettings } from '../store/settings'
 import { useUI } from '../store/ui'
 import { useFs } from '../store/fs'
 import { useGitHub } from '../store/github'
+import { formatMemoryContext } from '../store/memory'
 import { useGitHubActivity } from '../store/githubActivity'
 import { appendAgentThought, closeAgentThought } from '../store/agentTimeline'
 import { extractFsActions, formatFsContextForAgent, formatGitHubTreeForAgent } from '../lib/fs'
@@ -168,15 +169,23 @@ Slade mounts a persistent local file system:
 - Do not edit roadmap or milestone files (ROADMAP.md, MILESTONES.md and similar) unless your task explicitly says to; the orchestrator keeps them up to date.${fsContext ? `\n\n${fsContext}` : ''}`
 }
 
-export async function prepareAgentWorkspaceContext(queryHint: string): Promise<string> {
-  await useGitHub.getState().syncRepoFilesForPrompt(queryHint)
-  const fsBlock = formatFsContextForAgent(useFs.getState().listFiles(), { queryHint })
+export async function prepareAgentWorkspaceContext(
+  queryHint: string,
+  conversationId?: string,
+  includeLocalFs = true,
+): Promise<string> {
+  const memoryBlock = formatMemoryContext()
+  if (!includeLocalFs) return memoryBlock
+
+  const ownerId = conversationId ?? useFs.getState().currentConversationId
+  await useGitHub.getState().syncRepoFilesForPrompt(queryHint, ownerId)
+  const fsBlock = formatFsContextForAgent(useFs.getState().listFiles(undefined, ownerId), { queryHint })
   const gh = useGitHub.getState()
   const ghBlock =
     gh.activeRepo && gh.activeBranch && gh.tree
       ? formatGitHubTreeForAgent(gh.activeRepo, gh.activeBranch, gh.tree.entries)
       : ''
-  return [fsBlock, ghBlock].filter(Boolean).join('\n\n')
+  return [memoryBlock, fsBlock, ghBlock].filter(Boolean).join('\n\n')
 }
 
 export async function applyAgentOutputWithGit(
@@ -191,7 +200,10 @@ export async function applyAgentOutputWithGit(
   const actions = extractFsActions(markdown)
   for (const action of actions) {
     if (action.op === 'pull') {
-      const pulled = await useGitHub.getState().pullFileToFs(action.path, { silent: true })
+      const pulled = await useGitHub.getState().pullFileToFs(action.path, {
+        silent: true,
+        conversationId: meta.conversationId,
+      })
       if (pulled) {
         pullOps.push({
           op: 'pull',
@@ -215,26 +227,22 @@ export async function applyAgentOutputWithGit(
     )
     for (const op of writeOps) {
       if (op.op === 'create' || op.op === 'update') {
-        const cur = useFs.getState().readFile(op.path)
+        const cur = useFs.getState().readFile(op.path, meta.conversationId)
         if (cur && !cur.remote && treeByPath.has(op.path)) {
           const sha = treeByPath.get(op.path)
-          useFs.setState((st) => ({
-            files: {
-              ...st.files,
-              [op.path]: {
-                ...cur,
-                remote: {
-                  kind: 'github',
-                  repo: gh.activeRepo!,
-                  ref: gh.activeBranch!,
-                  path: op.path,
-                  url: `https://github.com/${gh.activeRepo}/blob/${encodeURIComponent(gh.activeBranch!)}/${op.path}`,
-                  sha,
-                },
-                dirty: true,
-              },
+          useFs.getState().setFileRemote(
+            op.path,
+            {
+              kind: 'github',
+              repo: gh.activeRepo,
+              ref: gh.activeBranch,
+              path: op.path,
+              url: `https://github.com/${gh.activeRepo}/blob/${encodeURIComponent(gh.activeBranch)}/${op.path}`,
+              sha,
             },
-          }))
+            true,
+            meta.conversationId,
+          )
         }
       }
     }
@@ -624,7 +632,7 @@ async function runAgent(
     try {
       return buildRoadmapReport({
         before: roadmapBefore,
-        after: snapshotRoadmapFiles(useFs.getState().listFiles()),
+        after: snapshotRoadmapFiles(useFs.getState().listFiles(undefined, conversationId)),
         delegated,
       })
     } catch {
@@ -644,8 +652,8 @@ async function runAgent(
     // A resumed run re-plans with the exchange it just had: the questions it
     // asked (as its own turn) and the answers the user picked (as the user's).
     let planTurns: ChatTurn[] = [...historyTurns, ...(previous ? answersTurnsFor(previous) : [])]
-    const planFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
-    if (useLocalFs) roadmapBefore = snapshotRoadmapFiles(useFs.getState().listFiles())
+    const planFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs)
+    if (useLocalFs) roadmapBefore = snapshotRoadmapFiles(useFs.getState().listFiles(undefined, conversationId))
 
     let plannerReply: PlannerReply | undefined
     let planModel: ModelDef = orchestrator
@@ -866,7 +874,7 @@ async function runAgent(
       }, 140)
 
       try {
-        const stepFsContext = useLocalFs ? await prepareAgentWorkspaceContext(step.prompt) : ''
+        const stepFsContext = await prepareAgentWorkspaceContext(step.prompt, conversationId, useLocalFs)
         const result = await runCompletion({
           purpose: `Step “${step.title}”`,
           turns: [{ role: 'user', text: step.prompt }],
@@ -975,7 +983,7 @@ async function runAgent(
     let streamedSynthReasoning = ''
     let synthTruncated = false
     let synthModelId = orchestrator.id
-    const synthFsContext = useLocalFs ? await prepareAgentWorkspaceContext(goal) : ''
+    const synthFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs)
     try {
       const synth = await runCompletion({
         purpose: 'Synthesis',

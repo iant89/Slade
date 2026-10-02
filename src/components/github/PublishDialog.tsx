@@ -197,6 +197,7 @@ export function PublishDialog() {
           newBranch: useNewBranch ? newBranch.trim() || undefined : undefined,
           path: path || resolved.name,
           commitMessage,
+          conversationId: resolved.artifact?.conversationId,
         }
       } else {
         req = {
