@@ -5,6 +5,7 @@ import { useHealth } from '../../store/health'
 import { useChat } from '../../store/chat'
 import { useArtifacts } from '../../store/artifacts'
 import { useFs } from '../../store/fs'
+import { useMemory } from '../../store/memory'
 import { useUI } from '../../store/ui'
 import { adapterFor } from '../../providers/registry'
 import { exportBundleSchema, settingsSchema } from '../../lib/schemas'
@@ -1288,11 +1289,12 @@ function DataTab() {
     const chat = useChat.getState()
     const conversations = chat.order.map((id) => chat.conversations[id]).filter(Boolean)
     const artifacts = Object.values(useArtifacts.getState().byId).filter((a) => !a.ephemeral && (a.dataURL || a.text))
-    const files = useFs.getState().listFiles()
-    const bundle = { app: 'slade' as const, version: 1, exportedAt: Date.now(), settings, conversations, artifacts, files }
+    const files = useFs.getState().listAllFiles()
+    const memories = useMemory.getState().entries
+    const bundle = { app: 'slade' as const, version: 1, exportedAt: Date.now(), settings, conversations, artifacts, files, memories }
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
     downloadUrl(URL.createObjectURL(blob), `slade-backup-${new Date().toISOString().slice(0, 10)}.json`)
-    toast({ kind: 'success', title: 'Exported settings, conversations, artifacts & local files' })
+    toast({ kind: 'success', title: 'Exported settings, conversations, artifacts, local files & memory' })
   }
 
   const importFile = async (file: File) => {
@@ -1309,6 +1311,9 @@ function DataTab() {
       }
       if (bundle.files) {
         useFs.getState().importFiles(bundle.files)
+      }
+      if (bundle.memories) {
+        useMemory.getState().importMemories(bundle.memories)
       }
       if (bundle.conversations) {
         // Rehydrate generated artifacts' blob URLs where possible, then import.
@@ -1363,14 +1368,14 @@ function DataTab() {
         <button
           className="btn danger"
           onClick={() => {
-            if (confirm('Delete all files in the local file system? This cannot be undone.')) {
+            if (confirm('Delete local files from every conversation workspace? This cannot be undone.')) {
               useFs.getState().clearAll()
-              toast({ kind: 'success', title: 'Local file system cleared' })
+              toast({ kind: 'success', title: 'All chat workspaces cleared' })
             }
           }}
           type="button"
         >
-          <IconTrash size={14} /> Clear local file system
+          <IconTrash size={14} /> Clear all chat workspaces
         </button>
         <button
           className="btn danger"

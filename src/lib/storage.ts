@@ -7,8 +7,12 @@ export const KEYS = {
   artifacts: 'slade.artifacts.v1',
   /** GitHub connection + workspace state (never part of the export bundle). */
   github: 'slade.github.v1',
-  /** Local file system workspace used by agents and users to store files. */
-  fs: 'slade.fs.v1',
+  /** Conversation-scoped local file system workspaces. */
+  fs: 'slade.fs.v2',
+  /** Pre-conversation-scoped file list, migrated into the active chat on load. */
+  fsLegacy: 'slade.fs.v1',
+  /** User-curated memories shared across conversations. */
+  memory: 'slade.memory.v1',
 } as const
 
 /** Load and zod-validate a JSON value from localStorage; fall back on any error. */

@@ -12,7 +12,7 @@ import { estimateTokens } from '../../lib/format'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { RepoBranchPickers } from './RepoBranchPickers'
 import { usePanelHasContent } from './panel'
-import { IconArrowUp, IconBot, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
+import { IconArrowUp, IconBot, IconBrain, IconFile, IconFolder, IconGear, IconGithub, IconKey, IconPaperclip, IconStarburst, IconStop, IconChevronDown, IconLayers, IconSliders, IconPlus, IconX, IconZap } from '../icons'
 
 /* ------------------------------------------------------------------ */
 /* Model chip + quick switch                                           */
@@ -178,6 +178,7 @@ const COMMANDS = [
   { cmd: '/model', label: '/model', hint: 'Quick-switch the primary model', icon: <IconLayers size={13} /> },
   { cmd: '/agent', label: '/agent', hint: 'Toggle the orchestrator agent', icon: <IconBot size={13} /> },
   { cmd: '/files', label: '/files', hint: 'Open the local file system workspace', icon: <IconFolder size={13} /> },
+  { cmd: '/memory', label: '/memory', hint: 'Review and save notes across conversations', icon: <IconBrain size={13} /> },
   { cmd: '/github', label: '/github', hint: 'Browse a repo and attach files as context', icon: <IconGithub size={13} /> },
   { cmd: '/sample', label: '/sample', hint: 'Attach sample files (CSV, code, image…)', icon: <IconFile size={13} /> },
   { cmd: '/new', label: '/new', hint: 'Start a new conversation', icon: <IconPlus size={13} /> },
@@ -378,6 +379,10 @@ export function Composer() {
     }
     if (cmd === '/new') useChat.getState().newConversation()
     if (cmd === '/files') useUI.getState().openFiles()
+    if (cmd === '/memory') {
+      useUI.getState().openMemory(text.replace(/^\/memory\s*/i, ''))
+      setText('')
+    }
     if (cmd === '/github') useUI.getState().openGithub('files')
     if (cmd === '/sample') {
       void attachSample(SAMPLES[0]!.file)
@@ -441,7 +446,7 @@ export function Composer() {
         <div className="pending-row" aria-label="Attachments queued for next message">
           {pendingIds.map((id) => (
             <div key={id} className="pending-chip">
-              <ArtifactCard artifactId={id} />
+              <ArtifactCard artifactId={id} conversationId={conv?.id} />
               <button className="pending-remove icon-btn" onClick={() => removePending(id)} aria-label="Remove attachment" type="button">
                 <IconX size={12} />
               </button>

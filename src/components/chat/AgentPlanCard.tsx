@@ -38,7 +38,7 @@ const PHASE_LABEL: Record<AgentRun['phase'], string> = {
   awaiting_input: 'Waiting for you',
 }
 
-export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: string | undefined) => string }) {
+export function AgentPlanCard({ run, labelOf, conversationId }: { run: AgentRun; labelOf: (id: string | undefined) => string; conversationId: string }) {
   const settings = useSettings((s) => s.s)
   const expandDefault = settings.agent.expandStepResults
   const [open, setOpen] = useState<Record<string, boolean>>({})
@@ -108,6 +108,7 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
               labelOf={labelOf}
               expanded={open[step.id] ?? (expandDefault && step.status === 'complete')}
               thoughtInTimeline={timelineThoughtSources.has(`step:${step.id}`)}
+              conversationId={conversationId}
               onToggle={() => setOpen((o) => ({ ...o, [step.id]: !(o[step.id] ?? (expandDefault && step.status === 'complete')) }))}
             />
           ))}
@@ -120,19 +121,19 @@ export function AgentPlanCard({ run, labelOf }: { run: AgentRun; labelOf: (id: s
         </p>
       )}
 
-      {run.fsOps && run.fsOps.length > 0 && <FsOpsStrip ops={run.fsOps} />}
+      {run.fsOps && run.fsOps.length > 0 && <FsOpsStrip ops={run.fsOps} conversationId={conversationId} />}
 
     </div>
   )
 }
 
-function FsOpsStrip({ ops }: { ops: FsOpRecord[] }) {
+function FsOpsStrip({ ops, conversationId }: { ops: FsOpRecord[]; conversationId: string }) {
   const activeRepo = useGitHub((s) => s.activeRepo)
   const defaultRepo = useGitHub((s) => s.publishDefaults.repo)
   const publishing = useGitHub((s) => s.publishing)
 
   const openInFiles = (path: string) => {
-    useFs.getState().selectFile(path)
+    useFs.getState().selectFile(path, conversationId)
     useUI.getState().openFiles()
   }
 
@@ -162,6 +163,7 @@ function FsOpsStrip({ ops }: { ops: FsOpRecord[] }) {
                 paths: writablePaths,
                 repo: targetRepo,
                 message: `Apply agent changes (${writablePaths.length} file${writablePaths.length === 1 ? '' : 's'} via Slade)`,
+                conversationId,
               })
             }}
             title={
@@ -203,12 +205,14 @@ function StepRow({
   labelOf,
   expanded,
   thoughtInTimeline,
+  conversationId,
   onToggle,
 }: {
   step: AgentStep
   labelOf: (id: string | undefined) => string
   expanded: boolean
   thoughtInTimeline: boolean
+  conversationId: string
   onToggle: () => void
 }) {
   const settings = useSettings((s) => s.s)
@@ -285,6 +289,7 @@ function StepRow({
               text={step.result ?? ''}
               provenance={{ origin: 'model', modelId: step.modelId, modelLabel: step.modelLabel }}
               messageId={`step-${step.id}`}
+              conversationId={conversationId}
             />
           )}
         </div>

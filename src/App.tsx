@@ -9,6 +9,7 @@ import { Composer } from './components/chat/Composer'
 import { SettingsModal } from './components/settings/SettingsModal'
 import { GitHubPanel } from './components/github/GitHubPanel'
 import { FilesPanel } from './components/fs/FilesPanel'
+import { MemoryModal } from './components/memory/MemoryModal'
 import { PublishDialog } from './components/github/PublishDialog'
 import { Lightbox } from './components/artifacts/Lightbox'
 import { Toasts } from './components/common/Toasts'
@@ -128,6 +129,7 @@ export default function App() {
       <ModelRail />
       <FilesPanel />
       <GitHubPanel />
+      <MemoryModal />
       <SettingsModal />
       <PublishDialog />
       <Lightbox />

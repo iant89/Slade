@@ -39,6 +39,8 @@ export interface PublishRequest {
   newBranch?: string
   path?: string
   commitMessage?: string
+  /** Owning chat workspace for syncing a published Local Files artifact. */
+  conversationId?: string
 
   /** Issues. */
   title?: string

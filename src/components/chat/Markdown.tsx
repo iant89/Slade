@@ -31,6 +31,7 @@ function ensureArtifactFromCode(
   code: string,
   provenance: ArtifactSource,
   messageId: string,
+  conversationId?: string,
 ): string {
   const store = useArtifacts.getState()
   const localPath = tryNormalizeFsPath(fileName) ?? undefined
@@ -39,7 +40,13 @@ function ensureArtifactFromCode(
   const existing = store.byId[id]
   if (existing) {
     if (existing.text !== code || existing.localPath !== localPath) {
-      store.add({ ...existing, text: code, size: code.length, localPath: localPath ?? existing.localPath })
+      store.add({
+        ...existing,
+        text: code,
+        size: code.length,
+        localPath: localPath ?? existing.localPath,
+        conversationId: conversationId ?? existing.conversationId,
+      })
     }
     return id
   }
@@ -54,6 +61,7 @@ function ensureArtifactFromCode(
     createdAt: Date.now(),
     provenance,
     localPath,
+    conversationId,
     text: code,
   })
   if (kind === 'sheet') {
@@ -94,9 +102,10 @@ export interface MarkdownProps {
   /** When provided, ```lang:filename blocks in AI output become artifact cards. */
   provenance?: ArtifactSource
   messageId?: string
+  conversationId?: string
 }
 
-export const Markdown = memo(function Markdown({ text, provenance, messageId }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ text, provenance, messageId, conversationId }: MarkdownProps) {
   const components = useMemo(() => {
     return {
       pre: ({ children }: { children?: ReactNode }) => <>{children}</>,
@@ -119,8 +128,8 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId }: 
         const lang = fsWriteMatch ? '' : colon >= 0 ? token.slice(0, colon) : token
 
         if (fileName && provenance && messageId) {
-          const artifactId = ensureArtifactFromCode(fileName, lang, raw, provenance, messageId)
-          return <ArtifactCard artifactId={artifactId} />
+          const artifactId = ensureArtifactFromCode(fileName, lang, raw, provenance, messageId, conversationId)
+          return <ArtifactCard artifactId={artifactId} conversationId={conversationId} />
         }
 
         if (isBlockCode(children, className) && (className || raw.includes('\n'))) {
@@ -149,7 +158,7 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId }: 
         </div>
       ),
     }
-  }, [provenance, messageId])
+  }, [provenance, messageId, conversationId])
 
   return (
     <div className="md">
@@ -164,6 +173,6 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId }: 
   )
 })
 
-export const StreamingMarkdown = memo(function StreamingMarkdown({ text, provenance, messageId }: MarkdownProps) {
-  return <Markdown text={text} provenance={provenance} messageId={messageId} />
+export const StreamingMarkdown = memo(function StreamingMarkdown({ text, provenance, messageId, conversationId }: MarkdownProps) {
+  return <Markdown text={text} provenance={provenance} messageId={messageId} conversationId={conversationId} />
 })

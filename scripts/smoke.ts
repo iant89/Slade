@@ -89,7 +89,8 @@ import {
 import { executePublish, PublishPreflightError, publishErrorMessage } from '../src/lib/github-publish'
 import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
-import { useFs, fsArtifactId } from '../src/store/fs'
+import { useFs, fsArtifactId, hydrateWorkspaces, type FsWorkspace } from '../src/store/fs'
+import { formatMemoryContext, useMemory } from '../src/store/memory'
 import { createFsArchive, readFsArchive } from '../src/lib/fs-archive'
 import {
   buildFsTree,
@@ -113,6 +114,7 @@ import {
   expirePendingAgentQuestions,
   parsePlannerReply,
   planSystemPrompt,
+  prepareAgentWorkspaceContext,
   resolveWorkerModel,
   skipAgentQuestion,
 } from '../src/engine/agent'
@@ -219,7 +221,7 @@ function check(name: string, cond: boolean, detail?: string) {
 const lastAssistant = () => {
   const chat = useChat.getState()
   const conv = chat.conversations[chat.currentId]!
-  return conv.messages.find((m) => m.role === 'assistant')!
+  return [...conv.messages].reverse().find((m) => m.role === 'assistant')!
 }
 
 /**
@@ -3525,6 +3527,7 @@ function testLocalFsStore() {
   console.log('local file system store:')
   const fs = useFs.getState()
   fs.clearAll()
+  fs.setCurrentConversation('conv_fs')
   useUI.getState().clearPendingAttachments()
 
   const created = fs.writeFile('/src/utils/math.ts', 'export const add = (a: number, b: number) => a + b\n', {
@@ -3535,7 +3538,7 @@ function testLocalFsStore() {
   })
   check('writeFile normalizes path and starts at version 1', created.path === 'src/utils/math.ts' && created.version === 1)
   check('readFile returns stored content', useFs.getState().readFile('src/utils/math.ts')?.content === 'export const add = (a: number, b: number) => a + b\n')
-  check('syncs file to artifact store with localPath', useArtifacts.getState().byId[fsArtifactId('src/utils/math.ts')]?.localPath === 'src/utils/math.ts')
+  check('syncs file to artifact store with localPath', useArtifacts.getState().byId[fsArtifactId('src/utils/math.ts', 'conv_fs')]?.localPath === 'src/utils/math.ts')
 
   const updated = fs.writeFile('src/utils/math.ts', 'export const add = (a: number, b: number) => a + b\nexport const mul = (a: number, b: number) => a * b\n', {
     source: { origin: 'user' },
@@ -3575,14 +3578,14 @@ function testLocalFsStore() {
       '```fs:delete:docs/roadmap.md',
       '```',
     ].join('\n'),
-    { source: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' } },
+    { source: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' }, conversationId: 'conv_fs' },
   )
   check('applyAgentOutput records create and delete ops', ops.length === 2 && ops[0]?.op === 'create' && ops[1]?.op === 'delete', JSON.stringify(ops))
   check('config/settings.json exists in store', useFs.getState().readFile('config/settings.json')?.content === '{"port": 8080}')
   check('docs/roadmap.md was deleted', !useFs.getState().exists('docs/roadmap.md'))
 
   // Persistence & export bundle validation
-  check('persists under slade.fs.v1 in localStorage', (localStorage.getItem('slade.fs.v1') ?? '').includes('config/settings.json'))
+  check('persists scoped files under slade.fs.v2 in localStorage', (localStorage.getItem('slade.fs.v2') ?? '').includes('config/settings.json'))
   const bundleCheck = exportBundleSchema.safeParse({
     app: 'slade',
     version: 1,
@@ -3597,14 +3600,78 @@ function testLocalFsStore() {
   useFs.getState().clearAll()
 }
 
+function testConversationScopedFs() {
+  console.log('conversation-isolated local file system:')
+  const fs = useFs.getState()
+  fs.clearAll()
+  const a = 'workspace-a'
+  const b = 'workspace-b'
+
+  fs.writeFile('notes.md', 'A only', { conversationId: a, source: { origin: 'user' }, syncArtifact: true })
+  fs.writeFile('notes.md', 'B only', { conversationId: b, source: { origin: 'user' }, syncArtifact: true })
+  check('same relative path can hold different content in two conversations', fs.readFile('notes.md', a)?.content === 'A only' && fs.readFile('notes.md', b)?.content === 'B only')
+  check('conversation file listings never include another workspace', fs.listFiles(undefined, a).length === 1 && fs.listFiles(undefined, b).length === 1)
+  check('same-path file artifacts have distinct conversation-scoped ids', fsArtifactId('notes.md', a) !== fsArtifactId('notes.md', b))
+
+  fs.setCurrentConversation(a)
+  check('the visible filesystem projection follows the selected conversation', useFs.getState().files['notes.md']?.content === 'A only')
+  fs.setCurrentConversation(b)
+  check('switching conversations changes the visible files without losing either copy', useFs.getState().files['notes.md']?.content === 'B only' && fs.readFile('notes.md', a)?.content === 'A only')
+
+  const ops = fs.applyAgentOutput('```md:notes.md\nA updated\n```', {
+    source: { origin: 'model', modelId: 'sim-pro', modelLabel: 'Simulacron Pro' },
+    conversationId: a,
+  })
+  check('agent writes target the originating conversation even after the user switches chats', ops[0]?.op === 'update' && fs.readFile('notes.md', a)?.content === 'A updated' && fs.readFile('notes.md', b)?.content === 'B only')
+
+  fs.forkWorkspace(a, 'workspace-branch')
+  check('branching can copy a snapshot into an independent workspace', fs.readFile('notes.md', 'workspace-branch')?.content === 'A updated')
+  const artifactFromA = fs.toArtifact('notes.md', a)
+  const savedInB = artifactFromA ? fs.saveArtifact(artifactFromA, 'copy.md', b) : null
+  check('saving a foreign artifact targets only the explicitly chosen workspace', savedInB?.content === 'A updated' && fs.readFile('notes.md', a)?.content === 'A updated' && fs.readFile('notes.md', b)?.content === 'B only')
+  check('saving the artifact creates a separate workspace-scoped artifact identity', useArtifacts.getState().byId[fsArtifactId('copy.md', b)]?.conversationId === b && useArtifacts.getState().byId[fsArtifactId('notes.md', a)]?.conversationId === a)
+  check('backup enumeration includes every conversation workspace', fs.listAllFiles().length === 4)
+
+  const legacyFile = (path: string, content: string, conversationId?: string): FsFile => ({
+    path,
+    name: path.slice(path.lastIndexOf('/') + 1),
+    content,
+    encoding: 'utf8',
+    mime: 'text/markdown',
+    kind: 'doc',
+    size: new TextEncoder().encode(content).length,
+    createdAt: 1,
+    updatedAt: 1,
+    createdBy: { origin: 'user' },
+    updatedBy: { origin: 'user' },
+    version: 1,
+    conversationId,
+  })
+  const oldV2 = localStorage.getItem('slade.fs.v2')
+  const oldV1 = localStorage.getItem('slade.fs.v1')
+  try {
+    localStorage.removeItem('slade.fs.v2')
+    localStorage.setItem('slade.fs.v1', JSON.stringify([
+      legacyFile('owned.md', 'belongs to old chat', 'old-conversation'),
+      legacyFile('loose.md', 'unscoped legacy file'),
+    ]))
+    const migrated = hydrateWorkspaces('migration-active')
+    const stored = JSON.parse(localStorage.getItem('slade.fs.v2') ?? '[]') as FsFile[]
+    check('legacy files with conversation metadata stay with that chat', migrated['old-conversation']?.files['owned.md']?.content === 'belongs to old chat')
+    check('legacy unscoped files migrate into the open conversation', migrated['migration-active']?.files['loose.md']?.content === 'unscoped legacy file')
+    check('migration writes the new key and removes the legacy key', stored.length === 2 && localStorage.getItem('slade.fs.v1') === null)
+  } finally {
+    if (oldV2 == null) localStorage.removeItem('slade.fs.v2')
+    else localStorage.setItem('slade.fs.v2', oldV2)
+    if (oldV1 == null) localStorage.removeItem('slade.fs.v1')
+    else localStorage.setItem('slade.fs.v1', oldV1)
+  }
+  fs.clearAll()
+}
+
 async function testAgentLocalFsIntegration() {
   console.log('agent mode ↔ local file system:')
   useFs.getState().clearAll()
-
-  // Seed an existing file in the local file system before starting the agent run.
-  useFs.getState().writeFile('src/counter.ts', 'export let count = 0\n', {
-    source: { origin: 'user' },
-  })
 
   const systemPromptsSeen: { call: number; systemPrompt: string }[] = []
   let calls = 0
@@ -3674,7 +3741,11 @@ async function testAgentLocalFsIntegration() {
 
   try {
     useHealth.getState().markHealthy('openrouter-test')
-    freshAgentConversation()
+    const conversationId = freshAgentConversation()
+    useFs.getState().writeFile('src/counter.ts', 'export let count = 0\n', {
+      source: { origin: 'user' },
+      conversationId,
+    })
     await sendUserMessage('Add increment/decrement to src/counter.ts and write tests', [])
 
     const msg = lastAssistant()
@@ -3746,14 +3817,19 @@ function testLocalFsUiRenders() {
   const uiInit = useUI.getInitialState() as unknown as Record<string, unknown>
   const fsInit = useFs.getInitialState() as unknown as {
     files: Record<string, FsFile>
+    workspaces: Record<string, FsWorkspace>
+    currentConversationId: string
     selectedPath: string | null
     filter: string
   }
   const artifactInit = useArtifacts.getInitialState() as unknown as { byId: Record<string, Artifact> }
   const origFiles = fsInit.files
+  const origWorkspaces = fsInit.workspaces
   const origSelected = fsInit.selectedPath
   const origFilter = fsInit.filter
   const origArtifacts = artifactInit.byId
+  const activeWorkspaceId = fsInit.currentConversationId
+  const activeWorkspace = origWorkspaces[activeWorkspaceId] ?? { files: {}, deletedRemotes: {}, selectedPath: null }
 
   const sampleFile: FsFile = {
     path: 'src/agent/runner.ts',
@@ -3777,13 +3853,15 @@ function testLocalFsUiRenders() {
 
     uiInit.filesOpen = true
     fsInit.files = {}
+    fsInit.workspaces = { ...origWorkspaces, [activeWorkspaceId]: { ...activeWorkspace, files: {} } }
     fsInit.selectedPath = null
     fsInit.filter = ''
     const empty = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
-    check('files drawer renders its workspace empty state', empty.includes('No files stored yet') && empty.includes('YOUR WORKSPACE'), empty.slice(0, 160))
+    check('files drawer renders its workspace empty state', empty.includes('No files stored yet') && empty.includes('THIS CHAT’S WORKSPACE'), empty.slice(0, 160))
     check('files drawer offers zip import and export actions', empty.includes('Import ZIP') && empty.includes('Export ZIP'))
 
     fsInit.files = { [sampleFile.path]: sampleFile }
+    fsInit.workspaces = { ...origWorkspaces, [activeWorkspaceId]: { ...activeWorkspace, files: fsInit.files } }
     fsInit.selectedPath = sampleFile.path
     const populated = renderToString(createElement(FilesPanel)).replace(/<!-- -->/g, '')
     check('files drawer renders directory tree and file row', populated.includes('src/') && populated.includes('runner.ts'), populated.slice(0, 240))
@@ -3844,6 +3922,7 @@ function testLocalFsUiRenders() {
   } finally {
     uiInit.filesOpen = false
     fsInit.files = origFiles
+    fsInit.workspaces = origWorkspaces
     fsInit.selectedPath = origSelected
     fsInit.filter = origFilter
     artifactInit.byId = origArtifacts
@@ -4835,17 +4914,17 @@ async function testRoadmapAgentRun() {
   await withScriptedAgent(script, async ({ seen }) => {
     const v1 = ['# Roadmap', '', '## Milestone 1 — Reports', '- [x] Streaming', '- [~] Report card', '- [ ] Roadmap timeline', '- [ ] Docs', ''].join('\n')
     const v2 = v1.replace('- [~] Report card', '- [x] Report card').replace('- [ ] Roadmap timeline', '- [~] Roadmap timeline')
-    const roadmapText = () => useFs.getState().readFile('ROADMAP.md')?.content ?? ''
+    const conversationId = freshAgentConversation()
+    const roadmapText = () => useFs.getState().readFile('ROADMAP.md', conversationId)?.content ?? ''
     const html = (m: Parameters<typeof MessageBubble>[0]['message']) => renderToString(createElement(MessageBubble, { message: m })).replace(/<!-- -->/g, '')
-    useFs.getState().writeFile('ROADMAP.md', v1, { source: { origin: 'user' } })
-    useFs.getState().writeFile('src/report.ts', 'export const report = () => ""\n', { source: { origin: 'user' } })
+    useFs.getState().writeFile('ROADMAP.md', v1, { source: { origin: 'user' }, conversationId })
+    useFs.getState().writeFile('src/report.ts', 'export const report = () => ""\n', { source: { origin: 'user' }, conversationId })
     const plan = onePlan('Build the report card', 'Update src/report.ts to render the completion report.')
 
     /* ---- run 1: the run advances the roadmap ---- */
     script.plans.push(plan)
     script.workers.push(`Updated the report:\n\n${fileBlock('ts:src/report.ts', 'export const report = () => "done"')}`)
     script.synths.push(`SUMMARY\nBuilt the report card.\n\nROADMAP\nReport card is done; the timeline is next.\n\n${fileBlock('markdown:ROADMAP.md', v2)}`)
-    freshAgentConversation()
     await sendUserMessage('Implement the completion report card', [])
     const msg1 = lastAssistant()
     const run1 = msg1.agent!
@@ -4899,7 +4978,6 @@ async function testRoadmapAgentRun() {
     script.plans.push(plan)
     script.workers.push('Nothing here touches the roadmap.')
     script.synths.push('SUMMARY\nNothing to record on the roadmap.')
-    freshAgentConversation()
     await sendUserMessage('Tidy up the report code', [])
     const msg2 = lastAssistant()
     const r2 = msg2.agent?.roadmap
@@ -4913,7 +4991,6 @@ async function testRoadmapAgentRun() {
 
     /* ---- run 3: a greeting next to the roadmap ---- */
     script.plans.push(JSON.stringify({ mode: 'answer', answer: 'Hi there!' }))
-    freshAgentConversation()
     await sendUserMessage('hello', [])
     const msg3 = lastAssistant()
     check('a greeting answered directly, with the roadmap untouched, gets no report', msg3.status === 'complete' && msg3.agent?.steps.length === 0 && msg3.agent?.roadmap === undefined)
@@ -4921,7 +4998,6 @@ async function testRoadmapAgentRun() {
     /* ---- run 4: a direct answer that edits the roadmap ---- */
     const v3 = v2.replace('- [~] Roadmap timeline', '- [x] Roadmap timeline')
     script.plans.push(JSON.stringify({ mode: 'answer', answer: `Marked the timeline step done.\n\n${fileBlock('markdown:ROADMAP.md', v3)}` }))
-    freshAgentConversation()
     await sendUserMessage('Mark the roadmap timeline step as done', [])
     const msg4 = lastAssistant()
     const r4 = msg4.agent?.roadmap
@@ -5035,7 +5111,7 @@ async function testRoadmapFromGitHub() {
     check('a roadmap already in the workspace is not pulled again', (await sync('anything else')).length === 0)
     useFs.getState().deleteFile('ROADMAP.md')
     check('a roadmap the user deleted locally is not silently pulled back', (await sync('anything')).length === 0 && !useFs.getState().exists('ROADMAP.md'))
-    useFs.setState({ deletedRemotes: {} })
+    useFs.getState().clearWorkspace()
     check('an empty prompt still pulls the roadmap when it is missing', (await sync('')).length === 1)
 
     // The whole loop: an agent run picks the repo roadmap up itself, plans with it and updates it.
@@ -6151,6 +6227,53 @@ async function testAgentQuestionRounds() {
   })
 }
 
+async function testMemoryFeature() {
+  console.log('cross-conversation Memory:')
+  useMemory.getState().clearAll()
+  const note = 'The deployment check often fails when a local preview host is rejected; allow the current preview origin first.'
+  const entry = useMemory.getState().addMemory(note)
+  check('adding a note stores a persistent, user-editable memory entry', Boolean(entry) && (localStorage.getItem('slade.memory.v1') ?? '').includes(note))
+  if (!entry) return
+
+  const conversationId = useChat.getState().currentId
+  const conversation = useChat.getState().conversations[conversationId]
+  const memoryMessage = conversation?.messages.slice().reverse().find((message) => message.attachmentIds?.includes(`art_memory_${entry.id}`))
+  const artifact = useArtifacts.getState().byId[`art_memory_${entry.id}`]
+  check('adding memory appends a Memory Added artifact message to the active chat', memoryMessage?.content === 'Memory Added' && Boolean(artifact))
+  const artifactInitial = useArtifacts.getInitialState() as unknown as { byId: Record<string, Artifact> }
+  const settingsInitial = useSettings.getInitialState() as unknown as { s: typeof DEFAULT_SETTINGS }
+  const originalArtifacts = artifactInitial.byId
+  const originalSettings = settingsInitial.s
+  try {
+    // React SSR reads Zustand's initial snapshot, so seed the same state the
+    // browser would see after this memory was added and the card was expanded.
+    artifactInitial.byId = { ...originalArtifacts, [artifact.id]: artifact }
+    settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: true } }
+    const collapsedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
+    check('the Memory Added card is labeled and offers an expandable preview', collapsedCard.includes('Memory Added') && collapsedCard.includes('Expand preview') && !collapsedCard.includes(note))
+    settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: false } }
+    const expandedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
+    check('the expanded Memory Added preview contains the saved note', expandedCard.includes('Memory Added') && expandedCard.includes(note) && expandedCard.includes('Collapse preview'))
+  } finally {
+    artifactInitial.byId = originalArtifacts
+    settingsInitial.s = originalSettings
+  }
+
+  const context = await prepareAgentWorkspaceContext('test', conversationId, false)
+  check('saved notes enter model context even when Local Files is disabled', context.includes('SLADE MEMORY') && context.includes(note) && !context.includes('LOCAL FILE SYSTEM WORKSPACE'))
+  check('memory context safely delimits user-provided notes as JSON data', formatMemoryContext().includes(JSON.stringify([note], null, 2)))
+  check('Memory entries are included in a valid settings backup bundle', exportBundleSchema.safeParse({ app: 'slade', version: 1, exportedAt: Date.now(), memories: [entry] }).success)
+
+  const edited = 'The deployment check often fails on preview-origin allowlists; add the Arena preview host to the dev server allowlist.'
+  check('memory entries can be edited and future context uses the edited text', useMemory.getState().updateMemory(entry.id, edited) && (await prepareAgentWorkspaceContext('test', conversationId, false)).includes(edited))
+  useUI.getState().openMemory('Remember this detail')
+  check('Memory UI opens with an optional message prefill', useUI.getState().memoryOpen && useUI.getState().memoryPrefill === 'Remember this detail')
+  useUI.getState().closeMemory()
+  useMemory.getState().deleteMemory(entry.id)
+  check('deleting a memory removes it from future model context', useMemory.getState().entries.length === 0 && (await prepareAgentWorkspaceContext('test', conversationId, false)) === '')
+  useMemory.getState().clearAll()
+}
+
 async function main() {
   testClassify()
   testErrorDetail()
@@ -6204,6 +6327,7 @@ async function main() {
   testProviderManagement()
   testLocalFsPrimitives()
   testLocalFsStore()
+  testConversationScopedFs()
   await testAgentLocalFsIntegration()
   await testRoadmapAgentRun()
   testRoadmapPersistence()
@@ -6219,6 +6343,7 @@ async function main() {
   testConversationMenuUi()
   testChatPanelUi()
   testChatPanelRenders()
+  await testMemoryFeature()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
 }

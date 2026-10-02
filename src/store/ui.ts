@@ -17,6 +17,9 @@ export interface UIState {
   githubTab: 'repos' | 'files' | 'search'
   /** Local file system workspace drawer. */
   filesOpen: boolean
+  /** Cross-conversation Memory manager dialog and an optional message to remember. */
+  memoryOpen: boolean
+  memoryPrefill: string
   publishSource: PublishSource | null
   online: boolean
   toasts: Toast[]
@@ -50,6 +53,8 @@ export interface UIState {
   openFiles: () => void
   closeFiles: () => void
   toggleFiles: () => void
+  openMemory: (prefill?: string) => void
+  closeMemory: () => void
   openPublish: (source: PublishSource) => void
   closePublish: () => void
   setOnline: (v: boolean) => void
@@ -73,6 +78,8 @@ export const useUI = create<UIState>((set) => ({
   githubOpen: false,
   githubTab: 'repos',
   filesOpen: false,
+  memoryOpen: false,
+  memoryPrefill: '',
   publishSource: null,
   online: typeof navigator !== 'undefined' ? navigator.onLine : true,
   toasts: [],
@@ -109,6 +116,8 @@ export const useUI = create<UIState>((set) => ({
   openFiles: () => set({ filesOpen: true, githubOpen: false }),
   closeFiles: () => set({ filesOpen: false }),
   toggleFiles: () => set((st) => ({ filesOpen: !st.filesOpen, githubOpen: st.filesOpen ? st.githubOpen : false })),
+  openMemory: (memoryPrefill = '') => set({ memoryOpen: true, memoryPrefill }),
+  closeMemory: () => set({ memoryOpen: false, memoryPrefill: '' }),
   openPublish: (source) => set({ publishSource: source }),
   closePublish: () => set({ publishSource: null }),
   setOnline: (v) => set({ online: v }),
