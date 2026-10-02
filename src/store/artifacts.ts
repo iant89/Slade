@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Artifact } from '../types'
+import { MEMORY_ARTIFACT_PREFIX } from '../types'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 import { PERSIST_LIMIT_BYTES, classifyArtifact, mimeFromName } from '../lib/mime'
 import { base64ToBytes } from '../lib/github'
@@ -28,10 +29,22 @@ function dataURLToBlob(dataURL: string): Blob | null {
   }
 }
 
+/**
+ * Fill in what a card saved by an older build could not know. The Memory Added
+ * card predates its `minimal` flag, so its stored record is recognized by its
+ * id and upgraded in place — otherwise a note saved last week would still draw
+ * the subtitle and the footer actions.
+ */
+export function normalizeArtifact(a: Artifact): Artifact {
+  if (!a.minimal && a.id.startsWith(MEMORY_ARTIFACT_PREFIX)) return { ...a, minimal: true }
+  return a
+}
+
 function hydrate(): Record<string, Artifact> {
   const stored = loadRaw<Artifact[]>(KEYS.artifacts, [])
   const byId: Record<string, Artifact> = {}
-  for (const a of stored) {
+  for (const raw of stored) {
+    const a = normalizeArtifact(raw)
     if (a.dataURL) {
       const blob = dataURLToBlob(a.dataURL)
       if (blob) a.blobUrl = URL.createObjectURL(blob)
@@ -63,7 +76,9 @@ export const useArtifacts = create<ArtifactsState>((set, get) => {
 
   return {
     byId: hydrate(),
-    add: (a) => {
+    add: (raw) => {
+      // An imported backup carries the same records the loader does.
+      const a = normalizeArtifact(raw)
       set((st) => ({ byId: { ...st.byId, [a.id]: a } }))
       persistSoon()
     },

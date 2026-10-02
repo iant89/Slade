@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { Artifact, MemoryEntry, Message } from '../types'
-import { MAX_MEMORY_ENTRY_CHARS } from '../types'
+import { MAX_MEMORY_ENTRY_CHARS, MEMORY_ARTIFACT_PREFIX } from '../types'
 import { uid } from '../lib/id'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 import { memoryEntrySchema } from '../lib/schemas'
@@ -25,9 +25,14 @@ function persistMemories(entries: MemoryEntry[]): void {
   saveJSON(KEYS.memory, entries)
 }
 
+/**
+ * The card that marks a saved note. It reads as one line — "Memory Added" —
+ * and carries no footer actions: the note's own text is behind its expand
+ * toggle, and nothing else about it is publishable, sendable or downloadable.
+ */
 function createMemoryArtifact(entry: MemoryEntry): Artifact {
   return {
-    id: `art_memory_${entry.id}`,
+    id: `${MEMORY_ARTIFACT_PREFIX}${entry.id}`,
     name: 'Memory Added',
     mime: 'text/markdown',
     size: new TextEncoder().encode(entry.content).byteLength,
@@ -35,6 +40,7 @@ function createMemoryArtifact(entry: MemoryEntry): Artifact {
     createdAt: entry.createdAt,
     provenance: { origin: 'user' },
     text: entry.content,
+    minimal: true,
   }
 }
 

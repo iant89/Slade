@@ -58,7 +58,6 @@ function artifactMatchesFile(artifact: Artifact, file: FsFile): boolean {
 export function ArtifactCard({ artifactId, conversationId }: { artifactId: string; conversationId?: string }) {
   const artifact = useArtifacts((s) => s.byId[artifactId])
   const prefs = useSettings((s) => s.s.artifacts)
-  const toast = useUI((s) => s.toast)
   const activeConversationId = useFs((s) => s.currentConversationId)
   const workspaceId = conversationId ?? activeConversationId
   const targetFsPath = artifact ? (artifact.localPath ?? tryNormalizeFsPath(artifact.name) ?? undefined) : undefined
@@ -89,6 +88,9 @@ export function ArtifactCard({ artifactId, conversationId }: { artifactId: strin
   const src = artifactUrl(artifact)
   const expandedByDefault = kind === 'image' && prefs.autoExpandImages && !prefs.collapsedByDefault
   const isCollapsed = collapsed && !expandedByDefault
+  // A minimal card is its name and nothing else: the subtitle (kind, size,
+  // provenance, origin) and the footer actions are off, the preview stays.
+  const minimal = Boolean(artifact.minimal)
 
   const provenance =
     artifact.provenance.origin === 'user' ? 'From you' : `From ${artifact.provenance.modelLabel}`
@@ -109,27 +111,29 @@ export function ArtifactCard({ artifactId, conversationId }: { artifactId: strin
           <span className="artifact-name" title={artifact.name}>
             {artifact.name}
           </span>
-          <span className="artifact-sub">
-            {kindLabel(kind)} · {formatBytes(artifact.size)} · {provenance}
-            {artifact.localPath ? (
-              <>
-                {' '}
-                ·{' '}
-                <span className="artifact-remote" title={`Local file system path: ${artifact.localPath}`}>
-                  {artifact.localPath}
-                </span>
-              </>
-            ) : null}
-            {artifact.remote ? (
-              <>
-                {' '}
-                ·{' '}
-                <span className="artifact-remote" title={`${artifact.remote.path} @ ${artifact.remote.ref}`}>
-                  {artifact.remote.repo}@{artifact.remote.ref}
-                </span>
-              </>
-            ) : null}
-          </span>
+          {minimal ? null : (
+            <span className="artifact-sub">
+              {kindLabel(kind)} · {formatBytes(artifact.size)} · {provenance}
+              {artifact.localPath ? (
+                <>
+                  {' '}
+                  ·{' '}
+                  <span className="artifact-remote" title={`Local file system path: ${artifact.localPath}`}>
+                    {artifact.localPath}
+                  </span>
+                </>
+              ) : null}
+              {artifact.remote ? (
+                <>
+                  {' '}
+                  ·{' '}
+                  <span className="artifact-remote" title={`${artifact.remote.path} @ ${artifact.remote.ref}`}>
+                    {artifact.remote.repo}@{artifact.remote.ref}
+                  </span>
+                </>
+              ) : null}
+            </span>
+          )}
         </span>
         <div className="artifact-head-actions">
           {kind !== 'audio' && (
@@ -153,82 +157,112 @@ export function ArtifactCard({ artifactId, conversationId }: { artifactId: strin
         </div>
       )}
 
-      <figcaption className="artifact-foot">
-        <button
-          className="artifact-action"
-          onClick={async () => {
-            const ok = await copyText(`${artifact.name} (${artifact.mime}, ${formatBytes(artifact.size)})`)
-            toast({ kind: ok ? 'success' : 'error', title: ok ? 'Reference copied' : 'Copy failed' })
-          }}
-          type="button"
-        >
-          Copy reference
-        </button>
-        <button
-          className="artifact-action"
-          onClick={() => {
-            useUI
-              .getState()
-              .toast({ kind: 'info', title: `${artifact.name} attached`, detail: 'It will be sent with your next message as context.' })
-            window.dispatchEvent(new CustomEvent('slade:attach-artifact', { detail: artifact.id }))
-          }}
-          type="button"
-          title="Send this artifact back to the model as context"
-        >
-          <IconPin size={12} /> Send back to model
-        </button>
-        <button
-          className="artifact-action"
-          onClick={() => useUI.getState().openPublish({ kind: 'artifact', artifactId: artifact.id })}
-          title="Publish this artifact to GitHub as a gist, a commit or an issue"
-          type="button"
-        >
-          <IconGithub size={12} /> Publish to GitHub
-        </button>
-        <button
-          className="artifact-action"
-          onClick={() => {
-            if (storedInFs && targetFsPath) {
-              useFs.getState().selectFile(targetFsPath, workspaceId)
-              useUI.getState().openFiles()
-              return
-            }
-            const saved = useFs.getState().saveArtifact(artifact, targetFsPath, workspaceId)
-            if (saved) {
-              useFs.getState().selectFile(saved.path, workspaceId)
-              useUI.getState().openFiles()
-              toast({ kind: 'success', title: `Saved ${saved.path} to Local Files` })
-            } else {
-              toast({ kind: 'error', title: `Couldn't save ${artifact.name} to Local Files` })
-            }
-          }}
-          title={
-            storedInFs
-              ? `Open ${targetFsPath ?? artifact.name} in the local file system`
-              : `Save ${artifact.name} into the local file system`
-          }
-          type="button"
-        >
-          <IconFolder size={12} /> {storedInFs ? 'Open in Files' : 'Save to Files'}
-        </button>
-        {artifact.remote ? (
-          <a
-            className="artifact-action"
-            href={artifact.remote.url}
-            target="_blank"
-            rel="noreferrer"
-            title={`Open ${artifact.remote.path} on GitHub`}
-          >
-            <IconExternal size={12} /> GitHub
-          </a>
-        ) : null}
-        {src && (
-          <button className="artifact-action" onClick={() => downloadUrl(src, artifact.name)} type="button">
-            <IconDownload size={12} /> Download
-          </button>
-        )}
-      </figcaption>
+      {minimal ? null : (
+        <ArtifactActions
+          artifact={artifact}
+          src={src}
+          storedInFs={storedInFs}
+          targetFsPath={targetFsPath}
+          workspaceId={workspaceId}
+        />
+      )}
     </motion.figure>
+  )
+}
+
+/**
+ * The row of actions under a card: copy a reference, send it back to the model,
+ * publish it to GitHub, save it into Local Files, open it on GitHub, download
+ * it. A minimal card (the Memory Added card) leaves all of them out.
+ */
+function ArtifactActions({
+  artifact,
+  src,
+  storedInFs,
+  targetFsPath,
+  workspaceId,
+}: {
+  artifact: Artifact
+  src?: string
+  storedInFs: boolean
+  targetFsPath?: string
+  workspaceId: string
+}) {
+  const toast = useUI((s) => s.toast)
+  return (
+    <figcaption className="artifact-foot">
+      <button
+        className="artifact-action"
+        onClick={async () => {
+          const ok = await copyText(`${artifact.name} (${artifact.mime}, ${formatBytes(artifact.size)})`)
+          toast({ kind: ok ? 'success' : 'error', title: ok ? 'Reference copied' : 'Copy failed' })
+        }}
+        type="button"
+      >
+        Copy reference
+      </button>
+      <button
+        className="artifact-action"
+        onClick={() => {
+          toast({ kind: 'info', title: `${artifact.name} attached`, detail: 'It will be sent with your next message as context.' })
+          window.dispatchEvent(new CustomEvent('slade:attach-artifact', { detail: artifact.id }))
+        }}
+        type="button"
+        title="Send this artifact back to the model as context"
+      >
+        <IconPin size={12} /> Send back to model
+      </button>
+      <button
+        className="artifact-action"
+        onClick={() => useUI.getState().openPublish({ kind: 'artifact', artifactId: artifact.id })}
+        title="Publish this artifact to GitHub as a gist, a commit or an issue"
+        type="button"
+      >
+        <IconGithub size={12} /> Publish to GitHub
+      </button>
+      <button
+        className="artifact-action"
+        onClick={() => {
+          if (storedInFs && targetFsPath) {
+            useFs.getState().selectFile(targetFsPath, workspaceId)
+            useUI.getState().openFiles()
+            return
+          }
+          const saved = useFs.getState().saveArtifact(artifact, targetFsPath, workspaceId)
+          if (saved) {
+            useFs.getState().selectFile(saved.path, workspaceId)
+            useUI.getState().openFiles()
+            toast({ kind: 'success', title: `Saved ${saved.path} to Local Files` })
+          } else {
+            toast({ kind: 'error', title: `Couldn't save ${artifact.name} to Local Files` })
+          }
+        }}
+        title={
+          storedInFs
+            ? `Open ${targetFsPath ?? artifact.name} in the local file system`
+            : `Save ${artifact.name} into the local file system`
+        }
+        type="button"
+      >
+        <IconFolder size={12} /> {storedInFs ? 'Open in Files' : 'Save to Files'}
+      </button>
+      {artifact.remote ? (
+        <a
+          className="artifact-action"
+          href={artifact.remote.url}
+          target="_blank"
+          rel="noreferrer"
+          title={`Open ${artifact.remote.path} on GitHub`}
+        >
+          <IconExternal size={12} /> GitHub
+        </a>
+      ) : null}
+      {src && (
+        <button className="artifact-action" onClick={() => downloadUrl(src, artifact.name)} type="button">
+          <IconDownload size={12} /> Download
+        </button>
+      )}
+    </figcaption>
   )
 }
 

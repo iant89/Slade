@@ -6,9 +6,11 @@
  * api.github.com calls: signing in through the OAuth relay, signing out, and
  * cloning a repo's files into the local file system.
  *
- * The ledger is runtime-only. When a call belongs to an agent run, a snapshot
- * is also written into that message's chronological timeline so its card stays
- * in place after the live ledger is gone.
+ * Every card is inserted into the conversation as a message of its own, so it
+ * scrolls and is saved with the chat. When a call belongs to an agent run, the
+ * card goes into that run's message timeline instead, in the order it happened
+ * between the run's thoughts. The ledger itself is runtime-only; it keeps the
+ * session's running/idle state and folds identical repeats of the same call.
  */
 
 import { create } from 'zustand'
@@ -19,8 +21,9 @@ import {
   githubActionTitle,
   type GitHubActionKind,
 } from '../lib/github-actions'
-import type { GitHubActionArtifact, GitHubActionStatus } from '../types'
+import type { GitHubActionArtifact, GitHubActionStatus, Message } from '../types'
 import { onGitHubCall } from '../lib/github'
+import { useChat } from './chat'
 import { appendAgentGitHubCard, updateAgentGitHubCard } from './agentTimeline'
 
 export type { GitHubActionStatus } from '../types'
@@ -28,11 +31,14 @@ export type { GitHubActionStatus } from '../types'
 export interface GitHubActionEntry extends GitHubActionArtifact {
   /**
    * The agent run that caused this call, when one was running. Scoped cards are
-   * written into that run's message timeline; unscoped cards are session-level
-   * GitHub actions shown in the chat panel.
+   * written into that run's message timeline; unscoped cards become chat
+   * messages of their own.
    */
   scope?: string
+  /** For a scoped card: the assistant message whose timeline holds it. */
   messageId?: string
+  /** For a standalone card: the chat message that *is* the card. */
+  cardMessageId?: string
 }
 
 /** A GitHub action that did not go through the REST client (OAuth, sign-out, clone). */
@@ -121,6 +127,48 @@ function scopedEntry(input: GitHubActionInput, status: GitHubActionStatus): GitH
   return toEntry(input, status, scope, scope ? state.scopeMessages[scope] : undefined)
 }
 
+/**
+ * Insert one standalone card as a message of its own — the same way a saved
+ * memory note announces itself — and return that message's id, so the card can
+ * be kept current while its call is in flight.
+ */
+function insertCardMessage(card: GitHubActionArtifact): string {
+  const chat = useChat.getState()
+  const message: Message = {
+    id: uid('msg'),
+    role: 'assistant',
+    conversationId: chat.ensureConversation(),
+    // The card is the message; there is no text of its own, so the turn adds
+    // nothing to what a model is sent on the next send.
+    content: '',
+    createdAt: card.at,
+    status: 'complete',
+    githubAction: card,
+  }
+  chat.appendMessage(message)
+  return message.id
+}
+
+function updateCardMessage(messageId: string, card: GitHubActionArtifact): void {
+  useChat.getState().updateMessage(messageId, { githubAction: card })
+}
+
+/** Send a card to wherever it lives: a run's timeline, or its own message. */
+function placeCard(entry: GitHubActionEntry): void {
+  const card = toArtifact(entry)
+  if (entry.cardMessageId) updateCardMessage(entry.cardMessageId, card)
+  else if (entry.messageId) updateAgentGitHubCard(entry.messageId, card)
+}
+
+function insertCard(entry: GitHubActionEntry): GitHubActionEntry {
+  const card = toArtifact(entry)
+  if (entry.scope) {
+    if (entry.messageId) appendAgentGitHubCard(entry.messageId, card)
+    return entry
+  }
+  return { ...entry, cardMessageId: insertCardMessage(card) }
+}
+
 export const useGitHubActivity = create<GitHubActivityState>((set) => ({
   entries: [],
   total: 0,
@@ -128,16 +176,14 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
   scopeMessages: {},
 
   log: (input) => {
-    const entry = scopedEntry(input, 'running')
+    const entry = insertCard(scopedEntry(input, 'running'))
     set((st) => ({ entries: [...st.entries, entry], total: st.total + 1 }))
-    if (entry.messageId) appendAgentGitHubCard(entry.messageId, toArtifact(entry))
     return entry.id
   },
 
   logDone: (input) => {
-    const entry = scopedEntry(input, 'done')
+    const entry = insertCard(scopedEntry(input, 'done'))
     set((st) => ({ entries: [...st.entries, entry], total: st.total + 1 }))
-    if (entry.messageId) appendAgentGitHubCard(entry.messageId, toArtifact(entry))
     return entry.id
   },
 
@@ -160,7 +206,7 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
       })
       return updated ? { entries } : st
     })
-    if (updated?.messageId) updateAgentGitHubCard(updated.messageId, toArtifact(updated))
+    if (updated) placeCard(updated)
   },
 
   // There is deliberately no remove/clear operation: action cards are part of
@@ -230,7 +276,7 @@ onGitHubCall((event) => {
         entries: state.entries.map((entry) => (entry.id === newest.id ? updated : entry)),
         total: state.total + 1,
       }))
-      if (updated.messageId) updateAgentGitHubCard(updated.messageId, toArtifact(updated))
+      placeCard(updated)
       absorbed.set(event.callId, newest.id)
       return
     }

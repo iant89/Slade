@@ -6,8 +6,8 @@
  * system. This module turns any one of those requests into a short, honest
  * sentence — a title ("GitHub Action: Get File Contents") and the thing it
  * touched ("/src/app.tsx") — so the UI can show one compact, non-expandable
- * card per API call instead of a raw request log. A long streak of those cards
- * folds into a single expandable group; the rule for that lives at the bottom.
+ * card per API call instead of a raw request log. Each call is inserted into
+ * the conversation as its own message (see `store/githubActivity.ts`).
  *
  * Pure on purpose: no stores, no React, no fetch. `src/lib/github.ts` hands the
  * raw request over, and everything derived here comes from the method, the URL
@@ -15,7 +15,7 @@
  * (file contents, base64 blobs) ever reaches the UI.
  */
 
-import type { GitHubActionArtifact, GitHubActionInfo, GitHubActionKind, GitHubActionStatus } from '../types'
+import type { GitHubActionInfo, GitHubActionKind } from '../types'
 export type { GitHubActionInfo, GitHubActionKind } from '../types'
 
 /** Short action phrases; `GITHUB_ACTION_TITLE` is what follows "GitHub Action:". */
@@ -292,111 +292,4 @@ export function describeGitHubCall(call: GitHubCallLike): GitHubActionInfo {
  */
 export function githubActionSignature(info: Pick<GitHubActionInfo, 'kind' | 'subject' | 'repo' | 'ref'>): string {
   return [info.kind, info.repo ?? '', info.ref ?? '', info.subject].join('|')
-}
-
-/* ------------------------------------------------------------------ */
-/* Grouping a streak of cards                                          */
-/* ------------------------------------------------------------------ */
-
-/**
- * A streak of cards longer than this folds into one expandable group. One or
- * two calls read fine as rows of their own; a longer streak (an agent pulling a
- * dozen files) would bury the conversation, so it sits behind a single header.
- */
-export const GITHUB_GROUP_THRESHOLD = 2
-
-/** One slot of a folded list: a lone item, or the cards of a streak that was folded. */
-export type ActionFold<T, A extends T = T> =
-  | { kind: 'item'; item: T }
-  | { kind: 'group'; id: string; items: A[] }
-
-/**
- * Fold every streak of consecutive action items longer than
- * `GITHUB_GROUP_THRESHOLD` into one `group`, keeping the order. Anything that
- * is not an action (a thought, a message) ends the streak, so a group never
- * swallows or reorders what sits between two calls. Shorter streaks come back
- * as plain `item`s, untouched.
- *
- * A group's id comes from its first card, so it stays put while the streak
- * grows and the open/closed state of a live group survives every new call.
- */
-export function foldActionRuns<T, A extends T & { id: string }>(
-  items: readonly T[],
-  isAction: (item: T) => item is A,
-): ActionFold<T, A>[] {
-  const out: ActionFold<T, A>[] = []
-  let streak: A[] = []
-
-  const flush = () => {
-    if (streak.length > GITHUB_GROUP_THRESHOLD) {
-      out.push({ kind: 'group', id: `gh-group:${streak[0]!.id}`, items: streak })
-    } else {
-      for (const item of streak) out.push({ kind: 'item', item })
-    }
-    streak = []
-  }
-
-  for (const item of items) {
-    if (isAction(item)) {
-      streak.push(item)
-    } else {
-      flush()
-      out.push({ kind: 'item', item })
-    }
-  }
-  flush()
-  return out
-}
-
-/** What a collapsed group says about the cards inside it. */
-export interface GitHubGroupSummary {
-  /** How many cards the group holds. */
-  total: number
-  running: number
-  failed: number
-  cancelled: number
-  /**
-   * The one status the header wears. Live work wins, because that is what the
-   * reader is waiting on; then a failure, which must never hide behind a closed
-   * group; then a cancellation; otherwise the whole streak is done.
-   */
-  status: GitHubActionStatus
-  /** The newest call still in flight, so a closed group can say what it is doing. */
-  current?: GitHubActionArtifact
-  /** "Get File Contents ×4 · Created Commit" — each kind of action, in the order it first appeared. */
-  breakdown: string
-}
-
-export function summarizeGitHubGroup(cards: readonly GitHubActionArtifact[]): GitHubGroupSummary {
-  let running = 0
-  let failed = 0
-  let cancelled = 0
-  let current: GitHubActionArtifact | undefined
-  const kinds = new Map<GitHubActionKind, { phrase: string; cards: number }>()
-
-  for (const card of cards) {
-    if (card.status === 'running') {
-      running += 1
-      current = card
-    } else if (card.status === 'error') {
-      failed += 1
-    } else if (card.status === 'cancelled') {
-      cancelled += 1
-    }
-    const seen = kinds.get(card.kind)
-    if (seen) seen.cards += 1
-    else kinds.set(card.kind, { phrase: githubActionPhrase(card.title), cards: 1 })
-  }
-
-  return {
-    total: cards.length,
-    running,
-    failed,
-    cancelled,
-    status: running ? 'running' : failed ? 'error' : cancelled ? 'cancelled' : 'done',
-    current,
-    breakdown: [...kinds.values()]
-      .map(({ phrase, cards: n }) => (n > 1 ? `${phrase} ×${n}` : phrase))
-      .join(' · '),
-  }
 }

@@ -87,7 +87,7 @@ import {
   titleFromText,
 } from '../src/lib/github-payload'
 import { executePublish, PublishPreflightError, publishErrorMessage } from '../src/lib/github-publish'
-import { artifactFromRemote, useArtifacts } from '../src/store/artifacts'
+import { artifactFromRemote, normalizeArtifact, useArtifacts } from '../src/store/artifacts'
 import { useGitHub } from '../src/store/github'
 import { useFs, fsArtifactId, hydrateWorkspaces, type FsWorkspace } from '../src/store/fs'
 import { formatMemoryContext, useMemory } from '../src/store/memory'
@@ -146,11 +146,9 @@ import {
 import type {
   AgentQuestion,
   AgentRun,
-  AgentTimelineItem,
   Artifact,
   Conversation,
   FsFile,
-  GitHubActionArtifact,
   Message,
   RoadmapReport,
 } from '../src/types'
@@ -159,30 +157,16 @@ import type {
 import { renderToString } from 'react-dom/server.browser'
 import { createElement } from 'react'
 import { GitHubPanel } from '../src/components/github/GitHubPanel'
-import {
-  GitHubActionCard,
-  GitHubActionGroup,
-  GitHubActionGroupItem,
-  GitHubActionItem,
-} from '../src/components/github/GitHubActivity'
-import { buildPanelItems, sessionGitHubActions, usePanelHasContent } from '../src/components/chat/panel'
+import { GitHubActionCard } from '../src/components/github/GitHubActivity'
 import { ChatView } from '../src/components/chat/ChatView'
 import {
   useGitHubActivity,
   logGitHubAction,
   logGitHubActionDone,
   finishGitHubAction,
-  type GitHubActionEntry,
 } from '../src/store/githubActivity'
 import { appendAgentThought } from '../src/store/agentTimeline'
-import {
-  describeGitHubCall,
-  foldActionRuns,
-  githubActionTitle,
-  GITHUB_ACTION_TITLE,
-  GITHUB_GROUP_THRESHOLD,
-  summarizeGitHubGroup,
-} from '../src/lib/github-actions'
+import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
@@ -225,12 +209,12 @@ const lastAssistant = () => {
 }
 
 /**
- * The standalone GitHub actions a panel holds, oldest first — whether each one
- * is a row of its own or folded into a group. Assertions about "is this call in
- * the panel" go through here, so they cannot go vacuous when a streak folds.
+ * The GitHub action cards a conversation holds as messages, oldest first. A
+ * standalone call is inserted as a message of its own, so "is this call in the
+ * chat?" is a question about messages.
  */
-const panelActions = (items: ReturnType<typeof buildPanelItems>): GitHubActionEntry[] =>
-  items.flatMap((item) => (item.kind === 'github' ? [item.entry] : item.kind === 'github-group' ? item.entries : []))
+const cardMessages = (conversationId = useChat.getState().currentId): Message[] =>
+  (useChat.getState().conversations[conversationId]?.messages ?? []).filter((m) => Boolean(m.githubAction))
 
 function testClassify() {
   console.log('classifyHttp:')
@@ -2449,10 +2433,9 @@ async function testGitHubStoreAgainstFakeApi() {
  */
 /**
  * GitHub action cards: one card per API call, titled and sub-titled, never
- * expandable. Covers the vocabulary, the live log (through a fake
- * api.github.com), the non-REST actions, and the rendered card. (A streak of
- * more than two cards folds into an expandable group — see
- * `testGitHubActionGroups`.)
+ * expandable and never buttoned. Covers the vocabulary, the live log (through a
+ * fake api.github.com), the non-REST actions, the card rendered inside a
+ * conversation message, and the cards a run keeps in its own timeline.
  */
 async function testGitHubActionCards() {
   console.log('github action cards:')
@@ -2556,6 +2539,9 @@ async function testGitHubActionCards() {
   const observed: string[] = []
   const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
   useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
+  // Earlier suites may already have logged cards into the open conversation;
+  // only the cards this test's own calls append are compared with the ledger.
+  const cardsBefore = cardMessages().length
   try {
     useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo', 'gist'], repos: [], tree: undefined, preview: undefined })
 
@@ -2647,101 +2633,88 @@ async function testGitHubActionCards() {
     check('the card shows the github mark', card.includes('viewBox="0 0 16 16"'), card.slice(0, 160))
     check('the card title is the action', card.includes('GitHub Action: Get File Contents'), card.slice(0, 240))
     check('the card sub-title is the path', card.includes('gh-action-subject') && card.includes('/src/lib/util.ts'), card.slice(0, 320))
-    check('the card says which repo it touched', card.includes('octo/demo@main'), card.slice(0, 320))
-    check('the card is NOT expandable', !card.includes('aria-expanded') && !card.includes('<button') && !card.includes('chevron'), card.slice(0, 240))
+    check('the card is NOT expandable', !card.includes('aria-expanded') && !card.includes('chevron'), card.slice(0, 240))
+    check('the card carries no buttons', !card.includes('<button'), card.slice(0, 240))
     check('the card is a div, not a disclosure', card.includes('gh-action-card status-done'), card.slice(0, 120))
+    check(
+      'the card leaves the repo, the timing and the status glyph out of its markup',
+      !card.includes('octo/demo@main') && !card.includes('gh-action-side') && !card.includes('gh-action-status') && !card.includes('gh-action-time'),
+      card.slice(0, 320),
+    )
+    check(
+      '…but keeps that detail in its tooltip',
+      card.includes('octo/demo @ main') && card.includes('title="'),
+      card.slice(0, 360),
+    )
     check('the activity store has no per-card removal operation', !('remove' in useGitHubActivity.getState()))
 
-    const activityInit = useGitHubActivity.getInitialState() as unknown as {
-      entries: ReturnType<typeof useGitHubActivity.getState>['entries']
-    }
-    // SSR renders from the store's *initial* snapshot, so every render below
-    // has to be seeded with the ledger as it stands right now.
-    const seed = () => {
-      activityInit.entries = useGitHubActivity.getState().entries
-    }
-    /* ---- the panel: standalone calls are appended to the chat log ---- */
+    /* ---- every standalone call is inserted as a message of its own ---- */
+    const convId = useChat.getState().currentId
+    const cards = () => cardMessages(convId)
+    const standalone = useGitHubActivity.getState().entries.filter((e) => !e.scope)
+    const cardIds = () => new Set(cards().map((m) => m.githubAction!.id))
+    check(
+      'each standalone call has a card message of its own',
+      standalone.length > 0 && standalone.every((e) => cardIds().has(e.id)),
+      `${cards().length} cards for ${standalone.length} calls`,
+    )
+    check(
+      '…in the order the calls happened, one card per call',
+      cards().slice(cardsBefore).map((m) => m.githubAction!.id).join() === standalone.map((e) => e.id).join(),
+      JSON.stringify(cards().slice(cardsBefore).map((m) => m.githubAction!.subject)),
+    )
+    check(
+      'the card messages carry no text, no model and no status of their own to run',
+      cards().every((m) => m.role === 'assistant' && m.content === '' && m.status === 'complete' && !m.modelId),
+      JSON.stringify(cards().slice(0, 2).map((m) => [m.role, m.content, m.status])),
+    )
+    check(
+      'the cards are part of the conversation, not a runtime list',
+      useChat.getState().conversations[convId]?.messages.some((m) => m.githubAction?.id === entry!.id) === true,
+    )
+    const persistedCard = conversationSchema.safeParse(useChat.getState().conversations[convId])
+    check(
+      'a card message passes conversation persistence validation',
+      persistedCard.success && Boolean(persistedCard.data.messages.some((m) => m.githubAction?.id === entry!.id)),
+      persistedCard.success ? 'ok' : String(persistedCard.error),
+    )
 
-    const now = Date.now()
-    const userMessage: Message = {
-      id: 'msg_panel_user',
-      role: 'user',
-      conversationId: 'conv_panel',
-      content: 'ship it',
-      createdAt: now,
-      status: 'complete',
-    }
-    const assistantMessage: Message = {
-      id: 'msg_panel_assistant',
-      role: 'assistant',
-      conversationId: 'conv_panel',
-      content: 'done',
-      createdAt: now,
-      status: 'complete',
-    }
-    const sessionEntries = () => sessionGitHubActions(useGitHubActivity.getState().entries)
-    const panelItems = () => buildPanelItems([userMessage, assistantMessage], sessionEntries())
+    /* ---- the card message renders as one line, with no buttons ---- */
+    const cardMessage = cards().find((m) => m.githubAction?.id === entry!.id)!
+    const messageHtml = renderToString(createElement(MessageBubble, { message: cardMessage })).replace(/<!-- -->/g, '')
+    check(
+      'a standalone card renders as its own message',
+      messageHtml.includes('msg-gh-action') && messageHtml.includes('gh-action-card'),
+      messageHtml.slice(0, 220),
+    )
+    check(
+      '…carrying the action and what it touched',
+      messageHtml.includes('GitHub Action: Get File Contents') && messageHtml.includes('/src/lib/util.ts'),
+      messageHtml.slice(0, 320),
+    )
+    check(
+      '…with no author line, no copy row and no buttons at all',
+      !messageHtml.includes('msg-head') && !messageHtml.includes('msg-foot') && !messageHtml.includes('<button'),
+      messageHtml.slice(0, 320),
+    )
 
-    const before = panelItems()
-    check(
-      'the panel keeps the conversation in order',
-      before[0]?.id === 'msg_panel_user' && before[1]?.id === 'msg_panel_assistant',
-      JSON.stringify(before.map((i) => i.id)),
-    )
-    check(
-      'every action is appended after the last message, never between messages',
-      before.length > 2 && before.slice(2).every((i) => i.kind === 'github' || i.kind === 'github-group'),
-      JSON.stringify(before.map((i) => i.kind)),
-    )
-    check(
-      'this many standalone calls are folded into one group, not a screenful of rows',
-      sessionEntries().length > 2 && before.length === 3 && before[2]?.kind === 'github-group',
-      JSON.stringify(before.map((i) => i.kind)),
-    )
-    check(
-      'the appended cards keep the order the calls happened in',
-      JSON.stringify(panelActions(before).map((e) => e.id)) === JSON.stringify(sessionEntries().map((e) => e.id)),
-      JSON.stringify(panelActions(before).map((e) => e.id)),
-    )
-    const lastItem = before[before.length - 1]!
-    const newestEntry = panelActions(before).at(-1)
-    check(
-      'the newest call is the last thing in the panel',
-      newestEntry?.id === sessionEntries()[sessionEntries().length - 1]?.id && lastItem.kind === 'github-group',
-      JSON.stringify(newestEntry),
-    )
-    seed()
-    const itemHtml = renderToString(createElement(GitHubActionItem, { entry: newestEntry! })).replace(/<!-- -->/g, '')
-    check('a panel card renders as a row in the message column', itemHtml.includes('gh-panel-item') && itemHtml.includes('gh-action-card'), itemHtml.slice(0, 200))
-    check('…carrying the action and what it touched', itemHtml.includes('GitHub Action:') && itemHtml.includes('<code>'), itemHtml.slice(0, 300))
-    check('…and it is still not a button', !itemHtml.includes('<button'), itemHtml.slice(0, 200))
-
-    // In flight: the card is in the panel as it happens, with its status glyph.
+    /* ---- a call in flight, and the card it leaves behind ---- */
     const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
-    const livePanel = panelItems()
-    const liveItem = livePanel[livePanel.length - 1]!
-    const liveEntry = panelActions(livePanel).at(-1)
-    seed()
-    const liveHtml = renderToString(createElement(GitHubActionItem, { entry: liveEntry! })).replace(/<!-- -->/g, '')
+    const liveCard = cards().find((m) => m.githubAction?.id === liveId)
     check(
-      'a call in flight is appended to the panel, marked running',
-      liveEntry?.id === liveId && liveHtml.includes('/live.ts') && liveHtml.includes('gh-action-card status-running'),
-      liveHtml.slice(0, 300),
-    )
-    // …and the folded row it joined says so, without being opened.
-    const liveGroupHtml = renderToString(
-      createElement(GitHubActionGroupItem, { entries: liveItem.kind === 'github-group' ? liveItem.entries : [] }),
-    ).replace(/<!-- -->/g, '')
-    check(
-      'the folded panel row reports the call in flight on its closed header',
-      liveItem.kind === 'github-group' &&
-        liveGroupHtml.includes('gh-action-group status-running') &&
-        liveGroupHtml.includes('Get File Contents · /live.ts'),
-      liveGroupHtml.slice(0, 400),
+      'a call in flight is in the chat straight away',
+      liveCard?.githubAction?.status === 'running' && liveCard.githubAction.subject === '/live.ts',
+      JSON.stringify(liveCard?.githubAction),
     )
     finishGitHubAction(liveId, { status: 'done' })
+    check(
+      '…and the card it left behind is closed out',
+      cards().find((m) => m.githubAction?.id === liveId)?.githubAction?.status === 'done',
+      JSON.stringify(cards().find((m) => m.githubAction?.id === liveId)?.githubAction),
+    )
 
     /* ---- run calls split the thought timeline in-place and are never removable ---- */
+    const now = Date.now()
     const runMessage: Message = {
       id: 'msg_run_timeline',
       role: 'assistant',
@@ -2767,8 +2740,8 @@ async function testGitHubActionCards() {
     appendAgentThought(runMessage.id, 'synthesis', 'mock-pro', 'Thought after the GitHub call.')
     const runCards = useGitHubActivity.getState().entries.filter((e) => e.id === inRun)
     check('a card logged during a run carries its scope and message', runCards[0]?.scope === 'scope_run_1' && runCards[0]?.messageId === runMessage.id, JSON.stringify(runCards))
+    check('a run card is not a message of its own', !cardMessages().some((m) => m.githubAction?.id === inRun))
 
-    seed()
     const timelineHtml = renderToString(
       createElement(MessageBubble, {
         message: useChat.getState().conversations.conv_run_timeline!.messages[0]!,
@@ -2784,9 +2757,9 @@ async function testGitHubActionCards() {
     )
     check('the in-message action card has no remove or dismiss button', !timelineHtml.slice(actionCard).split('</div>')[0]?.includes('<button'), timelineHtml.slice(actionCard, actionCard + 240))
     check(
-      'a run action is not repeated as a panel row',
-      !panelActions(panelItems()).some((entry) => entry.id === inRun),
-      JSON.stringify(panelActions(panelItems()).map((entry) => entry.id)),
+      'a run whose calls are all cards never folds them behind a header',
+      !timelineHtml.includes('gh-action-group') && timelineHtml.split('gh-action-card').length - 1 === 1,
+      timelineHtml.slice(actionCard - 40, actionCard + 300),
     )
 
     finishGitHubAction(inRun, { status: 'done' })
@@ -2806,9 +2779,7 @@ async function testGitHubActionCards() {
     )
     useGitHubActivity.getState().exitScope('scope_run_1')
     check('the scope stack is released again', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
-    check('a scope with no calls does not create a chat row', !panelActions(panelItems()).some((entry) => entry.id === 'scope_nothing'))
-
-    check('the card title escapes nothing weird', card.includes('octo/demo@main'))
+    check('a scope with no calls logs nothing', !useGitHubActivity.getState().entries.some((entry) => entry.scope === 'scope_nothing'))
   } finally {
     off()
     globalThis.fetch = realFetch
@@ -2819,342 +2790,6 @@ async function testGitHubActionCards() {
     useFs.getState().deleteFile('docs/roadmap.md')
     useFs.getState().deleteFile('src/lib/util.ts')
   }
-}
-
-/**
- * Folding a streak of GitHub action cards into one expandable group: the pure
- * rule (more than two in a row), the group's header and body, and the two
- * places it shows up — an agent run's message and the chat panel.
- */
-function testGitHubActionGroups() {
-  console.log('github action groups (more than two cards in a row):')
-
-  const card = (id: string, patch: Partial<GitHubActionArtifact> = {}): GitHubActionArtifact => ({
-    id,
-    kind: 'get-file',
-    title: 'GitHub Action: Get File Contents',
-    subject: `/src/${id}.ts`,
-    repo: 'octo/demo',
-    ref: 'main',
-    status: 'done',
-    at: 1,
-    count: 1,
-    ...patch,
-  })
-  const render = (el: Parameters<typeof renderToString>[0]) => renderToString(el).replace(/<!-- -->/g, '')
-  const count = (haystack: string, needle: string) => haystack.split(needle).length - 1
-
-  /* ---- the rule ---- */
-
-  type Item = AgentTimelineItem
-  type GhItem = Extract<Item, { type: 'github' }>
-  const gh = (id: string, patch?: Partial<GitHubActionArtifact>): Item => ({ id, type: 'github', card: card(id, patch) })
-  const th = (id: string, text = `thinking about ${id}`, streaming?: boolean): Item => ({
-    id,
-    type: 'thought',
-    sourceId: 'synthesis',
-    modelId: 'mock-pro',
-    text,
-    streaming,
-  })
-  const isGh = (item: Item): item is GhItem => item.type === 'github'
-  const shape = (items: Item[]) =>
-    foldActionRuns(items, isGh)
-      .map((f) => (f.kind === 'group' ? `[${f.items.map((i) => i.id).join(',')}]` : f.item.id))
-      .join(' ')
-  const ids = (...names: string[]) => names.map((n) => gh(n))
-
-  check('the threshold is "more than two"', GITHUB_GROUP_THRESHOLD === 2, String(GITHUB_GROUP_THRESHOLD))
-  check('nothing to fold is nothing', foldActionRuns([] as Item[], isGh).length === 0)
-  check('one card stays a row of its own', shape(ids('a')) === 'a', shape(ids('a')))
-  check('two cards stay two rows — not "more than two"', shape(ids('a', 'b')) === 'a b', shape(ids('a', 'b')))
-  check('three cards fold into one group', shape(ids('a', 'b', 'c')) === '[a,b,c]', shape(ids('a', 'b', 'c')))
-  check(
-    'a longer streak is still one group, in call order',
-    shape(ids('a', 'b', 'c', 'd', 'e', 'f', 'g')) === '[a,b,c,d,e,f,g]',
-    shape(ids('a', 'b', 'c', 'd', 'e', 'f', 'g')),
-  )
-  check(
-    'a thought ends a streak: two, a thought, two stays as rows',
-    shape([gh('a'), gh('b'), th('t1'), gh('c'), gh('d')]) === 'a b t1 c d',
-    shape([gh('a'), gh('b'), th('t1'), gh('c'), gh('d')]),
-  )
-  const busy = [th('t0'), gh('a'), gh('b'), gh('c'), th('t1'), gh('d'), gh('e'), th('t2'), gh('f'), gh('g'), gh('h'), gh('i')]
-  check(
-    'each streak is judged on its own, and the thoughts keep their place',
-    shape(busy) === 't0 [a,b,c] t1 d e t2 [f,g,h,i]',
-    shape(busy),
-  )
-  check('a streak at the very start of a timeline folds too', shape([...ids('a', 'b', 'c'), th('t1')]) === '[a,b,c] t1')
-  const grown = (n: number) => foldActionRuns(ids(...'abcdefgh'.slice(0, n).split('')), isGh)[0]!
-  check(
-    'a group keeps its id while the streak grows, so an open group stays open',
-    grown(3).kind === 'group' && grown(8).kind === 'group' && (grown(3) as { id: string }).id === (grown(8) as { id: string }).id,
-    JSON.stringify([grown(3), grown(8)].map((f) => (f.kind === 'group' ? f.id : f.item.id))),
-  )
-  check(
-    '…and that id is its own, never a card id',
-    !'abcdefgh'.split('').includes((grown(3) as { id: string }).id) && (grown(3) as { id: string }).id.startsWith('gh-group:'),
-  )
-  check(
-    'folding does not touch or drop a card',
-    JSON.stringify(foldActionRuns(ids('a', 'b', 'c'), isGh).flatMap((f) => (f.kind === 'group' ? f.items : [f.item]))) ===
-      JSON.stringify(ids('a', 'b', 'c')),
-  )
-
-  /* ---- what a folded group says about its cards ---- */
-
-  const mixed = summarizeGitHubGroup([
-    card('a'),
-    card('b'),
-    card('c', { kind: 'create-commit', title: 'GitHub Action: Created Commit', subject: 'Apply changes' }),
-  ])
-  check('a group counts its cards', mixed.total === 3 && mixed.running === 0 && mixed.failed === 0, JSON.stringify(mixed))
-  check(
-    '…and names each kind of action once, in the order it first appeared, with how many',
-    mixed.breakdown === 'Get File Contents ×2 · Created Commit',
-    mixed.breakdown,
-  )
-  check('a streak that all went well is done', mixed.status === 'done' && mixed.current === undefined, mixed.status)
-  const failed = summarizeGitHubGroup([card('a'), card('b', { status: 'error', error: 'Not found' }), card('c')])
-  check('one failure makes the group failed, and is counted', failed.status === 'error' && failed.failed === 1, JSON.stringify(failed))
-  const live = summarizeGitHubGroup([card('a'), card('b', { status: 'error' }), card('c', { status: 'running' })])
-  check(
-    'live work outranks a failure for the header status — the failure is still counted',
-    live.status === 'running' && live.failed === 1 && live.running === 1 && live.current?.id === 'c',
-    JSON.stringify(live),
-  )
-  const twoLive = summarizeGitHubGroup([card('a', { status: 'running' }), card('b', { status: 'running' }), card('c')])
-  check('with several calls in flight, the newest one is the one named', twoLive.running === 2 && twoLive.current?.id === 'b', twoLive.current?.id)
-  const stopped = summarizeGitHubGroup([card('a'), card('b', { status: 'cancelled' }), card('c')])
-  check('a cancelled call marks the group cancelled', stopped.status === 'cancelled' && stopped.cancelled === 1, JSON.stringify(stopped))
-  check(
-    'a failure outranks a cancellation',
-    summarizeGitHubGroup([card('a', { status: 'cancelled' }), card('b', { status: 'error' }), card('c')]).status === 'error',
-  )
-  check(
-    'titles come from the cards themselves, so a card saved under an older vocabulary still reads',
-    summarizeGitHubGroup([card('a', { title: 'GitHub Action: Old Phrase' }), card('b'), card('c')]).breakdown.startsWith('Old Phrase'),
-  )
-
-  /* ---- the group itself ---- */
-
-  const three = [card('a'), card('b'), card('c')]
-  const closed = render(createElement(GitHubActionGroup, { cards: three }))
-  check(
-    'a group renders folded',
-    closed.includes('gh-action-group status-done') && closed.includes('aria-expanded="false"'),
-    closed.slice(0, 240),
-  )
-  check(
-    '…as one button — a disclosure, not a card',
-    count(closed, '<button') === 1 && closed.includes('type="button"') && closed.includes('gh-action-group-head'),
-    closed.slice(0, 240),
-  )
-  check(
-    '…named GitHub Actions, with how many cards it holds',
-    closed.includes('>GitHub Actions<') && closed.includes('3<span class="sr-only"> actions</span>'),
-    closed.slice(0, 700),
-  )
-  check('…saying what is inside without opening it', closed.includes('Get File Contents ×3'), closed.slice(0, 900))
-  check(
-    '…and rendering none of the cards while it is folded',
-    !closed.includes('gh-action-card') && !closed.includes('/src/a.ts') && !closed.includes('gh-action-group-body'),
-    closed.slice(0, 900),
-  )
-  check('…with nothing for aria-controls to point at', !closed.includes('aria-controls'))
-  check('…and the chevron points right', closed.includes('m9 18 6-6-6-6') && !closed.includes('m6 9 6 6 6-6'))
-  check('…and the done glyph, not a spinner', closed.includes('aria-label="done"') && !closed.includes('M12 3v3.5M12 17.5V21'))
-
-  const open = render(createElement(GitHubActionGroup, { cards: three, defaultOpen: true }))
-  const at = (needle: string) => open.indexOf(needle)
-  check('opened, it says so', open.includes('aria-expanded="true"') && open.includes('gh-action-group-body'), open.slice(0, 300))
-  const controls = /aria-controls="([^"]+)"/.exec(open)?.[1]
-  check('…and the button points at the body it opens', Boolean(controls) && open.includes(`id="${controls}"`), String(controls))
-  check('…with every card as its own row, in order', count(open, 'gh-action-card status-done') === 3 && at('/src/a.ts') < at('/src/b.ts') && at('/src/b.ts') < at('/src/c.ts'), open.slice(0, 900))
-  check('…the rows come after the header', at('gh-action-group-head') < at('gh-action-group-body') && at('gh-action-group-body') < at('/src/a.ts'))
-  check('…and the chevron points down', open.includes('m6 9 6 6 6-6') && !open.includes('m9 18 6-6-6-6'))
-  check('…the cards inside are still plain rows: the header is the only button', count(open, '<button') === 1)
-  check(
-    '…and there is no remove or dismiss control anywhere in it',
-    !/aria-label="(remove|dismiss|delete|clear)/i.test(open) && !/(>|\s)(remove|dismiss|clear)(<|\s)/i.test(open),
-  )
-  check('a card on its own is still not expandable', !render(createElement(GitHubActionCard, { entry: card('solo') })).includes('aria-expanded'))
-
-  const failing = render(createElement(GitHubActionGroup, { cards: [card('a'), card('b', { status: 'error', error: 'Not found' }), card('c')] }))
-  check(
-    'a failure stays visible on a folded group — it cannot hide behind it',
-    failing.includes('gh-action-group status-error') && failing.includes('1 failed') && failing.includes('aria-label="failed"') && !failing.includes('gh-action-card'),
-    failing.slice(0, 700),
-  )
-  const running = render(
-    createElement(GitHubActionGroup, { cards: [card('a'), card('b'), card('c', { status: 'running', subject: '/src/live.ts' })] }),
-  )
-  check(
-    'a folded group says what is running right now',
-    running.includes('gh-action-group status-running') &&
-      running.includes('aria-label="in progress"') &&
-      running.includes('Get File Contents · /src/live.ts'),
-    running.slice(0, 800),
-  )
-  check('…with the spinner glyph', running.includes('M12 3v3.5M12 17.5V21'))
-  const stoppedHtml = render(createElement(GitHubActionGroup, { cards: [card('a'), card('b', { status: 'cancelled' }), card('c')] }))
-  check(
-    'a cancelled streak says so',
-    stoppedHtml.includes('gh-action-group status-cancelled') && stoppedHtml.includes('1 cancelled') && stoppedHtml.includes('aria-label="cancelled"'),
-    stoppedHtml.slice(0, 600),
-  )
-
-  // Opened, the cards keep their own story — the header only summarises it.
-  const openMixed = render(
-    createElement(GitHubActionGroup, {
-      defaultOpen: true,
-      cards: [
-        card('a'),
-        card('b', { status: 'error', error: 'Not found on GitHub' }),
-        card('c', { status: 'cancelled' }),
-        card('d', { status: 'running' }),
-      ],
-    }),
-  )
-  check(
-    'opened, every card keeps its own status — the failure its reason, the cancelled one its label',
-    count(openMixed, 'class="gh-action-card ') === 4 &&
-      openMixed.includes('gh-action-card status-done') &&
-      openMixed.includes('gh-action-card status-error') &&
-      openMixed.includes('Not found on GitHub') &&
-      openMixed.includes('gh-action-card status-cancelled') &&
-      openMixed.includes('gh-action-card status-running'),
-    openMixed.slice(0, 900),
-  )
-
-  /* ---- inside an agent run's message ---- */
-
-  const settingsInit = useSettings.getInitialState() as unknown as { s: Settings }
-  const origSettings = settingsInit.s
-  const runWith = (timeline: Item[], status: Message['status'] = 'complete'): Message => ({
-    id: 'msg_group_run',
-    role: 'assistant',
-    conversationId: 'conv_group_run',
-    content: 'Done.',
-    createdAt: 1,
-    status,
-    modelId: 'mock-pro',
-    agent: { phase: 'complete', goal: 'inspect the repo', orchestratorModelId: 'mock-pro', steps: [], startedAt: 1, timeline },
-  })
-  const bubble = (timeline: Item[], status?: Message['status']) =>
-    render(createElement(MessageBubble, { message: runWith(timeline, status) }))
-  const groups = (html: string) => count(html, 'class="gh-action-group ')
-  const rows = (html: string) => count(html, 'class="gh-action-card ')
-
-  try {
-    const folded = bubble([th('t1'), ...ids('a', 'b', 'c', 'd'), th('t2')])
-    check('four calls in a run render as one group, not four rows', groups(folded) === 1 && rows(folded) === 0, `${groups(folded)} groups, ${rows(folded)} rows`)
-    const firstThought = folded.indexOf('thought-block')
-    const groupAt = folded.indexOf('gh-action-group ')
-    const lastThought = folded.lastIndexOf('thought-block')
-    check('…between the two thoughts it sat between', firstThought >= 0 && firstThought < groupAt && groupAt < lastThought, folded.slice(Math.max(0, firstThought - 60), lastThought + 80))
-    check('…holding all four', folded.includes('>4<span class="sr-only"> actions</span>'), folded.slice(groupAt, groupAt + 700))
-    check('…and folded, so none of the four is on screen yet', !folded.includes('/src/a.ts') && !folded.includes('/src/d.ts'))
-
-    const pair = bubble([th('t1'), ...ids('a', 'b'), th('t2')])
-    check('two calls in a run stay two rows', groups(pair) === 0 && rows(pair) === 2, `${groups(pair)} groups, ${rows(pair)} rows`)
-    const split = bubble([...ids('a', 'b'), th('t1'), ...ids('c', 'd')])
-    check('two, a thought, then two stay four rows — each streak is judged alone', groups(split) === 0 && rows(split) === 4, `${groups(split)} groups, ${rows(split)} rows`)
-    const mixedRun = bubble([th('t0'), ...ids('a', 'b', 'c'), th('t1'), ...ids('d', 'e')])
-    check('a folded streak and a short one sit side by side', groups(mixedRun) === 1 && rows(mixedRun) === 2, `${groups(mixedRun)} groups, ${rows(mixedRun)} rows`)
-
-    // A thought that draws nothing does not separate its neighbours.
-    settingsInit.s = {
-      ...origSettings,
-      models: origSettings.models.map((m) => (m.id === 'mock-pro' ? { ...m, showThoughts: false } : m)),
-    }
-    const hidden = bubble([gh('a'), th('t1'), gh('b'), th('t2'), gh('c')])
-    check(
-      'thoughts switched off draw nothing, so the calls around them group together',
-      groups(hidden) === 1 && rows(hidden) === 0 && !hidden.includes('thought-block'),
-      `${groups(hidden)} groups, ${rows(hidden)} rows`,
-    )
-    settingsInit.s = origSettings
-    const shown = bubble([gh('a'), th('t1'), gh('b'), th('t2'), gh('c')])
-    check('…but with thoughts on, they still split the streak', groups(shown) === 0 && rows(shown) === 3 && count(shown, 'thought-block') >= 2, `${groups(shown)} groups, ${rows(shown)} rows`)
-    const blank = bubble([gh('a'), th('t1', '   '), gh('b'), gh('c')])
-    check('a thought with no text draws nothing either, so the calls still group', groups(blank) === 1 && rows(blank) === 0, `${groups(blank)} groups, ${rows(blank)} rows`)
-    const live = bubble([...ids('a', 'b'), th('t1', 'still thinking', true), ...ids('c', 'd')], 'streaming')
-    check('a thought that is streaming does split them', groups(live) === 0 && rows(live) === 4, `${groups(live)} groups, ${rows(live)} rows`)
-    // The streaming flag alone is enough to draw: the card shows "thinking…" before any text arrives.
-    const starting = bubble([...ids('a', 'b'), th('t1', '', true), ...ids('c', 'd')], 'streaming')
-    check(
-      '…even before it has any text — it already draws "thinking…"',
-      groups(starting) === 0 && rows(starting) === 4 && starting.includes('thinking…'),
-      `${groups(starting)} groups, ${rows(starting)} rows`,
-    )
-    // A stale flag on a message that is no longer streaming draws nothing, so it separates nothing.
-    const stale = bubble([...ids('a', 'b'), th('t1', '', true), ...ids('c', 'd')], 'complete')
-    check(
-      'a leftover streaming flag on a finished run draws nothing, so it does not split them',
-      groups(stale) === 1 && rows(stale) === 0 && !stale.includes('thought-block'),
-      `${groups(stale)} groups, ${rows(stale)} rows`,
-    )
-    const runningRun = bubble([...ids('a', 'b'), gh('c', { status: 'running', subject: '/src/now.ts' })], 'streaming')
-    check(
-      'a run in progress shows what its folded calls are doing',
-      groups(runningRun) === 1 && runningRun.includes('gh-action-group status-running') && runningRun.includes('/src/now.ts'),
-      runningRun.slice(runningRun.indexOf('gh-action-group'), runningRun.indexOf('gh-action-group') + 600),
-    )
-  } finally {
-    settingsInit.s = origSettings
-  }
-
-  /* ---- in the chat panel ---- */
-
-  const entry = (id: string, patch?: Partial<GitHubActionArtifact>): GitHubActionEntry => ({ ...card(id, patch) })
-  const msg = (id: string, role: Message['role']): Message => ({
-    id,
-    role,
-    conversationId: 'conv_group_panel',
-    content: id,
-    createdAt: 1,
-    status: 'complete',
-  })
-  const messages = [msg('m1', 'user'), msg('m2', 'assistant')]
-  const kinds = (items: ReturnType<typeof buildPanelItems>) => items.map((i) => i.kind).join()
-
-  check('no standalone calls: just the conversation', kinds(buildPanelItems(messages, [])) === 'message,message')
-  check(
-    'two standalone calls stay two rows after the messages',
-    kinds(buildPanelItems(messages, [entry('a'), entry('b')])) === 'message,message,github,github',
-    kinds(buildPanelItems(messages, [entry('a'), entry('b')])),
-  )
-  const folded3 = buildPanelItems(messages, [entry('a'), entry('b'), entry('c')])
-  check('three fold into a single row after the messages', kinds(folded3) === 'message,message,github-group', kinds(folded3))
-  const groupItem = folded3[2]
-  check(
-    '…holding the calls oldest first',
-    groupItem?.kind === 'github-group' && groupItem.entries.map((e) => e.id).join() === 'a,b,c',
-    JSON.stringify(groupItem),
-  )
-  check(
-    '…and the conversation above it is untouched',
-    folded3[0]?.id === 'm1' && folded3[1]?.id === 'm2',
-    JSON.stringify(folded3.map((i) => i.id)),
-  )
-  const grown4 = buildPanelItems(messages, [entry('a'), entry('b'), entry('c'), entry('d')])
-  check(
-    'the group row keeps its id as calls arrive, so it is the same row in the list (and stays open)',
-    grown4.length === 3 && grown4[2]?.id === groupItem?.id && grown4[2]?.kind === 'github-group',
-    JSON.stringify(grown4.map((i) => i.id)),
-  )
-  const failedRows = buildPanelItems(messages, [entry('a'), entry('b', { status: 'error' }), entry('c')])
-  check('a failed call is still in the folded row, counted on its header', panelActions(failedRows).some((e) => e.status === 'error'))
-
-  const rowHtml = render(createElement(GitHubActionGroupItem, { entries: groupItem?.kind === 'github-group' ? groupItem.entries : [] }))
-  check(
-    'a folded panel row sits in the message column like a card row does',
-    rowHtml.includes('class="gh-panel-item"') && rowHtml.includes('gh-action-group status-done') && rowHtml.includes('aria-expanded="false"'),
-    rowHtml.slice(0, 300),
-  )
-  check('…and holds the three calls behind its header', rowHtml.includes('>3<span class="sr-only"> actions</span>') && !rowHtml.includes('gh-action-card'), rowHtml.slice(0, 700))
 }
 
 function testGitHubUiRenders() {
@@ -4237,11 +3872,9 @@ async function testGitLocalFsReadWriteAcross() {
       inlineRun.slice(Math.max(0, inlineRun.indexOf('agent-activity-timeline')), inlineRun.indexOf('agent-activity-timeline') + 500),
     )
     check(
-      'the chat panel does not repeat run-scoped cards',
-      !panelActions(buildPanelItems([], sessionGitHubActions(useGitHubActivity.getState().entries))).some(
-        (entry) => entry.subject === '/src/math.ts',
-      ),
-      JSON.stringify(sessionGitHubActions(useGitHubActivity.getState().entries).map((entry) => `${entry.title} ${entry.subject}`)),
+      'a run-scoped card is not repeated as a message of its own',
+      !cardMessages().some((m) => m.githubAction?.subject === '/src/math.ts'),
+      JSON.stringify(cardMessages().map((m) => `${m.githubAction?.title} ${m.githubAction?.subject}`)),
     )
   } finally {
     globalThis.fetch = realFetch
@@ -5624,51 +5257,40 @@ function testConversationMenuUi() {
 /**
  * The chat panel's own predicate: does the panel hold anything? The composer
  * asks it to choose between the centered greeting and a docked composer above a
- * panel that already has content, so a session whose only content is GitHub
- * cards still gets a panel that scrolls instead of a floating log.
+ * panel that already has content — and a standalone GitHub action is a message
+ * of its own, so it counts exactly like any other message does.
  */
 function testChatPanelUi() {
   console.log('chat panel (composer layout gate):')
   const html = renderWithLiveState
-  const Probe = () => createElement('span', { 'data-panel': usePanelHasContent() ? 'content' : 'empty' })
-  const actInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
-  const card = (id: string, scope?: string) => ({
-    id,
-    kind: 'get-file',
-    title: 'GitHub Action: Get File Contents',
-    subject: '/src/a.ts',
-    status: 'done',
-    at: 1,
-    count: 1,
-    scope,
-  })
-  const seedLog = (entries: unknown[]) => {
-    actInit.entries = entries
+  // The same predicate the composer uses: does the open conversation hold a message?
+  const Probe = () => {
+    const hasMessages = useChat((s) => Boolean(s.currentId && s.conversations[s.currentId]?.messages.length))
+    return createElement('span', { 'data-panel': hasMessages ? 'content' : 'empty' })
   }
+  const actionMessage = (id: string): Message => ({
+    id: `msg_${id}`,
+    role: 'assistant',
+    conversationId: 'a',
+    content: '',
+    createdAt: 1,
+    status: 'complete',
+    githubAction: { id, kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
+  })
   const label = () => html(createElement(Probe))
 
   seedConversations([], '')
-  seedLog([])
-  check('nothing stored: no conversation and no cards → the panel is empty', label() === '<span data-panel="empty"></span>', label())
+  check('nothing stored: no conversation, nothing to dock under', label() === '<span data-panel="empty"></span>', label())
 
   seedConversations([convFixture('a', 'Alpha', 10)], 'a')
   check('a conversation with no messages yet is still empty', label() === '<span data-panel="empty"></span>', label())
 
   seedConversations([convFixture('a', 'Alpha', 10, { messages: [chatMessage('a', 'user', 'hi')] })], 'a')
-  seedLog([])
   check('a message makes the panel content, so the composer docks', label() === '<span data-panel="content"></span>', label())
 
-  seedConversations([convFixture('a', 'Alpha', 10)], 'a')
-  seedLog([card('gha_1')])
-  check('a GitHub action alone makes the panel content (composer docks under it)', label() === '<span data-panel="content"></span>', label())
+  seedConversations([convFixture('a', 'Alpha', 10, { messages: [actionMessage('gha_1')] })], 'a')
+  check('a GitHub action card alone is content too — it is a message now', label() === '<span data-panel="content"></span>', label())
 
-  seedLog([card('gha_2', 'scope_run_1')])
-  check('a run’s card does not: it belongs to its run’s answer, not the panel', label() === '<span data-panel="empty"></span>', label())
-
-  seedLog([card('gha_3', 'scope_run_1'), card('gha_4')])
-  check('one session card among a run’s calls is enough', label() === '<span data-panel="content"></span>', label())
-
-  seedLog([])
   useChat.getState().clearAllConversations()
 }
 
@@ -5685,8 +5307,6 @@ function testChatPanelUi() {
 function testChatPanelRenders() {
   console.log('chat panel render (virtuoso component registry):')
   const html = renderWithLiveState
-  const actInit = useGitHubActivity.getInitialState() as unknown as { entries: unknown[] }
-  const actState = { ...useGitHubActivity.getState() } as unknown as { entries: unknown[] }
 
   /** Render the panel, reporting a crash as a failed check instead of a stack. */
   const renderPanel = (): { markup: string; error: string } => {
@@ -5714,7 +5334,6 @@ function testChatPanelRenders() {
     const shell = (markup: string) => markup.includes('virtuoso-scroller') && markup.includes('virtuoso-item-list')
 
     seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled] })], 'conv_render')
-    actInit.entries = []
     const idle = renderPanel()
     check('a settled conversation renders the list without crashing', idle.error === '', idle.error)
     check('…and the panel mounts as content, not the empty state', shell(idle.markup) && !idle.markup.includes('chat-view empty'), idle.markup.slice(0, 160))
@@ -5724,38 +5343,26 @@ function testChatPanelRenders() {
     check('a pending message renders the list without crashing', waiting.error === '', waiting.error)
     check('…and the typing footer is mounted', waiting.markup.includes('pending-footer'), waiting.markup.slice(0, 160))
 
-    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled] })], 'conv_render')
-    actInit.entries = [
-      { id: 'gha_render', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
-    ]
+    // A standalone GitHub action is an ordinary message now: it keeps the list
+    // mounted without crashing and needs no separate rendering path.
+    const actionCard: Message = {
+      ...settled,
+      id: 'msg_panel_action',
+      content: '',
+      githubAction: { id: 'gha_render', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
+    }
+    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled, actionCard] })], 'conv_render')
     const withAction = renderPanel()
-    check('an appended action renders the list without crashing', withAction.error === '', withAction.error)
-    check('…and the action keeps the panel docked rather than empty', shell(withAction.markup) && !withAction.markup.includes('chat-view empty'), withAction.markup.slice(0, 160))
+    check('a conversation whose log holds a GitHub action card renders without crashing', withAction.error === '', withAction.error)
+    check('…and the card keeps the panel docked rather than empty', shell(withAction.markup) && !withAction.markup.includes('chat-view empty'), withAction.markup.slice(0, 160))
     check('…and it drops the pending footer again', !withAction.markup.includes('pending-footer'))
 
-    // More than two standalone actions fold into one group row at the end of the list.
-    seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled] })], 'conv_render')
-    actInit.entries = ['a', 'b', 'c', 'd'].map((n) => ({
-      id: `gha_render_${n}`,
-      kind: 'get-file',
-      title: 'GitHub Action: Get File Contents',
-      subject: `/src/${n}.ts`,
-      status: 'done',
-      at: 1,
-      count: 1,
-    }))
-    const folded = renderPanel()
-    check('a streak of actions folded into a group renders the list without crashing', folded.error === '', folded.error)
-    check('…and still keeps the panel docked rather than empty', shell(folded.markup) && !folded.markup.includes('chat-view empty'), folded.markup.slice(0, 160))
-
     seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled, pending] })], 'conv_render')
-    actInit.entries = []
     const both = renderPanel()
     check('a pending message after a settled one still renders both', both.error === '', both.error)
     check('…with the footer back for the pending turn', both.markup.includes('pending-footer'), both.markup.slice(0, 160))
   } finally {
     useChat.getState().clearAllConversations()
-    Object.assign(actInit, actState)
   }
 }
 
@@ -6251,9 +5858,43 @@ async function testMemoryFeature() {
     settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: true } }
     const collapsedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
     check('the Memory Added card is labeled and offers an expandable preview', collapsedCard.includes('Memory Added') && collapsedCard.includes('Expand preview') && !collapsedCard.includes(note))
+    check(
+      'the Memory Added card says only "Memory Added" — no subtitle line',
+      !collapsedCard.includes('artifact-sub') && !collapsedCard.includes('From you') && !collapsedCard.includes('Document ·'),
+      collapsedCard.slice(0, 300),
+    )
+    check(
+      '…and carries no footer actions at all',
+      !collapsedCard.includes('artifact-foot') &&
+        !['Copy reference', 'Send back to model', 'Publish to GitHub', 'Save to Files', 'Download'].some((label) => collapsedCard.includes(label)),
+      collapsedCard.slice(0, 300),
+    )
     settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: false } }
     const expandedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
     check('the expanded Memory Added preview contains the saved note', expandedCard.includes('Memory Added') && expandedCard.includes(note) && expandedCard.includes('Collapse preview'))
+    // An ordinary artifact card is untouched: subtitle and footer both stay.
+    const ordinary: Artifact = {
+      id: 'art_ordinary',
+      name: 'notes.md',
+      mime: 'text/markdown',
+      size: 12,
+      kind: 'doc',
+      createdAt: Date.now(),
+      provenance: { origin: 'model', modelId: 'mock-pro', modelLabel: 'Mock Pro' },
+      text: '# notes',
+    }
+    artifactInitial.byId = { ...originalArtifacts, [artifact.id]: artifact, [ordinary.id]: ordinary }
+    const ordinaryCard = renderToString(createElement(ArtifactCard, { artifactId: ordinary.id, conversationId })).replace(/<!-- -->/g, '')
+    check(
+      'an ordinary artifact card keeps its subtitle and its footer actions',
+      ordinaryCard.includes('artifact-sub') && ordinaryCard.includes('From Mock Pro') && ordinaryCard.includes('Copy reference') && ordinaryCard.includes('Send back to model'),
+      ordinaryCard.slice(0, 300),
+    )
+    check(
+      'a Memory Added card saved before the flag existed is upgraded on load',
+      normalizeArtifact({ ...artifact, minimal: undefined }).minimal === true &&
+        normalizeArtifact({ ...ordinary, id: 'art_other' }).minimal === undefined,
+    )
   } finally {
     artifactInitial.byId = originalArtifacts
     settingsInitial.s = originalSettings
@@ -6321,7 +5962,6 @@ async function main() {
   await testGitHubStoreAgainstFakeApi()
   testGitHubStore()
   await testGitHubActionCards()
-  testGitHubActionGroups()
   testGitHubUiRenders()
   testModelPicker()
   testProviderManagement()

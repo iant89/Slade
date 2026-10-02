@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useCurrentConversation, useChat } from '../../store/chat'
@@ -6,8 +6,6 @@ import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { currentAnnouncement, setAnnouncer } from '../../engine/send'
 import { MessageBubble, TypingIndicator } from './MessageBubble'
-import { GitHubActionGroupItem, GitHubActionItem } from '../github/GitHubActivity'
-import { buildPanelItems, useSessionGitHubActions } from './panel'
 import { IconArrowDown, IconStarburst, IconWifiOff } from '../icons'
 
 /**
@@ -21,17 +19,15 @@ import { IconArrowDown, IconStarburst, IconWifiOff } from '../icons'
 const NO_COMPONENT_OVERRIDES = {}
 
 /**
- * The chat panel: everything the conversation holds, in one scroll area above
- * the composer. Standalone GitHub Actions are appended to the end of the same
- * list (`./panel.ts`, more than two in a row folded into one dropdown); actions
- * from an agent run are already interleaved into that assistant message's
- * timeline. All of them scroll with the log.
+ * The chat panel: the conversation's messages, in one scroll area above the
+ * composer. GitHub actions are messages here too — a standalone call is its own
+ * one-line card message, and a run's calls are interleaved into that assistant
+ * message's timeline (see `../github/GitHubActivity`). Everything scrolls with
+ * the log.
  */
 export function ChatView() {
   const conv = useCurrentConversation()
   const messages = conv?.messages ?? []
-  const actions = useSessionGitHubActions()
-  const items = useMemo(() => buildPanelItems(messages, actions), [messages, actions])
   const autoScroll = useSettings((s) => s.s.defaults.autoScroll)
   const online = useUI((s) => s.online)
   const [atBottom, setAtBottom] = useState(true)
@@ -45,8 +41,8 @@ export function ChatView() {
 
   // The panel is a conversation's log, so it always needs a conversation to
   // belong to. A first run with nothing stored — or a view whose last chat was
-  // just deleted or archived — gets a fresh one, so messages and GitHub Actions
-  // always have a panel to be appended to.
+  // just deleted or archived — gets a fresh one, so messages and the GitHub
+  // action cards logged as messages always have a panel to be appended to.
   useEffect(() => {
     if (!conv) useChat.getState().ensureConversation()
   }, [conv])
@@ -59,8 +55,8 @@ export function ChatView() {
   }
 
   // A panel with nothing in it steps aside so the composer can center itself
-  // under the greeting; a panel holding GitHub Actions counts as content.
-  const empty = items.length === 0
+  // under the greeting.
+  const empty = messages.length === 0
 
   return (
     <div className={`chat-view${empty ? ' empty' : ''}`}>
@@ -73,19 +69,11 @@ export function ChatView() {
         <Virtuoso
           ref={virtuoso}
           className="msg-list"
-          data={items}
-          itemContent={(_, item) =>
-            item.kind === 'message' ? (
-              <MessageBubble message={item.message} />
-            ) : item.kind === 'github-group' ? (
-              <GitHubActionGroupItem entries={item.entries} />
-            ) : (
-              <GitHubActionItem entry={item.entry} />
-            )
-          }
-          computeItemKey={(_, item) => item.id}
+          data={messages}
+          itemContent={(_, message) => <MessageBubble message={message} />}
+          computeItemKey={(_, message) => message.id}
           followOutput={follow}
-          initialTopMostItemIndex={Math.max(0, items.length - 1)}
+          initialTopMostItemIndex={Math.max(0, messages.length - 1)}
           atBottomStateChange={setAtBottom}
           atBottomThreshold={80}
           increaseViewportBy={{ top: 300, bottom: 600 }}
@@ -99,7 +87,7 @@ export function ChatView() {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
-            onClick={() => virtuoso.current?.scrollToIndex({ index: items.length - 1, behavior: 'smooth' })}
+            onClick={() => virtuoso.current?.scrollToIndex({ index: messages.length - 1, behavior: 'smooth' })}
             type="button"
           >
             <IconArrowDown size={14} /> Jump to latest
