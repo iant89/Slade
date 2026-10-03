@@ -45,7 +45,7 @@ Four real failures were found and **fixed in this run** (details below); new smo
 | "Why?" expands to model + recorded reason without hover; collapse; keyboard; mobile | ✅ AUTO/CODE | native `<details>`/`<summary>` (Enter/Space/keyboard for free), reason `<ul>` rendered from `attempts`, focus-visible ring + wrap-friendly flex CSS for narrow widths. |
 | Mid-stream failure: partial preserved, divider at switch point, names destination + failure | ✅ AUTO | `handoffs[].atChar` drives segment splitting; new smoke assertions render the divider and check it names both sides. |
 | No failure → no note; every model fails → error state shows attempts/reasons, **not** claiming an answer was served | ⚠️ one issue fixed | **Found failure** — see Fix #1. A fully-failed turn rendered "Switched to Simulacron Lite after Simulacron Pro, Simulacron Lite failed" — naming the model that *failed last* as if it had answered. Fixed + pinned by three new smoke assertions. |
-| Survives refresh (attribution, reasons, divider positions) | ✅ CODE | `failedChain`/`handoffs`/`attempts` are persisted on the message and zod-validated on load (`schemas.ts` keeps `atChar`, `fromModelLabel`, per-attempt messages). |
+| Survives refresh (attribution, reasons, divider positions) | ✅ AUTO | New end-to-end smoke test runs the real failover scenarios, drains the debounced persist, re-reads raw `localStorage`, validates against `conversationSchema`, re-hydrates through `hydrateConversations`, and re-renders — asserting the attribution, the per-model reasons, the handoff's exact `atChar` offset, and the still-visible "Switched to …" note. |
 
 ## 5. Settings, GitHub, and files
 

@@ -384,6 +384,33 @@ async function testFailover() {
     '…naming both sides of the switch',
     midHtml.includes('handed off from Simulacron Pro') && midHtml.includes('→ Simulacron Lite'),
   )
+
+  // Checklist §Failover: "Refresh the conversation and verify the same attribution,
+  // reasons, and handoff positions remain visible." End-to-end through the real
+  // (debounced) storage path and the hydrate validation, then re-rendered.
+  await new Promise((r) => setTimeout(r, 500)) // the store persists on a 350ms debounce
+  const persistedConvs = JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]') as Conversation[]
+  const storedA1 = persistedConvs.flatMap((c) => c.messages).find((m) => m.id === a1.id)
+  const storedA4 = persistedConvs.flatMap((c) => c.messages).find((m) => m.id === a4.id)
+  check('storage validates against the conversation schema', z.array(conversationSchema).safeParse(persistedConvs).success)
+  check(
+    'a clean failover reaches storage with attribution, failedChain, and reasons',
+    storedA1?.modelId === 'mock-lite' &&
+      JSON.stringify(storedA1?.failedChain) === JSON.stringify(['mock-pro']) &&
+      Boolean(storedA1?.attempts?.length && storedA1.attempts[0]!.message.length > 0),
+    JSON.stringify({ modelId: storedA1?.modelId, failedChain: storedA1?.failedChain, attempts: storedA1?.attempts?.length }),
+  )
+  check(
+    'a mid-stream handoff keeps its exact character offset through storage',
+    typeof storedA4?.handoffs?.[0]?.atChar === 'number' &&
+      storedA4.handoffs[0]!.atChar === a4.handoffs?.[0]?.atChar &&
+      storedA4.handoffs[0]!.fromModelLabel === 'Simulacron Pro',
+    JSON.stringify({ stored: storedA4?.handoffs?.[0], live: a4.handoffs?.[0] }),
+  )
+  const hydrated = hydrateConversations(persistedConvs)
+  const reloadedA1 = hydrated.conversations[a1.conversationId]?.messages.find((m) => m.id === a1.id)
+  check('reload keeps the “Switched to …” note readable in the rehydrated chat',
+    Boolean(reloadedA1) && renderToString(createElement(MessageBubble, { message: reloadedA1! })).replace(/<!-- -->/g, '').includes('Switched to Simulacron Lite'))
 }
 
 /**
