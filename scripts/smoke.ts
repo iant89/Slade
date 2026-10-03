@@ -309,6 +309,7 @@ async function testFailover() {
   check('content non-empty', a1.content.length > 20)
   const failoverHtml = renderToString(createElement(MessageBubble, { message: a1 })).replace(/<!-- -->/g, '')
   check('successful failover names the destination inline', failoverHtml.includes('Switched to Simulacron Lite'))
+  check('the served reply keeps model attribution in the header', failoverHtml.includes('msg-model-name">Simulacron Lite'))
   check('failover explains why without relying on hover', failoverHtml.includes('<details') && failoverHtml.includes('Simulated:'))
   check(
     'health: pro is cooling down',
@@ -339,6 +340,13 @@ async function testFailover() {
     (a2.error ?? '').includes('Simulated: 429 rate limit reached') && !/unknown error/i.test(a2.error ?? ''),
     a2.error,
   )
+  // UI half of the checklist: a failed turn must show the attempts and reasons,
+  // and must NOT claim an answer was served (no "Switched to …" note, no model
+  // name wearing the failed last-attempt model as if it had answered).
+  const deadHtml = renderToString(createElement(MessageBubble, { message: a2 })).replace(/<!-- -->/g, '')
+  check('a dead turn never renders the “Switched to …” note', !deadHtml.includes('Switched to'), deadHtml.slice(0, 200))
+  check('…its header says “No model responded”', deadHtml.includes('No model responded'))
+  check('…while the banner still offers every provider reason', deadHtml.includes('what each provider said'))
 
   // Scenario 3: Pro is still cooling down → the chain skips it entirely.
   useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
@@ -369,6 +377,12 @@ async function testFailover() {
   check(
     'pro re-entered cooldown after mid-stream drop',
     (useHealth.getState().byModel['mock-pro']?.cooldownUntil ?? 0) > Date.now(),
+  )
+  const midHtml = renderToString(createElement(MessageBubble, { message: a4 })).replace(/<!-- -->/g, '')
+  check('a mid-stream handoff renders the divider in place', midHtml.includes('handoff-divider'))
+  check(
+    '…naming both sides of the switch',
+    midHtml.includes('handed off from Simulacron Pro') && midHtml.includes('→ Simulacron Lite'),
   )
 }
 

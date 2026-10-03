@@ -1393,6 +1393,9 @@ kbd {
 .model-menu {
   position: absolute; bottom: calc(100% + 8px); left: 0;
   min-width: 260px;
+  /* Never wider than the window itself: near a viewport edge the popover
+     clamps instead of running off-screen (regression checklist). */
+  max-width: min(420px, calc(100vw - 24px));
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-m);
@@ -1401,6 +1404,8 @@ kbd {
   z-index: 30;
   max-height: 320px; overflow-y: auto;
 }
+/* Keyboard focus lives on the list container; the highlight rides the row. */
+.model-menu:focus { outline: none; }
 .model-menu-item {
   display: flex; align-items: center; gap: 9px;
   width: 100%;
@@ -1411,6 +1416,11 @@ kbd {
   transition: background var(--dur-fast) ease;
 }
 .model-menu-item:hover { background: var(--bg-hover); }
+.model-menu-item.active {
+  background: var(--bg-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .model-menu-item.selected { background: var(--accent-soft); }
 .model-menu-item.selected::after { content: '✓'; margin-left: auto; color: var(--accent-ink); }
 .model-menu-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

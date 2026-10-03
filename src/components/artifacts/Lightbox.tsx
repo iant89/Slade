@@ -18,6 +18,8 @@ export function Lightbox() {
   const [tx, setTx] = useState(0)
   const [ty, setTy] = useState(0)
   const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null)
+  const backdropRef = useRef<HTMLDivElement | null>(null)
+  const openerRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     setScale(1)
@@ -25,15 +27,41 @@ export function Lightbox() {
     setTy(0)
   }, [openId])
 
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault()
-    setScale((s) => Math.min(8, Math.max(1, s * (e.deltaY < 0 ? 1.15 : 0.87))))
-  }, [])
+  /**
+   * The close button and the image vanish when the lightbox unmounts; without a
+   * handoff, a keyboard user is dumped at <body>. Close through this so focus
+   * returns to whoever opened the preview.
+   */
+  const closeAndRestore = useCallback(() => {
+    close()
+    const el = openerRef.current
+    openerRef.current = null
+    requestAnimationFrame(() => {
+      if (el?.isConnected) el.focus()
+    })
+  }, [close])
+
+  // A React onWheel prop is attached passively at the root, so preventDefault()
+  // there logs a console intervention error. A manual non-passive listener can
+  // actually stop the page behind from scrolling.
+  useEffect(() => {
+    const el = backdropRef.current
+    if (!openId || !el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      setScale((s) => Math.min(8, Math.max(1, s * (e.deltaY < 0 ? 1.15 : 0.87))))
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [openId])
 
   useEffect(() => {
     if (!openId) return
+    // Remember the opener while it still exists (the first effect run happens
+    // right after the click that opened us).
+    openerRef.current = document.activeElement as HTMLElement | null
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close()
+      if (e.key === 'Escape') closeAndRestore()
       if (e.key === '+' || e.key === '=') setScale((s) => Math.min(8, s * 1.2))
       if (e.key === '-') setScale((s) => Math.max(1, s / 1.2))
       if (e.key === '0') {
@@ -44,7 +72,7 @@ export function Lightbox() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [openId, close])
+  }, [openId, closeAndRestore])
 
   if (!openId || !artifact) return null
   const src = artifactUrl(artifact)
@@ -53,14 +81,14 @@ export function Lightbox() {
   return createPortal(
     <AnimatePresence>
       <motion.div
+        ref={backdropRef}
         className="lightbox-backdrop"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         onMouseDown={(e) => {
-          if (e.target === e.currentTarget) close()
+          if (e.target === e.currentTarget) closeAndRestore()
         }}
-        onWheel={onWheel}
       >
         <motion.img
           className="lightbox-img"
@@ -114,7 +142,7 @@ export function Lightbox() {
             <button className="icon-btn" onClick={() => downloadUrl(src, artifact.name)} aria-label="Download image">
               <IconDownload size={15} />
             </button>
-            <button className="icon-btn" onClick={close} aria-label="Close lightbox">
+            <button className="icon-btn" onClick={closeAndRestore} aria-label="Close lightbox" type="button">
               <IconX size={16} />
             </button>
           </div>
