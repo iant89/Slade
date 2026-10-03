@@ -15,7 +15,7 @@ export function Toggle({
   disabled?: boolean
 }) {
   return (
-    <label className={`toggle-row${disabled ? ' is-disabled' : ''}`}>
+    <div className={`toggle-row${disabled ? ' is-disabled' : ''}`} onClick={() => { if (!disabled) onChange(!checked) }}>
       <span className="toggle-text">
         <span className="toggle-label">{label}</span>
         {hint && <span className="toggle-hint">{hint}</span>}
@@ -27,11 +27,10 @@ export function Toggle({
         aria-label={label}
         disabled={disabled}
         className={`toggle${checked ? ' on' : ''}`}
-        onClick={() => onChange(!checked)}
       >
         <span className="toggle-knob" />
       </button>
-    </label>
+    </div>
   )
 }
 

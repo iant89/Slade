@@ -285,6 +285,9 @@ async function testFailover() {
     JSON.stringify(a1.failedChain),
   )
   check('content non-empty', a1.content.length > 20)
+  const failoverHtml = renderToString(createElement(MessageBubble, { message: a1 })).replace(/<!-- -->/g, '')
+  check('successful failover names the destination inline', failoverHtml.includes('Switched to Simulacron Lite'))
+  check('failover explains why without relying on hover', failoverHtml.includes('<details') && failoverHtml.includes('Simulated:'))
   check(
     'health: pro is cooling down',
     (useHealth.getState().byModel['mock-pro']?.cooldownUntil ?? 0) > Date.now(),

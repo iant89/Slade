@@ -198,7 +198,7 @@ export function FilterCombobox({
   // Width: at least `minWidth`, never wider than the viewport, and never
   // narrower than the trigger. Left edge clamped so it stays on screen.
   const popWidth = rect
-    ? Math.max(rect.width, Math.min(minWidth, window.innerWidth - 16))
+    ? Math.min(window.innerWidth - 16, Math.max(rect.width, minWidth))
     : minWidth
   const popLeft = rect ? Math.min(Math.max(8, rect.left), window.innerWidth - popWidth - 8) : 0
 

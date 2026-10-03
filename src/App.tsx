@@ -61,6 +61,13 @@ function useHotkeys() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey
+      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]')
+      // A shortcut must not open a drawer behind a dialog or tear down the
+      // parent Settings dialog while its nested picker is active.
+      if (dialogs.length > 0 && (e.key === 'Escape' || (meta && (e.key !== ',' || dialogs.length > 1)))) {
+        if (meta && [',', 'j', 'g', 'e'].includes(e.key.toLowerCase())) e.preventDefault()
+        return
+      }
       if (meta && e.key === ',') {
         e.preventDefault()
         const ui = useUI.getState()
@@ -83,8 +90,12 @@ function useHotkeys() {
       if (e.key === 'Escape' && (useUI.getState().githubOpen || useUI.getState().filesOpen) && !useUI.getState().publishSource) {
         const tag = (e.target as HTMLElement | null)?.tagName
         if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          const panel = useUI.getState().githubOpen ? 'github' : 'files'
           useUI.getState().closeGithub()
           useUI.getState().closeFiles()
+          // A drawer's close button disappears when it closes; return keyboard
+          // users to the control that opened it instead of leaving focus on body.
+          document.querySelector<HTMLButtonElement>(`[data-panel-toggle="${panel}"]`)?.focus()
         }
       }
     }
