@@ -45,6 +45,10 @@ export function GitHubPanel() {
   const open = useUI((s) => s.githubOpen)
   const tab = useUI((s) => s.githubTab)
   const close = useUI((s) => s.closeGithub)
+  const closeAndFocus = () => {
+    close()
+    document.querySelector<HTMLButtonElement>('[data-panel-toggle="github"]')?.focus()
+  }
   const setTab = useUI((s) => s.setGithubTab)
   const { login, avatarUrl, token, authStatus } = useGitHub()
   const connectWithToken = useGitHub((s) => s.connectWithToken)
@@ -69,7 +73,7 @@ export function GitHubPanel() {
 
   return (
     <>
-      <div className="gh-drawer-backdrop only-mobile" onClick={close} aria-hidden="true" />
+      <div className="gh-drawer-backdrop only-mobile" onClick={closeAndFocus} aria-hidden="true" />
       <aside className="github-drawer" aria-label="GitHub workspace">
         <header className="gh-head">
           <h2>
@@ -81,7 +85,7 @@ export function GitHubPanel() {
               <span>@{login}</span>
             </span>
           ) : null}
-          <button className="icon-btn" onClick={close} aria-label="Close GitHub workspace" type="button">
+          <button className="icon-btn" onClick={closeAndFocus} aria-label="Close GitHub workspace" type="button">
             <IconX size={16} />
           </button>
         </header>

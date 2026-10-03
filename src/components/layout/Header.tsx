@@ -20,6 +20,7 @@ function FilesButton() {
   return (
     <button
       className={`icon-btn gh-toggle fs-toggle${open ? ' active' : ''}`}
+      data-panel-toggle="files"
       onClick={toggleFiles}
       aria-pressed={open}
       aria-label={open ? 'Close this chat’s local file system' : 'Open this chat’s local file system (Ctrl+E)'}
@@ -69,6 +70,7 @@ function GitHubButton() {
   return (
     <button
       className={`icon-btn gh-toggle${open ? ' active' : ''}`}
+      data-panel-toggle="github"
       onClick={toggleGithub}
       aria-pressed={open}
       aria-label={open ? 'Close the GitHub workspace' : 'Open the GitHub workspace (Ctrl+G)'}
@@ -148,7 +150,7 @@ export function Header() {
   return (
     <header className="header">
       <div className="header-left">
-        <button className="icon-btn" onClick={toggleSidebar} aria-label="Toggle conversations" aria-pressed={sidebarOpen} title="Toggle conversations (Ctrl+J)" type="button">
+        <button className="icon-btn" data-panel-toggle="sidebar" onClick={toggleSidebar} aria-label="Toggle conversations" aria-pressed={sidebarOpen} title="Toggle conversations (Ctrl+J)" type="button">
           <IconPanelLeft size={17} />
         </button>
         {/* Floating new-chat button for when the sidebar is collapsed. */}
@@ -203,6 +205,7 @@ export function Header() {
         <button
           className="icon-btn"
           onClick={toggleRail}
+          data-panel-toggle="rail"
           aria-label="Toggle model chain panel"
           aria-pressed={railOpen}
           title="Model chain panel"

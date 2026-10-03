@@ -108,6 +108,10 @@ export function Sidebar() {
   const { newConversation } = useChat.getState()
   const sidebarOpen = useUI((s) => s.sidebarOpen)
   const toggleSidebar = useUI((s) => s.toggleSidebar)
+  const closeMobileSidebar = () => {
+    toggleSidebar()
+    document.querySelector<HTMLButtonElement>('[data-panel-toggle="sidebar"]')?.focus()
+  }
   const openSettings = useUI((s) => s.openSettings)
   const [query, setQuery] = useState('')
   const [archivedOpen, setArchivedOpen] = useState(false)
@@ -177,14 +181,14 @@ export function Sidebar() {
 
   return (
     <>
-      {sidebarOpen && <div className="drawer-backdrop only-mobile" onClick={toggleSidebar} aria-hidden="true" />}
-      <aside className={`sidebar${sidebarOpen ? ' open' : ''}`} aria-label="Conversations">
+      {sidebarOpen && <div className="drawer-backdrop only-mobile" onClick={closeMobileSidebar} aria-hidden="true" />}
+      <aside className={`sidebar${sidebarOpen ? ' open' : ''}`} aria-label="Conversations" ref={(node) => { if (node) node.inert = !sidebarOpen }}>
         <div className="sidebar-head">
           <span className="logo" aria-hidden="true">
             <IconStarburst size={17} className="logo-mark" />
             <span className="logo-text">Slade</span>
           </span>
-          <button className="icon-btn only-mobile" onClick={toggleSidebar} aria-label="Close sidebar" type="button">
+          <button className="icon-btn only-mobile" onClick={closeMobileSidebar} aria-label="Close sidebar" type="button">
             <IconX size={16} />
           </button>
         </div>

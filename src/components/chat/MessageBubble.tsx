@@ -239,6 +239,9 @@ export function MessageBubble({ message }: { message: Message }) {
             {message.editedAt ? ' · edited' : ''}
           </span>
         </header>
+        {!isUser && !message.agent && message.failedChain?.length ? (
+          <FailoverNote message={message} labelOf={labelOf} />
+        ) : null}
 
         <Attachments ids={message.attachmentIds} conversationId={message.conversationId} />
 
@@ -285,24 +288,23 @@ function ModelAttribution({
     )
   }
   const final = labelOf(message.modelId ?? message.chain?.[message.chain.length - 1])
-  const fellBackFrom = message.failedChain && message.failedChain.length > 0
-  // Pair each failed model with the provider's own reason, when we kept one.
-  const reasonByModel = new Map((message.attempts ?? []).map((a) => [a.modelId, a.message]))
-  const failedDetail = (message.failedChain ?? [])
-    .map((id) => {
-      const reason = reasonByModel.get(id)
-      return reason ? `${labelOf(id)} — ${reason}` : labelOf(id)
-    })
-    .join('; ')
+  return <span className="msg-model"><span className="msg-model-name">{final || 'Assistant'}</span></span>
+}
+
+/** Keep the reason visible without making long provider errors dominate the transcript. */
+function FailoverNote({ message, labelOf }: { message: Message; labelOf: (id: string | undefined) => string }) {
+  const failed = message.failedChain ?? []
+  const destination = labelOf(message.modelId ?? message.chain?.[message.chain.length - 1]) || 'another model'
   return (
-    <span className="msg-model">
-      <span className="msg-model-name">{final || 'Assistant'}</span>
-      {fellBackFrom ? (
-        <span className="msg-fallback" title={failedDetail ? `Failed before answering: ${failedDetail}` : undefined}>
-          ← fell back from {message.failedChain!.map(labelOf).filter(Boolean).join(', ')}
-        </span>
-      ) : null}
-    </span>
+    <details className="msg-failover">
+      <summary><IconRefresh size={12} aria-hidden="true" /> Switched to {destination} after {failed.map(labelOf).join(', ')} failed · Why?</summary>
+      <ul>
+        {failed.map((id, i) => {
+          const attempt = (message.attempts ?? []).find((a) => a.modelId === id)
+          return <li key={`${id}-${i}`}><strong>{labelOf(id)}</strong>: {attempt?.message || 'No failure reason was recorded.'}</li>
+        })}
+      </ul>
+    </details>
   )
 }
 

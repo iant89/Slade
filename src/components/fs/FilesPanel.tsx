@@ -63,6 +63,10 @@ function FileKindIcon({ file }: { file: FsFile }) {
 export function FilesPanel() {
   const open = useUI((s) => s.filesOpen)
   const close = useUI((s) => s.closeFiles)
+  const closeAndFocus = () => {
+    close()
+    document.querySelector<HTMLButtonElement>('[data-panel-toggle="files"]')?.focus()
+  }
   const openSettings = useUI((s) => s.openSettings)
   const openPublish = useUI((s) => s.openPublish)
   const toast = useUI((s) => s.toast)
@@ -453,7 +457,7 @@ export function FilesPanel() {
 
   return (
     <>
-      <div className="gh-drawer-backdrop only-mobile" onClick={close} aria-hidden="true" />
+      <div className="gh-drawer-backdrop only-mobile" onClick={closeAndFocus} aria-hidden="true" />
       <aside className="github-drawer files-drawer" aria-label="Local file system">
         <header className="gh-head fs-drawer-head">
           <h2>
@@ -494,7 +498,7 @@ export function FilesPanel() {
             hidden
             onChange={(e) => void importWorkspace(e.target.files?.[0])}
           />
-          <button className="icon-btn" onClick={close} aria-label="Close local file system" type="button">
+          <button className="icon-btn" onClick={closeAndFocus} aria-label="Close local file system" type="button">
             <IconX size={16} />
           </button>
         </header>

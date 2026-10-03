@@ -110,17 +110,21 @@ export function ModelRail() {
   const settings = useSettings((s) => s.s)
   const railOpen = useUI((s) => s.railOpen)
   const toggleRail = useUI((s) => s.toggleRail)
+  const closeMobileRail = () => {
+    toggleRail()
+    document.querySelector<HTMLButtonElement>('[data-panel-toggle="rail"]')?.focus()
+  }
   const strategy = settings.defaults.failoverStrategy
 
   return (
     <>
-      {railOpen && <div className="drawer-backdrop only-mobile" onClick={toggleRail} aria-hidden="true" />}
-      <aside className={`model-rail${railOpen ? ' open' : ''}`} aria-label="Model chain and health">
+      {railOpen && <div className="drawer-backdrop only-mobile" onClick={closeMobileRail} aria-hidden="true" />}
+      <aside className={`model-rail${railOpen ? ' open' : ''}`} aria-label="Model chain and health" ref={(node) => { if (node) node.inert = !railOpen }}>
         <div className="rail-head">
           <h2>
             <IconChevronRight size={13} className="rail-head-icon" /> Model chain
           </h2>
-          <button className="icon-btn only-mobile" onClick={toggleRail} aria-label="Close model panel" type="button">
+          <button className="icon-btn only-mobile" onClick={closeMobileRail} aria-label="Close model panel" type="button">
             <IconX size={16} />
           </button>
         </div>

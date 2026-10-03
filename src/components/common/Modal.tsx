@@ -28,6 +28,8 @@ const modalStack: symbol[] = []
  */
 export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', className }: ModalProps) {
   const ref = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
 
   useEffect(() => {
     if (!open) return
@@ -37,7 +39,7 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', 
     modalStack.push(token)
 
     // Focus the first focusable element inside the dialog.
-    requestAnimationFrame(() => {
+    const focusFrame = requestAnimationFrame(() => {
       const first = node?.querySelector<HTMLElement>(FOCUSABLE)
       first?.focus()
     })
@@ -46,15 +48,24 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', 
       if (e.key === 'Escape') {
         if (modalStack[modalStack.length - 1] !== token) return
         e.stopPropagation()
-        onClose()
+        closeRef.current()
         return
       }
-      if (e.key !== 'Tab' || !node) return
+      if (e.key !== 'Tab' || !node || modalStack[modalStack.length - 1] !== token) return
       const focusables = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
         (el) => el.offsetParent !== null,
       )
-      if (focusables.length === 0) return
+      if (focusables.length === 0) {
+        e.preventDefault()
+        node.focus()
+        return
+      }
       const first = focusables[0]!
+      if (!node.contains(document.activeElement)) {
+        e.preventDefault()
+        ;(e.shiftKey ? focusables[focusables.length - 1] : first)?.focus()
+        return
+      }
       const last = focusables[focusables.length - 1]!
       if (e.shiftKey && document.activeElement === first) {
         e.preventDefault()
@@ -68,13 +79,14 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', 
     const prevOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
+      cancelAnimationFrame(focusFrame)
       document.removeEventListener('keydown', onKey, true)
       document.body.style.overflow = prevOverflow
       const i = modalStack.indexOf(token)
       if (i !== -1) modalStack.splice(i, 1)
       previouslyFocused?.focus?.()
     }
-  }, [open, onClose])
+  }, [open])
 
   return createPortal(
     <AnimatePresence>
@@ -95,6 +107,7 @@ export function Modal({ open, onClose, labelledBy, children, variant = 'sheet', 
             role="dialog"
             aria-modal="true"
             aria-labelledby={labelledBy}
+            tabIndex={-1}
             initial={{ opacity: 0, y: 18, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.985 }}
