@@ -32,6 +32,7 @@ Run this after changes to layout, controls, message rendering, or the model chai
 - [ ] Change theme, density, and font size; controls update immediately and persist after reload. Clicking both switch and its label toggles exactly once; disabled switches do nothing.
 - [ ] Open nested model/provider dialogs. Check focus trap and Escape closes only the upper dialog; inputs and save/cancel remain reachable.
 - [ ] Browse/search a connected repository, open a file, and close the preview. Check empty/loading/error states when disconnected or offline.
+- [ ] GitHub action cards: a call with a response (reading a file or a tree) shows an expand toggle that reveals the output; a routine call with nothing to show has no toggle at all; a failed call's toggle reveals the error. While signed out, run through one read and one write to check both.
 - [ ] Open Files panel; navigate folders and preview/download a file. Check long filenames wrap or truncate without covering actions.
 
 Record any failure with viewport size, theme, steps to reproduce, expected/actual result, and a screenshot. Do not mark a flow passed solely because a button is visible—exercise its action and verify the resulting state.

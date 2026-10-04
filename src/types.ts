@@ -166,6 +166,48 @@ export interface GitHubActionInfo {
 
 export type GitHubActionStatus = 'running' | 'done' | 'error' | 'cancelled'
 
+/**
+ * A compact extract of what a GitHub call returned — the file contents a read
+ * produced, a summary of the rows a list returned, the sha a write came back
+ * with. Captured by the REST client (see `lib/github-actions.ts`) so a card can
+ * show real output instead of only the request it sent.
+ */
+export interface GitHubActionOutput {
+  /** One-line caption above the text, e.g. `/src/app.ts · 412 B · 9f31a04`. */
+  label?: string
+  /** The output itself, already clipped to a sane size. */
+  text: string
+  /** True when `text` is only the head of a longer response. */
+  truncated?: boolean
+  /** Highlighting hint (`ts`, `json`, …) when the output is code-shaped. */
+  language?: string
+}
+
+/** One button offered by a card that needs a user response. */
+export interface GitHubActionChoice {
+  id: string
+  label: string
+  /** Small print behind the button, shown as its tooltip. */
+  hint?: string
+  /** A queue of equals by default; `primary`/`danger` mark the odd one out. */
+  tone?: 'default' | 'primary' | 'danger'
+}
+
+/**
+ * A question a GitHub card puts to the user. The card renders the question and
+ * its choices as buttons at the bottom; picking one records `response` on the
+ * card (so the answer survives a reload) and fires `slade:github-response` on
+ * `window` for whatever asked.
+ */
+export interface GitHubActionQuestion {
+  /** The sentence the card asks, e.g. "Commit these 3 files to main?". */
+  question: string
+  choices: GitHubActionChoice[]
+  /** Id of the choice the user picked, once they have. */
+  response?: string
+  respondedAt?: number
+}
+
 /** Persistable, read-only content for one GitHub action card. */
 export interface GitHubActionArtifact extends GitHubActionInfo {
   id: string
@@ -175,6 +217,10 @@ export interface GitHubActionArtifact extends GitHubActionInfo {
   error?: string
   /** How many identical calls this card stands for. */
   count: number
+  /** What the call returned, when there was anything worth keeping. */
+  output?: GitHubActionOutput
+  /** Set when the action needs a user response; see `GitHubActionQuestion`. */
+  question?: GitHubActionQuestion
 }
 
 export type ArtifactKind =

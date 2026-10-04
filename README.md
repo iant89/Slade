@@ -376,10 +376,9 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 
 Every request Slade sends to `api.github.com` — plus the GitHub actions that go
 somewhere else (the OAuth device flow, signing out, cloning a repo's files into
-Local Files) — shows up as a **GitHub Action card**: the GitHub mark, the action
-("`GitHub Action: Get File Contents`"), and the thing it touched
-(`/src/lib/util.ts`) on the second line. That is the whole card — no buttons, no
-status glyph, nothing to expand.
+Local Files) — shows up as a **GitHub Action card**, built like the Memory Added
+card: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
+the thing it touched (`/src/lib/util.ts`) underneath.
 
 - **A call is inserted like a saved memory.** Each card becomes an entry of its
   own in the conversation, so it scrolls with the chat and is saved with it:
@@ -388,9 +387,17 @@ status glyph, nothing to expand.
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
   cards render in that run's activity timeline, in the order things happened,
   between the thoughts that led to them, and are saved with the run's answer.
-- **Nothing folds, nothing hides.** One call is one card; a streak of them is a
-  streak of cards. A failure (or a call still in flight) is tinted, and the repo,
-  branch, timing, call count and GitHub's own error stay in the card's tooltip.
+- **A card carries its result, and only its result.** The REST client captures a
+  compact, redacted extract of every successful response — the file a read
+  returned, a listing, the sha and URL a write produced — and the card grows an
+  expand toggle only when there is output to read. No output, no toggle: routine
+  calls stay one line. A failed call gets the same toggle for its error, and the
+  repo, branch, timing and call count stay in the card's tooltip.
+- **A call that needs an answer asks on its card.** A GitHub action can carry a
+  question and up to a handful of choices; the card renders them as buttons at
+  the bottom, records the chosen answer on the card (so it survives a reload)
+  and fires `slade:github-response` for whatever asked. Cards that finish on
+  their own never grow a button they do not need.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,

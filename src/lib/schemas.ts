@@ -232,6 +232,31 @@ const githubActionArtifactSchema = z.object({
   elapsedMs: z.number().optional(),
   error: z.string().optional(),
   count: z.number().int().positive(),
+  /** What the call returned, when it returned anything worth showing. */
+  output: z
+    .object({
+      label: z.string().optional(),
+      text: z.string(),
+      truncated: z.boolean().optional(),
+      language: z.string().optional(),
+    })
+    .optional(),
+  /** Present when the action needs a user response; the card renders its choices. */
+  question: z
+    .object({
+      question: z.string(),
+      choices: z.array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          hint: z.string().optional(),
+          tone: z.enum(['default', 'primary', 'danger']).optional(),
+        }),
+      ),
+      response: z.string().optional(),
+      respondedAt: z.number().optional(),
+    })
+    .optional(),
 })
 
 const agentTimelineItemSchema = z.discriminatedUnion('type', [
