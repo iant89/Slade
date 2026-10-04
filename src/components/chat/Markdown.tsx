@@ -2,12 +2,15 @@ import { memo, useMemo, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import type { ArtifactSource } from '../../types'
+import type { ArtifactSource, BashExecution } from '../../types'
 import { useArtifacts } from '../../store/artifacts'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { CopyButton } from '../artifacts/CodeArtifact'
 import { mimeFromName, classifyArtifact } from '../../lib/mime'
-import { fsBaseName, tryNormalizeFsPath } from '../../lib/fs'
+import { fsBaseName, looksLikeFilePath, tryNormalizeFsPath } from '../../lib/fs'
+
+/** Info-string languages that mean "this fence is a shell command", not a file. */
+const SHELL_FENCE_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'terminal', 'shellscript', 'fish', 'ksh', 'csh'])
 
 /* ------------------------------------------------------------------ */
 /* Model-emitted artifacts: fenced blocks with a filename info string  */
@@ -74,6 +77,66 @@ function ensureArtifactFromCode(
   return id
 }
 
+/**
+ * A colon-tagged shell fence whose "filename" is a command (` ```bash:ls `),
+ * not a path (` ```bash:scripts/setup.sh `). Those used to land as Document
+ * cards because `ls` has no extension and the fallback MIME is text/plain.
+ */
+function isShellCommandFence(lang: string, fileName: string): boolean {
+  return Boolean(fileName) && SHELL_FENCE_LANGS.has(lang.toLowerCase()) && !looksLikeFilePath(fileName)
+}
+
+/**
+ * Reuse the same id the file-artifact path would have used for this token, so a
+ * conversation that already persisted `ls` as a document upgrades in place.
+ */
+function ensureBashArtifactFromCode(
+  command: string,
+  output: string,
+  provenance: ArtifactSource,
+  messageId: string,
+  conversationId?: string,
+): string {
+  const store = useArtifacts.getState()
+  const id = `art_gen_${messageId}_${hashId(tryNormalizeFsPath(command) ?? command)}`
+  const existing = store.byId[id]
+  const startedAt = existing?.bashExecution?.startedAt ?? existing?.createdAt ?? Date.now()
+  const previous = existing?.bashExecution
+  const finishedAt = previous && previous.status !== 'running' ? previous.finishedAt : startedAt
+  const execution: BashExecution = {
+    command,
+    output,
+    startedAt,
+    finishedAt,
+    status: 'finished',
+    exitCode: 0,
+  }
+  if (
+    existing?.bashExecution?.command === command &&
+    existing.bashExecution.output === output &&
+    existing.bashExecution.status === 'finished'
+  ) {
+    return id
+  }
+  store.add({
+    ...(existing ?? {
+      id,
+      createdAt: startedAt,
+      provenance,
+    }),
+    id,
+    name: 'Bash',
+    mime: 'text/plain',
+    size: output.length,
+    kind: 'code',
+    bashExecution: execution,
+    conversationId: conversationId ?? existing?.conversationId,
+    localPath: undefined,
+    text: output,
+  })
+  return id
+}
+
 /* ------------------------------------------------------------------ */
 /* Code block with copy button                                         */
 /* ------------------------------------------------------------------ */
@@ -132,7 +195,9 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId, co
         const lang = fsWriteMatch ? '' : colon >= 0 ? token.slice(0, colon) : token
 
         if (fileName && provenance && messageId) {
-          const artifactId = ensureArtifactFromCode(fileName, lang, raw, provenance, messageId, conversationId)
+          const artifactId = isShellCommandFence(lang, fileName)
+            ? ensureBashArtifactFromCode(fileName, raw, provenance, messageId, conversationId)
+            : ensureArtifactFromCode(fileName, lang, raw, provenance, messageId, conversationId)
           return <ArtifactCard artifactId={artifactId} conversationId={conversationId} />
         }
 
