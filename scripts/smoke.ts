@@ -166,7 +166,7 @@ import {
   finishGitHubAction,
 } from '../src/store/githubActivity'
 import { appendAgentThought } from '../src/store/agentTimeline'
-import { describeGitHubCall, githubActionTitle, GITHUB_ACTION_TITLE } from '../src/lib/github-actions'
+import { describeGitHubCall, describeGitHubOutput, githubActionTitle, GITHUB_ACTION_TITLE, MAX_OUTPUT_CHARS } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
@@ -2559,6 +2559,79 @@ async function testGitHubActionCards() {
   const unknown = describe({ method: 'GET', path: '/emojis' })
   check('an unmapped call still gets a card', unknown.title === 'GitHub Action: Performed API Request' && unknown.subject === '/emojis', `${unknown.title} ${unknown.subject}`)
 
+  /* ---- the response, summarized into the card's output ---- */
+  const b64 = (text: string) => Buffer.from(text).toString('base64')
+  const fileRead = describeGitHubOutput({
+    method: 'GET',
+    path: '/repos/octo/demo/contents/src/app.ts',
+    json: { type: 'file', name: 'app.ts', path: 'src/app.ts', sha: 'abcdef1234567', size: 19, encoding: 'base64', content: b64('export const x = 1\n') },
+  })
+  check('a contents read decodes the file for its output', fileRead?.text === 'export const x = 1' && fileRead.language === 'typescript', JSON.stringify(fileRead))
+  check(
+    '…and captions it with the path, size and sha',
+    fileRead?.label?.includes('/src/app.ts') === true && fileRead?.label?.includes('abcdef1') === true,
+    String(fileRead?.label),
+  )
+  const binaryRead = describeGitHubOutput({
+    method: 'GET',
+    path: '/repos/octo/demo/contents/logo.png',
+    json: { type: 'file', name: 'logo.png', path: 'logo.png', sha: 'b1', size: 8, encoding: 'base64', content: b64('\u0000\u0001\u0002binary') },
+  })
+  check('a binary read reports the file instead of dumping bytes', binaryRead?.text.includes('Binary file') === true && !binaryRead?.text.includes('binary'), JSON.stringify(binaryRead))
+  const dirRead = describeGitHubOutput({
+    method: 'GET',
+    path: '/repos/octo/demo/contents/docs',
+    json: [{ name: 'a.md', type: 'file', size: 10 }, { name: 'nested', type: 'dir' }],
+  })
+  check('a directory read lists what is in it', dirRead?.text.includes('a.md (file)') && dirRead?.text.includes('nested (dir)') && dirRead?.label?.includes('2 entries'), JSON.stringify(dirRead))
+  const treeRead = describeGitHubOutput({
+    method: 'GET',
+    path: '/repos/octo/demo/git/trees/main',
+    query: { recursive: 1 },
+    json: { sha: 'tree1', truncated: true, tree: [{ path: 'src/a.ts', type: 'blob', size: 12 }, { path: 'src', type: 'tree' }] },
+  })
+  check('a tree read lists its paths and says it was truncated', treeRead?.text.includes('src/a.ts') && treeRead?.label?.includes('truncated') === true, JSON.stringify(treeRead))
+  const createdPr = describeGitHubOutput({
+    method: 'POST',
+    path: '/repos/octo/demo/pulls',
+    body: { title: 'Add the thing' },
+    json: { number: 42, title: 'Add the thing', state: 'open', html_url: 'https://github.com/octo/demo/pull/42' },
+  })
+  check('a created pull request reports its number and URL', createdPr?.label === '#42 Add the thing' && createdPr?.text.includes('https://github.com/octo/demo/pull/42'), JSON.stringify(createdPr))
+  const mergeOutput = describeGitHubOutput({
+    method: 'PUT',
+    path: '/repos/octo/demo/pulls/42/merge',
+    json: { merged: true, sha: 'abc1234deadbeef', message: 'Pull Request successfully merged' },
+  })
+  check('a merge reports whether it merged and how', mergeOutput?.label.includes('merged') === true && mergeOutput?.text.includes('merged: true') && mergeOutput?.text.includes('abc1234'), JSON.stringify(merge))
+  const searchOutput = describeGitHubOutput({
+    method: 'GET',
+    path: '/search/code',
+    query: { q: 'answer' },
+    json: { total_count: 2, items: [{ path: 'src/a.ts', repository: { full_name: 'octo/demo' } }, { path: 'src/b.ts', repository: { full_name: 'octo/demo' } }] },
+  })
+  check('a code search counts its hits and names them', searchOutput?.label === '2 results' && searchOutput?.text.includes('src/a.ts — octo/demo'), JSON.stringify(search))
+  const budgetOutput = describeGitHubOutput({
+    method: 'GET',
+    path: '/rate_limit',
+    json: { resources: { core: { limit: 5000, remaining: 4999 }, search: { limit: 30, remaining: 29 } } },
+  })
+  check('the budget probe reports each bucket', budgetOutput?.text.includes('core: 4999/5000') === true && budgetOutput?.text.includes('search: 29/30') === true, JSON.stringify(budget))
+  check('a response with nothing in it has no output', describeGitHubOutput({ method: 'DELETE', path: '/repos/octo/demo/git/refs/heads/slade%2Fx' }) === undefined)
+  check(
+    'an unmapped response falls back to its readable fields',
+    describeGitHubOutput({ method: 'GET', path: '/some/endpoint', json: { full_name: 'octo/demo', name: 'demo' } })?.text === 'octo/demo · demo',
+  )
+  check('an unreadable response has no output at all', describeGitHubOutput({ method: 'GET', path: '/emojis', json: { gopher: 1 } }) === undefined)
+  const clipped = describeGitHubOutput({
+    method: 'GET',
+    path: '/repos/octo/demo/contents/big.md',
+    json: { type: 'file', name: 'big.md', path: 'big.md', sha: 'a1', size: 9000, encoding: 'base64', content: b64('x'.repeat(9000)) },
+  })
+  check('a long response is clipped, and says so', clipped?.truncated === true && (clipped?.text.length ?? 0) <= MAX_OUTPUT_CHARS + 2, String(clipped?.text.length))
+  const secretive = describeGitHubOutput({ method: 'GET', path: '/user', json: { login: 'octo', name: `ghp_${'a'.repeat(24)}` } })
+  check('output never carries a credential shape', secretive?.text.includes('<redacted>') === true && !secretive?.text.includes('ghp_'), JSON.stringify(secretive))
+
   /* ---- the log, driven through the real REST client ---- */
   const token = 'ghp_' + 'c'.repeat(24)
   const utilText = 'export const answer = 42\n'
@@ -2680,25 +2753,90 @@ async function testGitHubActionCards() {
     const errored = useGitHubActivity.getState().entries.find((e) => e.id === openId)
     check('a hand-closed card carries its failure', errored?.status === 'error' && errored.error === 'GitHub unreachable', JSON.stringify(errored))
 
-    /* ---- the rendered card ---- */
+    /* ---- the response becomes the card's output ---- */
     const entry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.subject === '/src/lib/util.ts')
     check('the read card is in the log', Boolean(entry), JSON.stringify(titles()))
+    check(
+      "a file read keeps the file's contents as the card's output",
+      entry?.output?.text === utilText.trim() && entry.output.language === 'typescript',
+      JSON.stringify(entry?.output),
+    )
+    check(
+      'the output is labelled with the path and size',
+      entry?.output?.label?.includes('/src/lib/util.ts') === true && entry?.output?.label?.includes('B') === true,
+      String(entry?.output?.label),
+    )
+    const treeEntry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-tree' && e.status === 'done')
+    check(
+      'a tree read keeps its listing as output',
+      Boolean(treeEntry?.output?.text.includes('src/lib/util.ts')),
+      JSON.stringify(treeEntry?.output),
+    )
+    const failedEntry = useGitHubActivity.getState().entries.find((e) => e.subject === '/docs/answer.md' && e.status === 'error')
+    check(
+      'a failed call keeps its error instead of an output panel',
+      failedEntry?.output === undefined && Boolean(failedEntry?.error),
+      JSON.stringify(failedEntry?.output),
+    )
+    const quietId = logGitHubActionDone({ kind: 'test-token', subject: '@octo' })
+    const quietEntry = useGitHubActivity.getState().entries.find((e) => e.id === quietId)!
+    check('no output is captured for a call that returned nothing', quietEntry.output === undefined, JSON.stringify(quietEntry.output))
+
+    /* ---- the rendered card ---- */
     const card = renderToString(createElement(GitHubActionCard, { entry: entry! })).replace(/<!-- -->/g, '')
+    check('the card is an artifact card, like Memory Added', card.includes('artifact-card gh-artifact-card'), card.slice(0, 160))
     check('the card shows the github mark', card.includes('viewBox="0 0 16 16"'), card.slice(0, 160))
     check('the card title is the action', card.includes('GitHub Action: Get File Contents'), card.slice(0, 240))
-    check('the card sub-title is the path', card.includes('gh-action-subject') && card.includes('/src/lib/util.ts'), card.slice(0, 320))
-    check('the card is NOT expandable', !card.includes('aria-expanded') && !card.includes('chevron'), card.slice(0, 240))
-    check('the card carries no buttons', !card.includes('<button'), card.slice(0, 240))
-    check('the card is a div, not a disclosure', card.includes('gh-action-card status-done'), card.slice(0, 120))
+    check('the card sub-title is the path', card.includes('gh-artifact-subject') && card.includes('/src/lib/util.ts'), card.slice(0, 320))
     check(
       'the card leaves the repo, the timing and the status glyph out of its markup',
-      !card.includes('octo/demo@main') && !card.includes('gh-action-side') && !card.includes('gh-action-status') && !card.includes('gh-action-time'),
+      !card.includes('octo/demo@main') && !card.includes('gh-artifact-side') && !card.includes('gh-artifact-time'),
       card.slice(0, 320),
     )
     check(
       '…but keeps that detail in its tooltip',
       card.includes('octo/demo @ main') && card.includes('title="'),
       card.slice(0, 360),
+    )
+    check(
+      'a card with output has an expand toggle, closed by default',
+      card.includes('aria-expanded="false"') && card.includes('Show output') && card.includes('flip-v') === false,
+      card.slice(0, 260),
+    )
+    check('…and the output itself is not drawn until it is opened', !card.includes(utilText), card.slice(0, 320))
+    const openedCard = renderToString(createElement(GitHubActionCard, { entry: entry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
+    check(
+      'opening the card shows the captured output, highlighted as code',
+      openedCard.includes('aria-expanded="true"') && openedCard.includes('code-artifact') && openedCard.includes('answer'),
+      openedCard.slice(0, 320),
+    )
+    check('the opened panel is captioned with the response label', openedCard.includes('gh-artifact-label') && openedCard.includes(entry!.output!.label!), openedCard.slice(0, 300))
+    const treeCard = renderToString(createElement(GitHubActionCard, { entry: treeEntry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
+    check(
+      'output that is not code renders as plain, scrollable text',
+      treeCard.includes('gh-artifact-output') && treeCard.includes('src/lib/util.ts') && !treeCard.includes('code-artifact'),
+      treeCard.slice(0, 320),
+    )
+    const quietCard = renderToString(createElement(GitHubActionCard, { entry: quietEntry })).replace(/<!-- -->/g, '')
+    check(
+      'a card with nothing to show has no expand button and no footer',
+      !quietCard.includes('aria-expanded') && !quietCard.includes('<button') && !quietCard.includes('artifact-foot'),
+      quietCard.slice(0, 300),
+    )
+    check(
+      'a failed card can show why, without claiming an output it does not have',
+      (() => {
+        const collapsedHtml = renderToString(createElement(GitHubActionCard, { entry: failedEntry! })).replace(/<!-- -->/g, '')
+        const openHtml = renderToString(createElement(GitHubActionCard, { entry: failedEntry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
+        return (
+          collapsedHtml.includes('Show output') &&
+          // The reason is already in the tooltip; the panel is what shows it in full.
+          !collapsedHtml.includes('gh-artifact-output') &&
+          openHtml.includes('gh-artifact-output failed') &&
+          openHtml.includes(failedEntry!.error!)
+        )
+      })(),
+      failedEntry?.error,
     )
     check('the activity store has no per-card removal operation', !('remove' in useGitHubActivity.getState()))
 
@@ -2733,12 +2871,12 @@ async function testGitHubActionCards() {
       persistedCard.success ? 'ok' : String(persistedCard.error),
     )
 
-    /* ---- the card message renders as one line, with no buttons ---- */
+    /* ---- the card message renders as the card, and nothing else ---- */
     const cardMessage = cards().find((m) => m.githubAction?.id === entry!.id)!
     const messageHtml = renderToString(createElement(MessageBubble, { message: cardMessage })).replace(/<!-- -->/g, '')
     check(
       'a standalone card renders as its own message',
-      messageHtml.includes('msg-gh-action') && messageHtml.includes('gh-action-card'),
+      messageHtml.includes('msg-gh-action') && messageHtml.includes('gh-artifact-card'),
       messageHtml.slice(0, 220),
     )
     check(
@@ -2747,9 +2885,107 @@ async function testGitHubActionCards() {
       messageHtml.slice(0, 320),
     )
     check(
-      '…with no author line, no copy row and no buttons at all',
-      !messageHtml.includes('msg-head') && !messageHtml.includes('msg-foot') && !messageHtml.includes('<button'),
+      '…with no author line, no copy row and no message actions',
+      !messageHtml.includes('msg-head') && !messageHtml.includes('msg-foot') && !messageHtml.includes('msg-action'),
       messageHtml.slice(0, 320),
+    )
+    check(
+      "…and its only control is the output toggle the call earned",
+      messageHtml.split('<button').length - 1 === 1 && messageHtml.includes('Show output'),
+      messageHtml.slice(0, 320),
+    )
+
+    /* ---- a card that needs a user response ---- */
+    const asksId = logGitHubActionDone({
+      kind: 'merge-pr',
+      subject: '#42 Add the thing',
+      repo: 'octo/demo',
+      question: {
+        question: 'Merge pull request #42 into main?',
+        choices: [
+          { id: 'merge', label: 'Merge it', tone: 'primary', hint: 'Squash and merge' },
+          { id: 'keep', label: 'Leave it open', tone: 'default' },
+        ],
+      },
+    })
+    const asks = useGitHubActivity.getState().entries.find((e) => e.id === asksId)!
+    check('a card can carry a question and its choices', asks.question?.choices.length === 2 && asks.question.response === undefined, JSON.stringify(asks.question))
+    const askHtml = renderToString(createElement(GitHubActionCard, { entry: asks })).replace(/<!-- -->/g, '')
+    check('the card asks its question', askHtml.includes('Merge pull request #42 into main?'), askHtml.slice(0, 400))
+    check(
+      'the choices are buttons in the footer, under the question',
+      askHtml.indexOf('gh-artifact-ask') > askHtml.indexOf('artifact-head') &&
+        askHtml.indexOf('Merge it') > askHtml.indexOf('gh-artifact-ask') &&
+        askHtml.indexOf('Leave it open') > askHtml.indexOf('Merge it'),
+      askHtml.slice(askHtml.indexOf('gh-artifact-ask') - 40, askHtml.indexOf('gh-artifact-ask') + 400),
+    )
+    check('the card holds exactly its two choices as buttons', askHtml.split('<button').length - 1 === 2, askHtml.slice(0, 320))
+    check('a card waiting on an answer says so', askHtml.includes('awaiting-response'))
+    check(
+      'the primary choice reads as the primary one',
+      askHtml.includes('gh-choice primary') && askHtml.includes('title="Squash and merge"'),
+      askHtml.slice(askHtml.indexOf('gh-artifact-ask')),
+    )
+
+    // Answering is generic: the store records the choice, closes a call that was
+    // still open, and announces the answer for whoever asked.
+    const responseEvents: { id: string; kind: string; choiceId: string }[] = []
+    const globalScope = globalThis as Record<string, unknown>
+    const realWindow = globalScope.window
+    globalScope.window = {
+      dispatchEvent: (event: CustomEvent) => {
+        responseEvents.push(event.detail as { id: string; kind: string; choiceId: string })
+        return true
+      },
+    }
+    try {
+      useGitHubActivity.getState().respond(asksId, 'merge')
+    } finally {
+      if (realWindow === undefined) delete globalScope.window
+      else globalScope.window = realWindow
+    }
+    const answered = useGitHubActivity.getState().entries.find((e) => e.id === asksId)!
+    check(
+      'answering records the chosen option on the card',
+      answered.question?.response === 'merge' && answered.question?.respondedAt != null,
+      JSON.stringify(answered.question),
+    )
+    check('answering announces the choice', responseEvents.length === 1 && responseEvents[0]?.choiceId === 'merge' && responseEvents[0]?.id === asksId, JSON.stringify(responseEvents))
+    const answeredHtml = renderToString(createElement(GitHubActionCard, { entry: answered })).replace(/<!-- -->/g, '')
+    check(
+      'the answered card stops asking and shows what was chosen',
+      answeredHtml.includes('Merge it') && !answeredHtml.includes('gh-choice') && !answeredHtml.includes('awaiting-response'),
+      answeredHtml.slice(answeredHtml.indexOf('gh-artifact-ask')),
+    )
+    check('the question stays visible next to its answer', answeredHtml.includes('Merge pull request #42 into main?'))
+    const persistedAsk = conversationSchema.safeParse(useChat.getState().conversations[convId])
+    check(
+      'a card with output and an answer passes conversation persistence validation',
+      persistedAsk.success &&
+        Boolean(
+          persistedAsk.data.messages.some(
+            (m) => m.githubAction?.id === entry!.id && m.githubAction.output?.text === utilText.trim() && m.githubAction.question === undefined,
+          ),
+        ) &&
+        Boolean(persistedAsk.data.messages.some((m) => m.githubAction?.id === asksId && m.githubAction.question?.response === 'merge')),
+      persistedAsk.success ? 'ok' : String(persistedAsk.error),
+    )
+    check(
+      'answering twice cannot rewrite the answer',
+      (() => {
+        const first = answered.question!.respondedAt
+        useGitHubActivity.getState().respond(asksId, 'keep')
+        const after = useGitHubActivity.getState().entries.find((e) => e.id === asksId)!
+        return after.question?.response === 'merge' && after.question?.respondedAt === first
+      })(),
+    )
+    check(
+      'a card that asked nothing ignores an answer',
+      (() => {
+        useGitHubActivity.getState().respond(quietId, 'merge')
+        const after = useGitHubActivity.getState().entries.find((e) => e.id === quietId)!
+        return after.question === undefined && after.status === 'done'
+      })(),
     )
 
     /* ---- a call in flight, and the card it leaves behind ---- */
@@ -2802,17 +3038,22 @@ async function testGitHubActionCards() {
       }),
     ).replace(/<!-- -->/g, '')
     const firstThought = timelineHtml.indexOf('thought-block')
-    const actionCard = timelineHtml.indexOf('gh-action-card')
+    const actionCard = timelineHtml.indexOf('gh-artifact-card')
     const secondThought = timelineHtml.indexOf('thought-block', firstThought + 1)
     check(
       'a GitHub call splits the thought into thought → action → thought cards',
       firstThought >= 0 && firstThought < actionCard && actionCard < secondThought,
       timelineHtml.slice(Math.max(0, firstThought - 80), secondThought + 120),
     )
-    check('the in-message action card has no remove or dismiss button', !timelineHtml.slice(actionCard).split('</div>')[0]?.includes('<button'), timelineHtml.slice(actionCard, actionCard + 240))
+    const actionCardHtml = timelineHtml.slice(actionCard, timelineHtml.indexOf('</figure>', actionCard))
+    check(
+      'an in-message action card offers no remove or dismiss button',
+      actionCardHtml.length > 0 && !actionCardHtml.includes('<button') && !/remove|dismiss/i.test(actionCardHtml),
+      actionCardHtml.slice(0, 240),
+    )
     check(
       'a run whose calls are all cards never folds them behind a header',
-      !timelineHtml.includes('gh-action-group') && timelineHtml.split('gh-action-card').length - 1 === 1,
+      !timelineHtml.includes('gh-action-group') && timelineHtml.split('gh-artifact-card').length - 1 === 1,
       timelineHtml.slice(actionCard - 40, actionCard + 300),
     )
 
@@ -3921,7 +4162,7 @@ async function testGitLocalFsReadWriteAcross() {
     const inlineRun = renderToString(createElement(MessageBubble, { message: runMsg! })).replace(/<!-- -->/g, '')
     check(
       'the run message renders action cards in its timeline, not a grouped activity footer',
-      inlineRun.includes('agent-activity-timeline') && inlineRun.includes('gh-action-card') &&
+      inlineRun.includes('agent-activity-timeline') && inlineRun.includes('gh-artifact-card') &&
         inlineRun.includes('/src/math.ts') && !inlineRun.includes('gh-activity'),
       inlineRun.slice(Math.max(0, inlineRun.indexOf('agent-activity-timeline')), inlineRun.indexOf('agent-activity-timeline') + 500),
     )

@@ -195,8 +195,9 @@ function Attachments({ ids, conversationId }: { ids?: string[]; conversationId: 
 
 /**
  * A call to `api.github.com` logged as a conversation message. The card is the
- * whole message: no author line, no body, no copy/retry/branch row — one call
- * reads as one line that scrolls and is saved with the chat.
+ * whole message: no author line, no copy/retry/branch row — one card that
+ * scrolls and is saved with the chat. It carries only what the call produced:
+ * an output panel when it has output, answer buttons when it needs one.
  */
 function GitHubActionMessage({ message }: { message: Message }) {
   const entry = message.githubAction!

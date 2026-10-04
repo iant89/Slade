@@ -2810,10 +2810,13 @@ input[type='range']::-moz-range-thumb {
 
 /* ---------- GitHub action cards (live API activity) ----------
 
-   A card is one line per API call: the GitHub mark, the action, and the thing
-   it touched. It has no buttons and nothing to expand. Agent-run cards are
-   interleaved with that run's thought cards inside its message; a call made
-   outside a run is the message — one card per message (`.msg-gh-action`). */
+   A card is built like the Memory Added artifact card — the GitHub mark, the
+   action as its name, the thing it touched underneath — and then adds only
+   what the call actually produced: an expandable output panel when there is
+   output to read, and choice buttons at the bottom when the action needs an
+   answer from the user. Agent-run cards are interleaved with that run's
+   thought cards inside its message; a call made outside a run is the message —
+   one card per message (`.msg-gh-action`). */
 
 .agent-activity-timeline {
   display: flex;
@@ -2828,93 +2831,121 @@ input[type='range']::-moz-range-thumb {
   margin-bottom: 4px;
 }
 
-/* Top and bottom padding of a card row: 1.25px, 75% less than the 5px it used
-   to be. These are one-line status rows that stack, so they stay snug; the 9px
-   at the sides is unchanged. */
-.gh-action-card {
-  --gh-action-pad-y: 1.25px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: var(--gh-action-pad-y) 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-s);
-  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
-  animation: gh-action-in 0.18s var(--ease-out);
-  user-select: none;
-}
-
-@keyframes gh-action-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+/* The GitHub mark replaces the artifact's kind icon, and borrows its shape. */
+.gh-artifact-icon {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  color: var(--text-muted);
 }
 
 /* The status is a tint, not a glyph: a failure (or a call still in flight)
    stays visible without adding a field to the card. */
-.gh-action-card.status-error {
+.gh-artifact-card.status-error {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-  background: color-mix(in srgb, var(--danger) 6%, var(--bg-panel));
 }
-
-.gh-action-card.status-cancelled {
+.gh-artifact-card.status-error .gh-artifact-icon {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+.gh-artifact-card.status-cancelled {
   border-color: color-mix(in srgb, var(--text-faint) 35%, var(--border));
-  background: color-mix(in srgb, var(--text-faint) 4%, var(--bg-panel));
 }
-
-.gh-action-card.status-running {
+.gh-artifact-card.status-running {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg-panel));
 }
-
-.gh-action-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  color: var(--text-muted);
-}
-
-.gh-action-card.status-running .gh-action-icon {
+.gh-artifact-card.status-running .gh-artifact-icon {
+  background: var(--accent-soft);
   color: var(--accent-ink);
 }
-
-.gh-action-lines {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  flex: 1 1 auto;
+/* A card that asked a question waits for its answer: it reads as the one thing
+   in the log that still needs the user. */
+.gh-artifact-card.awaiting-response {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-.gh-action-title {
-  font-size: 0.78em;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-}
-
-.gh-action-subject {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.72em;
+/* The path or query the call touched, kept monospace so a file path reads as
+   one, with the call's short state next to it. */
+.gh-artifact-subject {
   font-family: var(--font-mono);
   color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.gh-artifact-status {
+  color: var(--text-faint);
 }
 
-@media (max-width: 720px) {
-  .gh-action-lines {
-    flex-direction: column;
-    gap: 1px;
-  }
+/* ---------- the card's output panel ---------- */
+
+.gh-artifact-label {
+  display: block;
+  padding: 6px 11px 0;
+  font-size: 0.7em;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
 }
+
+.gh-artifact-output {
+  margin: 0;
+  padding: 8px 11px;
+  background: var(--code-surface);
+  font-family: var(--font-mono);
+  font-size: 0.74em;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 280px;
+  overflow: auto;
+}
+.gh-artifact-output.failed {
+  background: color-mix(in srgb, var(--danger) 7%, var(--code-surface));
+  color: var(--danger);
+}
+
+.gh-artifact-note {
+  display: block;
+  padding: 5px 11px 7px;
+  font-size: 0.68em;
+  color: var(--text-faint);
+}
+
+/* ---------- the card's question ---------- */
+
+/* A question puts its buttons at the bottom of the card, under the sentence
+   they answer — so the card reads top-down: what ran, what came back, what is
+   still needed. */
+.gh-artifact-ask {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px 10px;
+}
+.gh-artifact-question {
+  font-size: 0.78em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.gh-artifact-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.gh-choice {
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+}
+.gh-choice:hover { background: var(--bg-hover); color: var(--text); }
+.gh-choice.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.gh-choice.primary:hover { background: var(--accent-hover); color: var(--accent-text); }
+.gh-choice.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.gh-choice.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
+.gh-artifact-answer { color: var(--ok); }
 
 /* ---------- Settings → GitHub ---------- */
 

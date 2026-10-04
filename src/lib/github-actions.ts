@@ -13,9 +13,15 @@
  * raw request over, and everything derived here comes from the method, the URL
  * and the *scalar* fields of the body, so nothing that could be secret or huge
  * (file contents, base64 blobs) ever reaches the UI.
+ *
+ * The same module also turns a response into the card's *output*: a clipped,
+ * already-redacted extract (file contents for a read, sha and URL for a write,
+ * a listing for a search) that the card can show behind its expand toggle.
  */
 
-import type { GitHubActionInfo, GitHubActionKind } from '../types'
+import type { GitHubActionInfo, GitHubActionKind, GitHubActionOutput } from '../types'
+import { formatBytes } from './format'
+import { redactSecrets } from '../providers/base'
 export type { GitHubActionInfo, GitHubActionKind } from '../types'
 
 /** Short action phrases; `GITHUB_ACTION_TITLE` is what follows "GitHub Action:". */
@@ -292,4 +298,393 @@ export function describeGitHubCall(call: GitHubCallLike): GitHubActionInfo {
  */
 export function githubActionSignature(info: Pick<GitHubActionInfo, 'kind' | 'subject' | 'repo' | 'ref'>): string {
   return [info.kind, info.repo ?? '', info.ref ?? '', info.subject].join('|')
+}
+
+/* ------------------------------------------------------------------ */
+/* What came back — the output a card shows                            */
+/*                                                                     */
+/* A card is a request *and* its result. `describeGitHubOutput` turns  */
+/* one successful response into a compact, redacted extract: the file  */
+/* a read returned, a listing, the sha a write produced. Only the head */
+/* of a long response is kept — a card previews output, it never keeps */
+/* the whole payload.                                                  */
+/* ------------------------------------------------------------------ */
+
+/** One request with its parsed response, as handed over by the REST client. */
+export interface GitHubOutputInput extends GitHubCallLike {
+  /** The parsed body of a successful call; absent for `204`/empty responses. */
+  json?: unknown
+}
+
+/** The longest output text a card stores. */
+export const MAX_OUTPUT_CHARS = 4_000
+/** Entries a listing keeps before it stops counting. */
+const MAX_OUTPUT_LINES = 120
+/** Roughly how many bytes of a base64 file are decoded for a preview. */
+const CONTENT_PREVIEW_BYTES = MAX_OUTPUT_CHARS * 2
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** `path/to/file.ts` → `ts`, so the panel can highlight what it shows. */
+function languageForName(name: string): string | undefined {
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+  const known: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+    py: 'python', rb: 'ruby', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin',
+    sh: 'bash', bash: 'bash', zsh: 'bash', yml: 'yaml', yaml: 'yaml', md: 'markdown',
+    json: 'json', html: 'xml', svg: 'xml', css: 'css', scss: 'scss', sql: 'sql',
+    toml: 'ini', ini: 'ini', c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cs: 'csharp',
+    php: 'php', swift: 'swift', diff: 'diff',
+  }
+  return known[ext]
+}
+
+/** Join listing lines, saying how many were left out rather than dropping them silently. */
+function listed(lines: string[], total = lines.length): string {
+  const kept = lines.slice(0, MAX_OUTPUT_LINES)
+  if (total > kept.length) kept.push(`… and ${total - kept.length} more`)
+  return kept.join('\n')
+}
+
+/**
+ * Whether a decoded preview is binary. A card shows text; a PNG decoded as
+ * UTF-8 is replacement characters, so it is reported as a file instead.
+ */
+function looksBinary(text: string): boolean {
+  const sample = text.slice(0, 400)
+  if (!sample) return false
+  if (sample.includes('\u0000')) return true
+  let odd = 0
+  for (const ch of sample) {
+    const code = ch.codePointAt(0)!
+    if (code < 9 || (code > 13 && code < 32) || code === 0xfffd) odd++
+  }
+  return odd / sample.length > 0.1
+}
+
+/** Decode only the head of a base64 payload; undefined when it will not decode. */
+function decodeBase64Preview(b64: string): string | undefined {
+  try {
+    const clean = b64.replace(/\s+/g, '')
+    const slice = clean.slice(0, Math.ceil(CONTENT_PREVIEW_BYTES / 3) * 4)
+    const bin = atob(slice)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return new TextDecoder().decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+/** Redact, normalize and clip one output text. */
+function clipOutput(text: string): { text: string; truncated?: boolean } {
+  const clean = redactSecrets(text.replace(/\r\n/g, '\n')).replace(/[ \t]+$/gm, '').trimEnd()
+  if (clean.length <= MAX_OUTPUT_CHARS) return { text: clean }
+  return { text: `${clean.slice(0, MAX_OUTPUT_CHARS).trimEnd()}\n…`, truncated: true }
+}
+
+function cardOutput(label: string | undefined, text: string, language?: string): GitHubActionOutput | undefined {
+  const clipped = clipOutput(text)
+  if (!clipped.text.trim()) return undefined
+  return { label: label?.trim() || undefined, text: clipped.text, truncated: clipped.truncated, language }
+}
+
+/** The scalar fields worth showing for any object we do not model. */
+const GENERIC_KEYS = ['full_name', 'name', 'login', 'title', 'path', 'ref', 'sha', 'state', 'status', 'message', 'html_url'] as const
+
+function genericLine(value: unknown): string {
+  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? '' : 's'}`
+  if (!isRecord(value)) return typeof value === 'string' ? value : ''
+  const bits: string[] = []
+  for (const key of GENERIC_KEYS) {
+    const v = value[key]
+    if (typeof v === 'string' && v.trim()) bits.push(key === 'sha' ? shortSha(v.trim()) : v.trim())
+    if (bits.length === 2) break
+  }
+  if (bits.length === 0) {
+    const id = num(value.id)
+    if (id != null) bits.push(String(id))
+  }
+  return bits.join(' · ')
+}
+
+/** Last resort: a compact reading of whatever shape the response had. */
+function summarizeUnknown(json: unknown): GitHubActionOutput | undefined {
+  if (Array.isArray(json)) {
+    const lines = json.slice(0, 20).map(genericLine).filter(Boolean)
+    return cardOutput(`${json.length} item${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
+  }
+  if (isRecord(json)) {
+    const line = genericLine(json)
+    return line ? cardOutput(undefined, line) : undefined
+  }
+  if (typeof json === 'string' && json.trim()) return cardOutput(undefined, json)
+  return undefined
+}
+
+/**
+ * Describe what one successful GitHub call returned, or `undefined` when there
+ * is nothing worth showing (an empty `204`, a response with no readable body).
+ * Pure: the REST client hands over the parsed JSON and gets text back.
+ */
+export function describeGitHubOutput(call: GitHubOutputInput): GitHubActionOutput | undefined {
+  const method = (call.method || 'GET').toUpperCase()
+  const parts = segments(call.path)
+  const json = call.json
+  const [head, second, third] = parts
+
+  /* ---------------- repo-scoped responses ---------------- */
+  if (head === 'repos' && second && third) {
+    const repo = `${second}/${third}`
+    const tail = parts.slice(3)
+    const [a, b, c, d] = tail
+
+    if (a === 'contents') {
+      const path = `/${tail.slice(1).join('/')}`
+      const where = tail.length > 1 ? path : repo
+      if (Array.isArray(json)) {
+        const lines = json.map((entry) => {
+          const e = isRecord(entry) ? entry : {}
+          const name = str(e.name) ?? str(e.path) ?? '?'
+          const size = num(e.size)
+          const kind = str(e.type) === 'dir' ? 'dir' : 'file'
+          return `${name} (${kind})${size == null ? '' : ` · ${formatBytes(size)}`}`
+        })
+        return cardOutput(`${where} · ${json.length} entr${json.length === 1 ? 'y' : 'ies'}`, listed(lines, json.length))
+      }
+      if (isRecord(json)) {
+        const name = str(json.name) ?? path.split('/').pop() ?? repo
+        const size = num(json.size)
+        const sha = str(json.sha)
+        const caption = [where, size == null ? '' : formatBytes(size), shortSha(sha)].filter(Boolean).join(' · ')
+        const content = str(json.content)
+        if (str(json.encoding) === 'base64' && content) {
+          const decoded = decodeBase64Preview(content)
+          if (decoded != null && !looksBinary(decoded)) return cardOutput(caption, decoded, languageForName(name))
+          return cardOutput(caption, `Binary file${size == null ? '' : ` · ${formatBytes(size)}`} — nothing to preview.`)
+        }
+        const commit = isRecord(json.commit) ? json.commit : {}
+        const commitBits = ['Commit', shortSha(str(commit.sha)), str(commit.html_url) ?? ''].filter(Boolean)
+        if (commitBits.length > 1) return cardOutput(caption, commitBits.join(' '))
+        return cardOutput(caption, `No inline text for this file${size == null ? '' : ` (${formatBytes(size)})`} — nothing to preview.`)
+      }
+    }
+
+    if (a === 'contents' && (method === 'PUT' || method === 'DELETE')) {
+      const path = `/${tail.slice(1).join('/')}`
+      const record = isRecord(json) ? json : {}
+      const content = isRecord(record.content) ? record.content : {}
+      const commit = isRecord(record.commit) ? record.commit : {}
+      const verb = method === 'DELETE' ? 'Deleted' : str(content.sha) ? 'Updated' : 'Created'
+      const bits = [verb, str(content.path) ?? path, shortSha(str(commit.sha)), str(commit.html_url) ?? ''].filter(Boolean)
+      return cardOutput(`${verb.toLowerCase()} ${path}`, bits.join(' · '))
+    }
+
+    if (a === 'branches') {
+      if (Array.isArray(json)) {
+        const lines = json.map((entry) => {
+          const e = isRecord(entry) ? entry : {}
+          const commit = isRecord(e.commit) ? e.commit : {}
+          return `${str(e.name) ?? '?'} @ ${shortSha(str(commit.sha))}`
+        })
+        return cardOutput(`${json.length} branch${json.length === 1 ? '' : 'es'}`, listed(lines, json.length))
+      }
+      if (isRecord(json)) {
+        const name = str(json.name)
+        const sha = shortSha(str((isRecord(json.commit) ? json.commit : {}).sha))
+        if (!name && !sha) return undefined
+        return cardOutput(name, [name ?? '', sha ? `@ ${sha}` : ''].filter(Boolean).join(' '))
+      }
+    }
+
+    if (a === 'pulls') {
+      if (b && c === 'merge') {
+        const record = isRecord(json) ? json : {}
+        const message = firstLine(str(record.message))
+        return cardOutput(
+          `#${b} ${str(record.merged) === 'true' || record.merged === true ? 'merged' : 'merge result'}`,
+          [`merged: ${String(record.merged ?? '?')}`, shortSha(str(record.sha)), message, str(record.html_url) ?? '']
+            .filter(Boolean)
+            .join(' · '),
+        )
+      }
+      if (Array.isArray(json)) {
+        const lines = json.map((entry) => {
+          const e = isRecord(entry) ? entry : {}
+          return `#${num(e.number) ?? '?'} ${firstLine(str(e.title)) || '(no title)'} · ${str(e.state) ?? ''}`.trim()
+        })
+        return cardOutput(`${json.length} pull request${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
+      }
+      if (isRecord(json)) {
+        const number = num(json.number)
+        const label = [number == null ? '' : `#${number}`, firstLine(str(json.title)) || ''].filter(Boolean).join(' ')
+        const line = [
+          str(json.state) ?? '',
+          num(json.commits) == null ? '' : `${num(json.commits)} commit(s)`,
+          num(json.additions) == null ? '' : `+${num(json.additions)}`,
+          num(json.deletions) == null ? '' : `-${num(json.deletions)}`,
+          str(json.html_url) ?? '',
+        ].filter(Boolean).join(' · ')
+        return cardOutput(label || repo, line)
+      }
+    }
+
+    if (a === 'issues') {
+      if (Array.isArray(json)) {
+        const lines = json.map((entry) => {
+          const e = isRecord(entry) ? entry : {}
+          return `#${num(e.number) ?? '?'} ${firstLine(str(e.title)) || '(no title)'} · ${str(e.state) ?? ''}`.trim()
+        })
+        return cardOutput(`${json.length} issue${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
+      }
+      if (isRecord(json)) {
+        const number = num(json.number)
+        const label = [number == null ? '' : `#${number}`, firstLine(str(json.title)) || ''].filter(Boolean).join(' ')
+        return cardOutput(label || repo, [str(json.state) ?? '', str(json.html_url) ?? ''].filter(Boolean).join(' · '))
+      }
+    }
+
+    if (a === 'commits') {
+      if (Array.isArray(json)) {
+        const lines = json.map((entry) => {
+          const e = isRecord(entry) ? entry : {}
+          const commit = isRecord(e.commit) ? e.commit : {}
+          return `${shortSha(str(e.sha))} ${firstLine(str(commit.message))}`
+        })
+        return cardOutput(`${json.length} commit${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
+      }
+      if (isRecord(json)) {
+        const commit = isRecord(json.commit) ? json.commit : {}
+        return cardOutput(
+          shortSha(str(json.sha)),
+          [firstLine(str(commit.message)), str(json.html_url) ?? ''].filter(Boolean).join(' · '),
+        )
+      }
+    }
+
+    if (a === 'git') {
+      if (b === 'trees') {
+        if (isRecord(json) && Array.isArray(json.tree)) {
+          const entries = json.tree.filter(isRecord)
+          const lines = entries.map((entry) => {
+            const p = str(entry.path) ?? '?'
+            const size = num(entry.size)
+            return `${p}${size == null ? '' : ` · ${formatBytes(size)}`}`
+          })
+          const label = `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}${json.truncated === true ? ' · truncated' : ''}`
+          return cardOutput(label, listed(lines, entries.length))
+        }
+        if (c) {
+          const record = isRecord(json) ? json : {}
+          const tree = Array.isArray(record.tree) ? record.tree.filter(isRecord) : []
+          return cardOutput(
+            `tree ${c}`,
+            [shortSha(str(record.sha)), `${tree.length} entr${tree.length === 1 ? 'y' : 'ies'}`].filter(Boolean).join(' · '),
+          )
+        }
+        return cardOutput(undefined, isRecord(json) ? shortSha(str(json.sha)) : '')
+      }
+      if (b === 'commits' && isRecord(json)) {
+        const commit = isRecord(json.commit) ? json.commit : {}
+        return cardOutput(shortSha(str(json.sha)), [firstLine(str(commit.message)), str(json.html_url) ?? ''].filter(Boolean).join(' · '))
+      }
+      if (b === 'blobs' && isRecord(json)) {
+        const size = num(json.size)
+        const caption = [shortSha(str(json.sha)), size == null ? '' : formatBytes(size)].filter(Boolean).join(' · ')
+        const content = str(json.content)
+        if (str(json.encoding) === 'base64' && content) {
+          const decoded = decodeBase64Preview(content)
+          if (decoded != null && !looksBinary(decoded)) return cardOutput(caption, decoded)
+          return cardOutput(caption, 'Binary file — nothing to preview.')
+        }
+        return cardOutput(caption, [str(json.encoding) ?? ''].filter(Boolean).join(' · '))
+      }
+      if (b === 'ref' && isRecord(json)) {
+        const branch = str(json.ref) ?? d ?? ''
+        const sha = shortSha(str((isRecord(json.object) ? json.object : {}).sha))
+        if (!branch && !sha) return undefined
+        return cardOutput(branch, [branch, sha ? `@ ${sha}` : ''].filter(Boolean).join(' '))
+      }
+      if (b === 'refs') {
+        const record = isRecord(json) ? json : {}
+        const branch = str(record.ref) ?? ''
+        const sha = shortSha(str((isRecord(record.object) ? record.object : {}).sha))
+        if (!branch && !sha) return undefined
+        return cardOutput(branch, [branch, sha ? `@ ${sha}` : ''].filter(Boolean).join(' '))
+      }
+    }
+
+    if (tail.length === 0 && isRecord(json)) {
+      return cardOutput(
+        str(json.full_name) ?? repo,
+        [
+          str(json.description) ?? '',
+          str(json.default_branch) ? `default ${str(json.default_branch)}` : '',
+          num(json.stargazers_count) == null ? '' : `${num(json.stargazers_count)} ★`,
+          str(json.html_url) ?? '',
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      )
+    }
+  }
+
+  /* ---------------- account, search, gists, budget ---------------- */
+  if (head === 'user' && second === 'repos') {
+    if (Array.isArray(json)) {
+      const lines = json.map((entry) => (isRecord(entry) ? str(entry.full_name) ?? str(entry.name) ?? '' : ''))
+      return cardOutput(`${json.length} repositor${json.length === 1 ? 'y' : 'ies'}`, listed(lines.filter(Boolean), json.length))
+    }
+  }
+  if (head === 'user' && !second && isRecord(json)) {
+    return cardOutput(str(json.login), [`@${str(json.login) ?? '?'}`, str(json.name) ?? ''].filter(Boolean).join(' · '))
+  }
+  if (head === 'search') {
+    const record = isRecord(json) ? json : {}
+    const total = num(record.total_count)
+    const items = Array.isArray(record.items) ? record.items.filter(isRecord) : []
+    const lines = items.map((item) => {
+      const repo = isRecord(item.repository) ? item.repository : {}
+      const where = str(repo.full_name) ?? str(item.repository_url) ?? ''
+      const label = str(item.path) ?? str(item.full_name) ?? str(item.name) ?? str(item.title) ?? '(result)'
+      const fragment = Array.isArray(item.text_matches) && isRecord(item.text_matches[0]) ? str(item.text_matches[0].fragment) : undefined
+      return [label, where ? ` — ${where}` : '', fragment ? `\n  ${firstLine(fragment)}` : ''].join('')
+    })
+    return cardOutput(`${total ?? items.length} result${(total ?? items.length) === 1 ? '' : 's'}`, listed(lines, items.length))
+  }
+  if (head === 'gists') {
+    if (isRecord(json)) {
+      const files = isRecord(json.files) ? Object.keys(json.files) : []
+      return cardOutput(str(json.id), [str(json.html_url) ?? '', files.join(', ')].filter(Boolean).join(' · '))
+    }
+    if (Array.isArray(json)) {
+      const lines = json.map((entry) => {
+        const e = isRecord(entry) ? entry : {}
+        return `${str(e.id) ?? '?'} ${firstLine(str(e.description))}`
+      })
+      return cardOutput(`${json.length} gist${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
+    }
+  }
+  if (head === 'rate_limit' && isRecord(json)) {
+    const resources = isRecord(json.resources) ? json.resources : {}
+    const lines = Object.entries(resources)
+      .filter(([, value]) => isRecord(value))
+      .map(([name, value]) => {
+        const v = value as Record<string, unknown>
+        return `${name}: ${num(v.remaining) ?? '?'}/${num(v.limit) ?? '?'}`
+      })
+    return cardOutput('api.github.com budget', lines.join('\n'))
+  }
+
+  return summarizeUnknown(json)
 }

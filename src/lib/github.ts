@@ -13,7 +13,8 @@
  */
 
 import { redactSecrets } from '../providers/base'
-import type { GitHubCallLike } from './github-actions'
+import { describeGitHubOutput, type GitHubCallLike } from './github-actions'
+import type { GitHubActionOutput } from '../types'
 
 export const GITHUB_API = 'https://api.github.com'
 export const GITHUB_API_VERSION = '2022-11-28'
@@ -163,6 +164,8 @@ export interface GitHubCallEvent extends GitHubCallLike {
   error?: string
   /** `end` only: Slade cancelled this request (a superseded search, a sign-in abort). */
   aborted?: boolean
+  /** `end` only: a compact extract of the response, for the card's output panel. */
+  output?: GitHubActionOutput
 }
 
 type GitHubCallListener = (event: GitHubCallEvent) => void
@@ -324,7 +327,7 @@ async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
   const callId = ++callSeq
   const startedAt = Date.now()
   emitCall({ callId, phase: 'start', at: startedAt, method, path, query: opts.query, body: opts.body })
-  const finish = (end: { ok: boolean; status?: number; error?: string; aborted?: boolean }) =>
+  const finish = (end: { ok: boolean; status?: number; error?: string; aborted?: boolean; output?: GitHubActionOutput }) =>
     emitCall({
       callId,
       phase: 'end',
@@ -374,7 +377,13 @@ async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
   }
   try {
     const parsed = JSON.parse(text) as T
-    finish({ ok: true, status: res.status })
+    // The card is a request *and* its result: the observer carries a compact,
+    // clipped extract of the response so the card has output to show.
+    finish({
+      ok: true,
+      status: res.status,
+      output: describeGitHubOutput({ method, path, query: opts.query, body: opts.body, json: parsed }),
+    })
     return parsed
   } catch {
     const message = 'GitHub returned a response Slade could not parse.'

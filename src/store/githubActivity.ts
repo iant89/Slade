@@ -11,6 +11,12 @@
  * card goes into that run's message timeline instead, in the order it happened
  * between the run's thoughts. The ledger itself is runtime-only; it keeps the
  * session's running/idle state and folds identical repeats of the same call.
+ *
+ * The card itself is drawn like a Memory Added card (see
+ * `components/github/GitHubActivity.tsx`), with two things it can add: `output`
+ * — the clipped extract the REST client captured — sits behind an expand
+ * toggle, and `question` renders its choices as buttons at the bottom for an
+ * action that cannot finish without a user's answer.
  */
 
 import { create } from 'zustand'
@@ -21,7 +27,13 @@ import {
   githubActionTitle,
   type GitHubActionKind,
 } from '../lib/github-actions'
-import type { GitHubActionArtifact, GitHubActionStatus, Message } from '../types'
+import type {
+  GitHubActionArtifact,
+  GitHubActionOutput,
+  GitHubActionQuestion,
+  GitHubActionStatus,
+  Message,
+} from '../types'
 import { onGitHubCall } from '../lib/github'
 import { useChat } from './chat'
 import { appendAgentGitHubCard, updateAgentGitHubCard } from './agentTimeline'
@@ -48,6 +60,13 @@ export interface GitHubActionInput {
   repo?: string
   ref?: string
   error?: string
+  /** Output for the card's expand panel, when the action produced any. */
+  output?: GitHubActionOutput
+  /**
+   * Set when the action cannot finish on its own: the card asks the question
+   * and renders its choices as buttons at the bottom.
+   */
+  question?: GitHubActionQuestion
 }
 
 /** Identical repeats of the newest call within this window fold into one card. */
@@ -70,8 +89,23 @@ export interface GitHubActivityState {
   logDone: (input: GitHubActionInput) => string
   complete: (
     id: string,
-    patch: { status: GitHubActionStatus; elapsedMs?: number; error?: string; subject?: string },
+    patch: {
+      status: GitHubActionStatus
+      elapsedMs?: number
+      error?: string
+      subject?: string
+      output?: GitHubActionOutput
+      /** Attach (or replace) the question this card asks the user. */
+      question?: GitHubActionQuestion
+    },
   ) => void
+  /**
+   * Record the user's answer to a card that asked a question, closing the
+   * question (`response` is kept on the card, so the answer survives a reload).
+   * No-op for a card that asked nothing, or that has already been answered.
+   * Fires `slade:github-response` on `window` for whatever asked.
+   */
+  respond: (id: string, choiceId: string) => void
   /** Attribute every card logged from now on to `id` and its assistant message. */
   enterScope: (id: string, messageId?: string) => void
   /** Stop attributing cards to `id` (safe out of order, e.g. two open chats). */
@@ -96,6 +130,8 @@ function toArtifact(entry: GitHubActionEntry): GitHubActionArtifact {
     elapsedMs: entry.elapsedMs,
     error: entry.error,
     count: entry.count,
+    output: entry.output,
+    question: entry.question,
   }
 }
 
@@ -116,6 +152,8 @@ function toEntry(
     at: Date.now(),
     count: 1,
     error: input.error,
+    output: input.output,
+    question: input.question,
     scope,
     messageId,
   }
@@ -201,12 +239,48 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
           elapsedMs:
             patch.elapsedMs ?? entry.elapsedMs ?? (patch.status === 'running' ? undefined : Date.now() - entry.at),
           error: patch.error ?? entry.error,
+          output: patch.output ?? entry.output,
+          question: patch.question ?? entry.question,
         }
         return updated
       })
       return updated ? { entries } : st
     })
     if (updated) placeCard(updated)
+  },
+
+  respond: (id, choiceId) => {
+    let updated: GitHubActionEntry | undefined
+    set((st) => {
+      const entries = st.entries.map((entry) => {
+        // A card that asked nothing, or that already has an answer, is left
+        // exactly as it is: one question, one answer.
+        if (entry.id !== id || !entry.question || entry.question.response) return entry
+        if (!entry.question.choices.some((choice) => choice.id === choiceId)) return entry
+        updated = {
+          ...entry,
+          // A question answered while the call was still open closes it: there
+          // is nothing left for the card to wait for.
+          status: entry.status === 'running' ? 'done' : entry.status,
+          elapsedMs: entry.elapsedMs ?? Date.now() - entry.at,
+          question: { ...entry.question, response: choiceId, respondedAt: Date.now() },
+        }
+        return updated
+      })
+      return updated ? { entries } : st
+    })
+    if (!updated) return
+    placeCard(updated)
+    // Generic by design: nothing in the card knows what the answer is for.
+    // Whoever asked listens for this and carries the choice out.
+    const answered = updated
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('slade:github-response', {
+          detail: { id: answered.id, kind: answered.kind, choiceId, question: answered.question?.question },
+        }),
+      )
+    }
   },
 
   // There is deliberately no remove/clear operation: action cards are part of
@@ -238,12 +312,15 @@ const absorbed = new Map<number, string>()
 function finishCall(
   activity: GitHubActivityState,
   id: string,
-  event: { ok?: boolean; aborted?: boolean; elapsedMs?: number; error?: string },
+  event: { ok?: boolean; aborted?: boolean; elapsedMs?: number; error?: string; output?: GitHubActionOutput },
 ): void {
   activity.complete(id, {
     status: event.aborted ? 'cancelled' : event.ok ? 'done' : 'error',
     elapsedMs: event.elapsedMs,
     error: event.aborted ? 'Cancelled' : event.ok ? undefined : event.error,
+    // What the call returned is the card's output panel — a failed call keeps
+    // its error instead, and carries no output.
+    output: event.ok && !event.aborted ? event.output : undefined,
   })
 }
 

@@ -21,7 +21,7 @@ const NO_COMPONENT_OVERRIDES = {}
 /**
  * The chat panel: the conversation's messages, in one scroll area above the
  * composer. GitHub actions are messages here too — a standalone call is its own
- * one-line card message, and a run's calls are interleaved into that assistant
+ * card message, and a run's calls are interleaved into that assistant
  * message's timeline (see `../github/GitHubActivity`). Everything scrolls with
  * the log.
  */
