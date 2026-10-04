@@ -327,8 +327,21 @@ as context**):
 | Archives / unknown | neutral card with MIME, size, download |
 
 Files pulled in from a GitHub repository are the same cards, with their origin
-kept on the card (`repo @ ref`, path, "open on GitHub") and a **Publish to
-GitHub** action in the footer.
+kept on the card (`repo @ ref`, path, "open on GitHub") and a **Push to GitHub**
+action in the footer.
+
+The footer's actions are **icons with tooltips** — a card is narrow and the row
+is up to six buttons wide, so the words live in the tooltip (and in the button's
+accessible name) instead of on the button:
+
+| Icon | Tooltip | What it does |
+| --- | --- | --- |
+| copy | **Copy reference** | Copies `name (mime, size)` to the clipboard |
+| pin | **Revise** | Queues the file as an attachment, so the model gets it back as context with your next message |
+| GitHub mark | **Push to GitHub** | Opens the publish dialog: a commit, a gist, an issue or a pull request |
+| folder | **Save** | Writes the file into Local Files and opens it there — once it is saved, the same button reads **Open in Files** |
+| external link | **Open on GitHub** | Only on a card that came from a repository: its permalink |
+| download | **Download** | Only when the card has bytes to hand over |
 
 Cards arrive **collapsed** — the name and an expand toggle, nothing else — so a
 transcript full of them stays scannable; **Settings → Artifacts → Collapse
@@ -348,7 +361,7 @@ halves, both wired into the thread:
   title and a description, and Slade opens it. The card that lands in the chat
   is where you read it and merge it (below).
 - **Publishing** — every artifact card (bar the one-line Memory Added card) and
-  every message has *Publish to GitHub*: create a **gist** (secret by default),
+  every message has *Push to GitHub*: create a **gist** (secret by default),
   **commit a file** into a repo
   (binary files too; existing paths update in place, or commit onto a fresh
   branch with one toggle), or open an **issue** with the content in the body and
@@ -385,8 +398,8 @@ as `VITE_GITHUB_CLIENT_ID` so visitors have nothing to configure.
 Every request Slade sends to `api.github.com` — plus the GitHub actions that go
 somewhere else (the OAuth device flow, signing out, cloning a repo's files into
 Local Files) — shows up as a **GitHub Action card**, built like the Memory Added
-card: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
-the thing it touched (`/src/lib/util.ts`) underneath.
+card: the GitHub mark, the action ("`GitHub Action: Created File`"), and the
+thing it touched (`/docs/answer.md`) underneath.
 
 - **A call is inserted like a saved memory.** Each card becomes an entry of its
   own in the conversation and takes the same slot in it a Memory Added card
@@ -398,11 +411,26 @@ the thing it touched (`/src/lib/util.ts`) underneath.
   cards render in that run's activity timeline, in the order things happened,
   between the thoughts that led to them, and are saved with the run's answer.
 - **A card carries its result, and only its result.** The REST client captures a
-  compact, redacted extract of every successful response — the file a read
-  returned, a listing, the sha and URL a write produced — and the card grows an
+  compact, redacted extract of every successful response — a listing, the sha and
+  URL a write produced, the pull request a call opened — and the card grows an
   expand toggle only when there is output to read. No output, no toggle: routine
   calls stay one line. A failed call gets the same toggle for its error, and the
   repo, branch, timing and call count stay in the card's tooltip.
+- **Reading files is one card for the whole batch.** Pulling a repository's files
+  is twenty reads of one repo, not twenty things that happened, so consecutive
+  reads of the same repo and branch fold into a single
+  "`GitHub Action: Get File Contents`" card. Its sub-title is how many files it
+  stands for — **3 Files** — and its block is the list of them: the repository
+  they came from, then one path per line, appended as each read lands. A read
+  that failed says so on its own line (`/docs/answer.md — failed: …`) instead of
+  taking a card of its own. The block never holds file contents: the files
+  themselves land in Local Files, where they can be read in full.
+- **Housekeeping reads are not inserted at all.** The calls Slade makes on its
+  own — filling the composer's repository and branch pickers when a chat opens,
+  restoring the repo of a previous session, re-reading a tree behind a commit,
+  refreshing the changes chip — happen, fail loudly where a failure is shown, and
+  are never turned into a card: nothing the user asked for happened. Anything the
+  user clicked (open a repo, switch branch, reload the list) is logged as usual.
 - **A call that needs an answer asks on its card.** A GitHub action can carry a
   question and up to a handful of choices; the card renders them as buttons at
   the bottom, records the chosen answer on the card (so it survives a reload)
@@ -425,7 +453,7 @@ the thing it touched (`/src/lib/util.ts`) underneath.
   gists, issues, token checks, rate-limit checks, sign-in, sign-out, cloning.
   Anything unmapped still gets a card with its path, so no call can slip past
   unlogged.
-- A repeat of the newest identical call (the same file pulled twice in a few
+- A repeat of the newest identical call (the same branch read twice in a few
   seconds) folds into that card rather than adding a second one; the count and
   everything else about it sit in the tooltip. A call cancelled mid-flight keeps
   its card, cancelled, instead of vanishing.

@@ -166,7 +166,15 @@ import {
   finishGitHubAction,
 } from '../src/store/githubActivity'
 import { appendAgentThought } from '../src/store/agentTimeline'
-import { describeGitHubCall, describeGitHubOutput, githubActionTitle, GITHUB_ACTION_TITLE, MAX_OUTPUT_CHARS } from '../src/lib/github-actions'
+import {
+  describeGitHubCall,
+  describeGitHubOutput,
+  fileReadOutput,
+  fileReadSubject,
+  githubActionTitle,
+  GITHUB_ACTION_TITLE,
+  MAX_OUTPUT_CHARS,
+} from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
@@ -2659,6 +2667,7 @@ async function testGitHubActionCards() {
     '/user/repos': () => ({ status: 200, json: [{ id: 1, name: 'demo', full_name: 'octo/demo', owner: { login: 'octo', avatar_url: '' }, private: false, fork: false, archived: false, description: 'demo', default_branch: 'main', html_url: 'https://github.com/octo/demo', pushed_at: null, updated_at: null, language: 'TypeScript', stargazers_count: 1 }] }),
     '/repos/octo/demo/git/trees/main': () => ({ status: 200, json: { truncated: false, tree: [{ path: 'src/lib/util.ts', mode: '100644', type: 'blob', sha: 'b1', size: utilText.length }] } }),
     '/repos/octo/demo/contents/src/lib/util.ts': () => ({ status: 200, json: { type: 'file', name: 'util.ts', path: 'src/lib/util.ts', sha: 'b1', size: utilText.length, encoding: 'base64', content: Buffer.from(utilText).toString('base64') } }),
+    '/repos/octo/demo/contents/src/lib/other.ts': () => ({ status: 200, json: { type: 'file', name: 'other.ts', path: 'src/lib/other.ts', sha: 'b2', size: 18, encoding: 'base64', content: Buffer.from('export const b = 1\n').toString('base64') } }),
     '/repos/octo/demo/contents/docs/answer.md': (body, meta) =>
       meta.method === 'PUT'
         ? { status: 201, json: { content: { path: 'docs/answer.md', sha: 'n1', html_url: 'https://github.com/octo/demo/blob/main/docs/answer.md' }, commit: { sha: 'c0ffee1234', html_url: 'https://github.com/octo/demo/commit/c0ffee1234' } } }
@@ -2683,7 +2692,12 @@ async function testGitHubActionCards() {
   }) as typeof fetch
 
   const observed: string[] = []
-  const off = onGitHubCall((e) => observed.push(`${e.phase}:${e.method}:${e.path}`))
+  /** Requests Slade made on its own — logged to nobody, so the count below skips them. */
+  const background: string[] = []
+  const off = onGitHubCall((e) => {
+    observed.push(`${e.phase}:${e.method}:${e.path}`)
+    if (e.phase === 'start' && e.quiet) background.push(e.path)
+  })
   useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
   // Earlier suites may already have logged cards into the open conversation;
   // only the cards this test's own calls append are compared with the ledger.
@@ -2708,16 +2722,29 @@ async function testGitHubActionCards() {
     // each one gets its own card.
     useFs.getState().writeFile('docs/roadmap.md', '# roadmap\n', { source: { origin: 'user' } })
     await useGitHub.getState().commitFsToGitHub({ paths: ['docs/roadmap.md'], repo: 'octo/demo', branch: 'main', message: 'Apply agent changes (1 file)', silent: true })
-    // The branch list and the tree refresh are background calls: let them land.
+    // The tree refresh a commit does behind itself is a background call (and a
+    // quiet one): let it land.
     await new Promise((r) => setTimeout(r, 120))
 
+    // A read of a file that is not there: still a card, and one that says so.
+    // (The probe a publish makes to find the file's current sha is internal to
+    // the write, so it is quiet and gets no card of its own.) It comes after the
+    // commit's cards on purpose — a read folds into the read card before it, and
+    // this one is meant to stand alone.
+    await useGitHub.getState().openFile('docs/answer.md')
+
     // Cloning files into Local Files is a store action, not one API call, so it
-    // logs its own card on top of the reads it performs.
-    const pulled = await useGitHub.getState().pullTreeToFs({ paths: ['src/lib/util.ts'], silent: true })
-    check('pulling files lands them in Local Files', pulled.length === 1 && pulled[0]?.path === 'src/lib/util.ts', JSON.stringify(pulled.map((f) => f.path)))
+    // logs its own card on top of the reads it performs — and those reads are
+    // one card between them, not one each.
+    const pulled = await useGitHub.getState().pullTreeToFs({ paths: ['src/lib/util.ts', 'src/lib/other.ts'], silent: true })
+    check(
+      'pulling files lands them in Local Files',
+      pulled.length === 2 && pulled[0]?.path === 'src/lib/util.ts' && pulled[1]?.path === 'src/lib/other.ts',
+      JSON.stringify(pulled.map((f) => f.path)),
+    )
 
     const titles = () => useGitHubActivity.getState().entries.map((e) => `${e.title} ${e.subject}`)
-    check('a clone gets its own card', titles().some((t) => t === 'GitHub Action: Cloning Repository 1 of 1 file in Local Files'), JSON.stringify(titles()))
+    check('a clone gets its own card', titles().some((t) => t === 'GitHub Action: Cloning Repository 2 of 2 files in Local Files'), JSON.stringify(titles()))
     check(
       'listing repos logs a card with no subject line',
       useGitHubActivity.getState().entries.some((e) => e.title === 'GitHub Action: Refreshing Repository List' && e.subject === ''),
@@ -2730,10 +2757,80 @@ async function testGitHubActionCards() {
     )
     check('opening a repo logs a card', titles().some((t) => t === 'GitHub Action: Fetching Repository octo/demo'), JSON.stringify(titles()))
     check('reading the tree logs a card', titles().some((t) => t.startsWith('GitHub Action: Read Repository Tree')), JSON.stringify(titles()))
-    check('reading a file logs it with its path', titles().some((t) => t === 'GitHub Action: Get File Contents /src/lib/util.ts'), JSON.stringify(titles()))
-    check('a missing file logs a read that failed', titles().some((t) => t === 'GitHub Action: Get File Contents /docs/answer.md'), JSON.stringify(titles()))
-    const failed = useGitHubActivity.getState().entries.find((e) => e.subject === '/docs/answer.md' && e.status === 'error')
-    check('the failed read is marked as an error, not hidden', Boolean(failed), JSON.stringify(failed))
+    check(
+      'reading a file logs a card sub-titled with its file count, not its path',
+      titles().some((t) => t === 'GitHub Action: Get File Contents 1 File'),
+      JSON.stringify(titles()),
+    )
+    check(
+      '…and the path it read is a line of the card\'s block instead',
+      useGitHubActivity.getState().entries.some((e) => e.kind === 'get-file' && e.output?.text === '/src/lib/util.ts'),
+      JSON.stringify(useGitHubActivity.getState().entries.filter((e) => e.kind === 'get-file').map((e) => e.output)),
+    )
+    const failed = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.status === 'error')
+    check('a missing file logs a read that failed', Boolean(failed) && failed.subject === '1 File', JSON.stringify(failed))
+    check(
+      'the failed read is marked as an error, not hidden',
+      Boolean(failed?.error) && failed?.output?.text.includes('/docs/answer.md — failed') === true,
+      JSON.stringify(failed?.output),
+    )
+
+    /* ---- a batch of reads is one card ---- */
+    const reads = useGitHubActivity.getState().entries.filter((e) => e.kind === 'get-file')
+    const batch = reads[reads.length - 1]!
+    check(
+      'pulling two files is one read card, not two',
+      reads.length === 3 && batch.count === 2 && batch.status === 'done',
+      JSON.stringify(reads.map((e) => [e.subject, e.count, e.status])),
+    )
+    check('…sub-titled with how many files it stands for', batch.subject === '2 Files', batch.subject)
+    check(
+      '…whose block is every repository path it fetched, one line each',
+      batch.output?.text === '/src/lib/util.ts\n/src/lib/other.ts',
+      JSON.stringify(batch.output?.text),
+    )
+    check(
+      '…the sub-title counting the entries in that block',
+      batch.subject === fileReadSubject((batch.output?.text ?? '').split('\n').length),
+      `${batch.subject} vs ${(batch.output?.text ?? '').split('\n').length} lines`,
+    )
+    check(
+      '…captioned with the repository the files came from',
+      batch.output?.label === 'octo/demo @ main · 2 Files',
+      String(batch.output?.label),
+    )
+    check(
+      '…and it keeps no file contents — the files themselves are in Local Files',
+      !(batch.output?.text ?? '').includes('export const'),
+      JSON.stringify(batch.output?.text),
+    )
+
+    /* ---- background reads are never inserted ---- */
+    check(
+      'opening a repo fills the branch picker without a card for it',
+      background.some((path) => path === '/repos/octo/demo/branches') &&
+        !titles().some((t) => t.includes('Fetching Branches')),
+      JSON.stringify(background),
+    )
+    const cardsBeforeQuiet = useGitHubActivity.getState().entries.length
+    const callsBeforeQuiet = fake.seen.length
+    useGitHub.setState({ branches: [] })
+    await useGitHub.getState().loadBranches({ quiet: true })
+    check(
+      'a background read still happens, and still lands in the store — it is only the card that is skipped',
+      fake.seen.length > callsBeforeQuiet &&
+        useGitHubActivity.getState().entries.length === cardsBeforeQuiet &&
+        useGitHub.getState().branches.length > 0,
+      `${fake.seen.length - callsBeforeQuiet} call(s), ${useGitHubActivity.getState().entries.length - cardsBeforeQuiet} card(s)`,
+    )
+    const cardsBeforeLoud = useGitHubActivity.getState().entries.length
+    await useGitHub.getState().loadBranches({ force: true })
+    check(
+      '…while the same read the user asks for is logged',
+      useGitHubActivity.getState().entries.length === cardsBeforeLoud + 1 &&
+        titles().some((t) => t === 'GitHub Action: Fetching Branches octo/demo'),
+      `${useGitHubActivity.getState().entries.length - cardsBeforeLoud} card(s)`,
+    )
     check('a git commit is logged with its message', titles().some((t) => t === 'GitHub Action: Created Commit Apply agent changes (1 file)'), JSON.stringify(titles()))
     check('the commit tree is logged with its file count', titles().some((t) => t === 'GitHub Action: Created Commit Tree 1 file staged'), JSON.stringify(titles()))
     check('the ref move is logged', titles().some((t) => t.startsWith('GitHub Action: Moved Branch main')), JSON.stringify(titles()))
@@ -2744,9 +2841,9 @@ async function testGitHubActionCards() {
       .getState()
       .entries.filter((e) => e.kind === 'clone-repo' || e.kind === 'sign-in' || e.kind === 'sign-out').length
     check(
-      'the log counts every api call once',
-      useGitHubActivity.getState().total === fake.seen.length + handLogged,
-      `${useGitHubActivity.getState().total} vs ${fake.seen.length}+${handLogged}`,
+      'the log counts every api call it logged once — a background read is logged to nobody',
+      useGitHubActivity.getState().total === fake.seen.length - background.length + handLogged,
+      `${useGitHubActivity.getState().total} vs ${fake.seen.length}-${background.length}+${handLogged}`,
     )
     check(
       'the observer pairs every start with an end',
@@ -2782,16 +2879,16 @@ async function testGitHubActionCards() {
     check('a hand-closed card carries its failure', errored?.status === 'error' && errored.error === 'GitHub unreachable', JSON.stringify(errored))
 
     /* ---- the response becomes the card's output ---- */
-    const entry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.subject === '/src/lib/util.ts')
+    const entry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.output?.text === '/src/lib/util.ts')
     check('the read card is in the log', Boolean(entry), JSON.stringify(titles()))
     check(
-      "a file read keeps the file's contents as the card's output",
-      entry?.output?.text === utilText.trim() && entry.output.language === 'typescript',
+      'a file read keeps the repository path it fetched, and not the file',
+      entry?.output?.text === '/src/lib/util.ts' && entry.output.language === undefined && !JSON.stringify(entry?.output).includes(utilText.trim()),
       JSON.stringify(entry?.output),
     )
     check(
-      'the output is labelled with the path and size',
-      entry?.output?.label?.includes('/src/lib/util.ts') === true && entry?.output?.label?.includes('B') === true,
+      'the block is captioned with the repository it was read from',
+      entry?.output?.label === 'octo/demo @ main · 1 File',
       String(entry?.output?.label),
     )
     const treeEntry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-tree' && e.status === 'done')
@@ -2800,22 +2897,26 @@ async function testGitHubActionCards() {
       Boolean(treeEntry?.output?.text.includes('src/lib/util.ts')),
       JSON.stringify(treeEntry?.output),
     )
-    const failedEntry = useGitHubActivity.getState().entries.find((e) => e.subject === '/docs/answer.md' && e.status === 'error')
+    const failedEntry = useGitHubActivity.getState().entries.find((e) => e.kind === 'get-file' && e.status === 'error')
     check(
-      'a failed call keeps its error instead of an output panel',
-      failedEntry?.output === undefined && Boolean(failedEntry?.error),
+      'a failed read says which file failed, in the block that lists them',
+      failedEntry?.output?.text.startsWith('/docs/answer.md — failed') === true && Boolean(failedEntry?.error),
       JSON.stringify(failedEntry?.output),
     )
-    const quietId = logGitHubActionDone({ kind: 'test-token', subject: '@octo' })
-    const quietEntry = useGitHubActivity.getState().entries.find((e) => e.id === quietId)!
-    check('no output is captured for a call that returned nothing', quietEntry.output === undefined, JSON.stringify(quietEntry.output))
+    const noOutputId = logGitHubActionDone({ kind: 'test-token', subject: '@octo' })
+    const noOutputEntry = useGitHubActivity.getState().entries.find((e) => e.id === noOutputId)!
+    check('no output is captured for a call that returned nothing', noOutputEntry.output === undefined, JSON.stringify(noOutputEntry.output))
 
     /* ---- the rendered card ---- */
     const card = renderToString(createElement(GitHubActionCard, { entry: entry! })).replace(/<!-- -->/g, '')
     check('the card is an artifact card, like Memory Added', card.includes('artifact-card gh-artifact-card'), card.slice(0, 160))
     check('the card shows the github mark', card.includes('viewBox="0 0 16 16"'), card.slice(0, 160))
     check('the card title is the action', card.includes('GitHub Action: Get File Contents'), card.slice(0, 240))
-    check('the card sub-title is the path', card.includes('gh-artifact-subject') && card.includes('/src/lib/util.ts'), card.slice(0, 320))
+    check(
+      'the card sub-title is how many files it stands for',
+      card.includes('gh-artifact-subject') && card.includes('1 File') && !card.includes('/src/lib/util.ts'),
+      card.slice(0, 320),
+    )
     check(
       'the card leaves the repo, the timing and the status glyph out of its markup',
       !card.includes('octo/demo@main') && !card.includes('gh-artifact-side') && !card.includes('gh-artifact-time'),
@@ -2831,12 +2932,21 @@ async function testGitHubActionCards() {
       card.includes('aria-expanded="false"') && card.includes('Show output') && card.includes('flip-v') === false,
       card.slice(0, 260),
     )
-    check('…and the output itself is not drawn until it is opened', !card.includes(utilText), card.slice(0, 320))
+    check('…and the file list itself is not drawn until it is opened', !card.includes('/src/lib/util.ts'), card.slice(0, 320))
     const openedCard = renderToString(createElement(GitHubActionCard, { entry: entry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
     check(
-      'opening the card shows the captured output, highlighted as code',
-      openedCard.includes('aria-expanded="true"') && openedCard.includes('code-artifact') && openedCard.includes('answer'),
+      'opening the card shows the repository path it fetched, as a plain list',
+      openedCard.includes('aria-expanded="true"') && openedCard.includes('gh-artifact-output') && openedCard.includes('/src/lib/util.ts') && !openedCard.includes('code-artifact'),
       openedCard.slice(0, 320),
+    )
+    const batchCard = renderToString(createElement(GitHubActionCard, { entry: batch, defaultExpanded: true })).replace(/<!-- -->/g, '')
+    check(
+      'a folded batch reads as one card listing every file, and never repeats its count as “calls”',
+      batchCard.includes('2 Files') &&
+        batchCard.includes('/src/lib/util.ts') &&
+        batchCard.includes('/src/lib/other.ts') &&
+        !batchCard.includes('2 calls'),
+      batchCard.slice(0, 400),
     )
     check('the opened panel is captioned with the response label', openedCard.includes('gh-artifact-label') && openedCard.includes(entry!.output!.label!), openedCard.slice(0, 300))
     const treeCard = renderToString(createElement(GitHubActionCard, { entry: treeEntry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
@@ -2845,22 +2955,23 @@ async function testGitHubActionCards() {
       treeCard.includes('gh-artifact-output') && treeCard.includes('src/lib/util.ts') && !treeCard.includes('code-artifact'),
       treeCard.slice(0, 320),
     )
-    const quietCard = renderToString(createElement(GitHubActionCard, { entry: quietEntry })).replace(/<!-- -->/g, '')
+    const noOutputCard = renderToString(createElement(GitHubActionCard, { entry: noOutputEntry })).replace(/<!-- -->/g, '')
     check(
       'a card with nothing to show has no expand button and no footer',
-      !quietCard.includes('aria-expanded') && !quietCard.includes('<button') && !quietCard.includes('artifact-foot'),
-      quietCard.slice(0, 300),
+      !noOutputCard.includes('aria-expanded') && !noOutputCard.includes('<button') && !noOutputCard.includes('artifact-foot'),
+      noOutputCard.slice(0, 300),
     )
     check(
-      'a failed card can show why, without claiming an output it does not have',
+      'a failed read card says it failed, and its block says which file and why',
       (() => {
         const collapsedHtml = renderToString(createElement(GitHubActionCard, { entry: failedEntry! })).replace(/<!-- -->/g, '')
         const openHtml = renderToString(createElement(GitHubActionCard, { entry: failedEntry!, defaultExpanded: true })).replace(/<!-- -->/g, '')
         return (
+          collapsedHtml.includes('status-error') &&
           collapsedHtml.includes('Show output') &&
           // The reason is already in the tooltip; the panel is what shows it in full.
           !collapsedHtml.includes('gh-artifact-output') &&
-          openHtml.includes('gh-artifact-output failed') &&
+          openHtml.includes('/docs/answer.md — failed') &&
           openHtml.includes(failedEntry!.error!)
         )
       })(),
@@ -2879,7 +2990,7 @@ async function testGitHubActionCards() {
       `${cards().length} cards for ${standalone.length} calls`,
     )
     check(
-      '…in the order the calls happened, one card per call',
+      '…in the order the calls happened, one card per logged call (a folded batch of reads is one of them)',
       cards().slice(cardsBefore).map((m) => m.githubAction!.id).join() === standalone.map((e) => e.id).join(),
       JSON.stringify(cards().slice(cardsBefore).map((m) => m.githubAction!.subject)),
     )
@@ -2914,9 +3025,20 @@ async function testGitHubActionCards() {
       messageHtml.slice(0, 260),
     )
     check(
-      '…carrying the action and what it touched',
-      messageHtml.includes('GitHub Action: Get File Contents') && messageHtml.includes('/src/lib/util.ts'),
+      '…carrying the action, how many files it touched, and where from',
+      messageHtml.includes('GitHub Action: Get File Contents') &&
+        messageHtml.includes('1 File') &&
+        messageHtml.includes('octo/demo @ main'),
       messageHtml.slice(0, 320),
+    )
+    const batchMessage = cards().find((m) => m.githubAction?.id === batch.id)!
+    const readMessages = cards().slice(cardsBefore).filter((m) => m.githubAction?.kind === 'get-file')
+    check(
+      'a batch of reads is one message in the conversation, not one per file',
+      cards().filter((m) => m.githubAction?.id === batch.id).length === 1 &&
+        readMessages.length === reads.length &&
+        renderToString(createElement(MessageBubble, { message: batchMessage })).includes('2 Files'),
+      JSON.stringify(readMessages.map((m) => m.githubAction?.subject)),
     )
     check(
       '…with no author line, no copy row and no message actions',
@@ -2998,7 +3120,7 @@ async function testGitHubActionCards() {
       persistedAsk.success &&
         Boolean(
           persistedAsk.data.messages.some(
-            (m) => m.githubAction?.id === entry!.id && m.githubAction.output?.text === utilText.trim() && m.githubAction.question === undefined,
+            (m) => m.githubAction?.id === entry!.id && m.githubAction.output?.text === '/src/lib/util.ts' && m.githubAction.question === undefined,
           ),
         ) &&
         Boolean(persistedAsk.data.messages.some((m) => m.githubAction?.id === asksId && m.githubAction.question?.response === 'merge')),
@@ -3016,18 +3138,24 @@ async function testGitHubActionCards() {
     check(
       'a card that asked nothing ignores an answer',
       (() => {
-        useGitHubActivity.getState().respond(quietId, 'merge')
-        const after = useGitHubActivity.getState().entries.find((e) => e.id === quietId)!
+        useGitHubActivity.getState().respond(noOutputId, 'merge')
+        const after = useGitHubActivity.getState().entries.find((e) => e.id === noOutputId)!
         return after.question === undefined && after.status === 'done'
       })(),
     )
 
     /* ---- a call in flight, and the card it leaves behind ---- */
-    const liveId = logGitHubAction({ kind: 'get-file', subject: '/live.ts', repo: 'octo/demo', ref: 'main' })
+    const liveId = logGitHubAction({
+      kind: 'get-file',
+      subject: fileReadSubject(1),
+      repo: 'octo/demo',
+      ref: 'main',
+      output: fileReadOutput('octo/demo', 'main', [{ path: '/live.ts' }]),
+    })
     const liveCard = cards().find((m) => m.githubAction?.id === liveId)
     check(
       'a call in flight is in the chat straight away',
-      liveCard?.githubAction?.status === 'running' && liveCard.githubAction.subject === '/live.ts',
+      liveCard?.githubAction?.status === 'running' && liveCard.githubAction.subject === '1 File',
       JSON.stringify(liveCard?.githubAction),
     )
     finishGitHubAction(liveId, { status: 'done' })
@@ -3380,8 +3508,25 @@ function testGitHubUiRenders() {
     const flattened = card.replace(/<!-- -->/g, '')
     check('a repo artifact shows its origin', flattened.includes('octo/demo@main'), flattened.slice(0, 200))
     check('a repo artifact links back to GitHub', card.includes('https://github.com/octo/demo/blob/main/src/answer.ts'))
-    check('a repo artifact is still a normal card', card.includes('answer.ts') && card.includes('Send back to model'))
-    check('a repo artifact offers publishing', card.includes('Publish to GitHub'))
+    check('a repo artifact is still a normal card', card.includes('answer.ts') && card.includes('Revise'))
+    check('a repo artifact offers pushing to GitHub', card.includes('Push to GitHub'))
+    check(
+      'every action on a file artifact is an icon with a tooltip, not a labelled button',
+      (() => {
+        const foot = flattened.slice(flattened.indexOf('artifact-foot'))
+        // Copy reference · Revise · Push to GitHub · Save · Open on GitHub
+        // (Download joins them whenever the card has bytes to hand over).
+        return (
+          foot.split('artifact-action is-icon').length - 1 === 5 &&
+          ['Copy reference', 'Revise', 'Push to GitHub', 'Save', 'Open on GitHub'].every((label) =>
+            foot.includes(`aria-label="${label}"`) && foot.includes(`title="${label}`),
+          ) &&
+          // The words live in the tooltip now: nothing is printed on the button.
+          !/>\s*(Copy reference|Revise|Push to GitHub|Save|Download)\s*</.test(foot)
+        )
+      })(),
+      flattened.slice(flattened.indexOf('artifact-foot'), flattened.indexOf('artifact-foot') + 700),
+    )
 
     uiInit.githubTab = 'files'
     const files = renderToString(createElement(GitHubPanel))
@@ -3767,6 +3912,72 @@ function testLocalFsPrimitives() {
     { op: 'delete', path: 'tmp/scratch.txt', at: 3 },
   ])
   check('formatFsOpSummary describes operations', summary === 'created src/math.ts, updated src/index.ts (v2), deleted tmp/scratch.txt', summary)
+}
+
+/**
+ * What an `fs:` directive fence looks like in the transcript.
+ *
+ * A fence that *carries* a file (` ```ts:src/a.ts `) is the model's output and
+ * becomes an artifact card. A fence that only *names* one — pull it from the
+ * repository, delete it, move it — is an instruction Slade carried out, and the
+ * file it pulled is not the model's output: no card, and no empty code block
+ * left behind where the directive was.
+ */
+function testFsDirectiveFencesRenderNothing() {
+  console.log('fs directive fences in the transcript:')
+
+  const render = (content: string) =>
+    renderToString(
+      createElement(MessageBubble, {
+        message: {
+          id: `msg_fence_${Math.random().toString(36).slice(2, 8)}`,
+          role: 'assistant' as const,
+          conversationId: 'conv_fence',
+          content,
+          createdAt: Date.now(),
+          status: 'complete' as const,
+          modelId: 'mock-pro',
+        },
+      }),
+    ).replace(/<!-- -->/g, '')
+
+  const artifactsBefore = Object.keys(useArtifacts.getState().byId).length
+
+  // Server rendering reads each store's *initial* snapshot, so the card a fence
+  // registers during the render draws as its skeleton here — what matters is
+  // that the slot exists at all (and that the live store gained the artifact,
+  // which the last check below asserts).
+  const written = render('Here you go:\n\n```ts:src/agent/runner.ts\nexport const run = 1\n```\n')
+  check(
+    'a file the model wrote is still an artifact card',
+    written.includes('artifact-card') && written.includes('Here you go:'),
+    written.slice(0, 240),
+  )
+
+  const pulled = render('Pulling it into Local Files:\n\n```fs:pull:src/agent/runner.ts\n```\n')
+  check(
+    'a file pulled from GitHub is not an artifact card in the message',
+    !pulled.includes('artifact-card') && pulled.includes('Pulling it into Local Files:'),
+    pulled.slice(0, 400),
+  )
+  check('…and leaves no empty code block behind', !pulled.includes('code-block'), pulled.slice(0, 400))
+  const pulledBody = render('```fs:pull\nsrc/agent/runner.ts\n```')
+  check(
+    '…nor when the path is the body of the directive',
+    !pulledBody.includes('artifact-card') && !pulledBody.includes('code-block'),
+    pulledBody.slice(0, 300),
+  )
+  const removed = render('```fs:delete:tmp/scratch.txt\n```\n```fs:move:a.ts -> b.ts\n```')
+  check(
+    'a delete or move directive is not a card or an empty block either',
+    !removed.includes('artifact-card') && !removed.includes('code-block'),
+    removed.slice(0, 300),
+  )
+  check(
+    'nothing was registered in the artifact store for a file Slade pulled',
+    Object.keys(useArtifacts.getState().byId).length === artifactsBefore + 1,
+    `${Object.keys(useArtifacts.getState().byId).length - artifactsBefore} new artifact(s)`,
+  )
 }
 
 function testLocalFsStore() {
@@ -4458,10 +4669,20 @@ async function testGitLocalFsReadWriteAcross() {
     check('the agent run stamped a GitHub scope on its message', typeof scope === 'string' && scope.length > 0, String(scope))
     check('the run released its scope when it finished', useGitHubActivity.getState().scopes.length === 0, JSON.stringify(useGitHubActivity.getState().scopes))
     const scoped = useGitHubActivity.getState().entries.filter((e) => e.scope === scope)
+    const scopedRead = scoped.find((e) => e.kind === 'get-file')!
     check(
       'the files the run pulled from GitHub are logged under that scope and message',
-      scoped.some((e) => e.kind === 'get-file' && e.subject === '/src/math.ts' && e.messageId === runMsg?.id),
+      scoped.some(
+        (e) => e.kind === 'get-file' && e.messageId === runMsg?.id && (e.output?.text ?? '').includes('/src/math.ts'),
+      ),
       JSON.stringify(scoped.map((e) => `${e.title} ${e.subject} → ${e.messageId}`)),
+    )
+    check(
+      '…as one card for the whole batch, listing every path it read',
+      scoped.filter((e) => e.kind === 'get-file').length === 1 &&
+        scopedRead.count >= 2 &&
+        scopedRead.subject === fileReadSubject(scopedRead.output!.text.split('\n').length),
+      JSON.stringify({ subject: scopedRead?.subject, count: scopedRead?.count, block: scopedRead?.output?.text }),
     )
     check(
       'the commit the button triggered afterwards is NOT part of the run',
@@ -4472,19 +4693,20 @@ async function testGitLocalFsReadWriteAcross() {
     const inlineArtifacts = runMsg?.agent?.timeline?.filter((item) => item.type === 'github') ?? []
     check(
       'the run message owns a snapshot of every scoped GitHub action',
-      inlineArtifacts.length === scoped.length && inlineArtifacts.some((item) => item.type === 'github' && item.card.subject === '/src/math.ts'),
+      inlineArtifacts.length === scoped.length &&
+        inlineArtifacts.some((item) => item.type === 'github' && (item.card.output?.text ?? '').includes('/src/math.ts')),
       JSON.stringify(inlineArtifacts.map((item) => item.type === 'github' ? `${item.card.title} ${item.card.subject}` : item.type)),
     )
     const inlineRun = renderToString(createElement(MessageBubble, { message: runMsg! })).replace(/<!-- -->/g, '')
     check(
       'the run message renders action cards in its timeline, not a grouped activity footer',
       inlineRun.includes('agent-activity-timeline') && inlineRun.includes('gh-artifact-card') &&
-        inlineRun.includes('/src/math.ts') && !inlineRun.includes('gh-activity'),
+        inlineRun.includes(scopedRead.subject) && !inlineRun.includes('gh-activity'),
       inlineRun.slice(Math.max(0, inlineRun.indexOf('agent-activity-timeline')), inlineRun.indexOf('agent-activity-timeline') + 500),
     )
     check(
       'a run-scoped card is not repeated as a message of its own',
-      !cardMessages().some((m) => m.githubAction?.subject === '/src/math.ts'),
+      !cardMessages().some((m) => m.githubAction?.id === scopedRead.id),
       JSON.stringify(cardMessages().map((m) => `${m.githubAction?.title} ${m.githubAction?.subject}`)),
     )
   } finally {
@@ -5521,8 +5743,8 @@ function testConversationHelpers() {
           id: 'gha_live',
           type: 'github',
           card: {
-            id: 'gha_live', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts',
-            status: 'running', at: 11, count: 1,
+            id: 'gha_live', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '1 File',
+            status: 'running', at: 11, count: 1, output: fileReadOutput('octo/demo', 'main', [{ path: '/src/a.ts' }]),
           },
         },
       ],
@@ -5936,7 +6158,16 @@ function testChatPanelUi() {
     content: '',
     createdAt: 1,
     status: 'complete',
-    githubAction: { id, kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
+    githubAction: {
+      id,
+      kind: 'get-file',
+      title: 'GitHub Action: Get File Contents',
+      subject: fileReadSubject(1),
+      status: 'done',
+      at: 1,
+      count: 1,
+      output: fileReadOutput('octo/demo', 'main', [{ path: '/src/a.ts' }]),
+    },
   })
   const label = () => html(createElement(Probe))
 
@@ -6010,7 +6241,16 @@ function testChatPanelRenders() {
       ...settled,
       id: 'msg_panel_action',
       content: '',
-      githubAction: { id: 'gha_render', kind: 'get-file', title: 'GitHub Action: Get File Contents', subject: '/src/a.ts', status: 'done', at: 1, count: 1 },
+      githubAction: {
+        id: 'gha_render',
+        kind: 'get-file',
+        title: 'GitHub Action: Get File Contents',
+        subject: fileReadSubject(1),
+        status: 'done',
+        at: 1,
+        count: 1,
+        output: fileReadOutput('octo/demo', 'main', [{ path: '/src/a.ts' }]),
+      },
     }
     seedConversations([convFixture('conv_render', 'Render', 10, { messages: [settled, actionCard] })], 'conv_render')
     const withAction = renderPanel()
@@ -6527,7 +6767,7 @@ async function testMemoryFeature() {
     check(
       '…and carries no footer actions at all',
       !collapsedCard.includes('artifact-foot') &&
-        !['Copy reference', 'Send back to model', 'Publish to GitHub', 'Save to Files', 'Download'].some((label) => collapsedCard.includes(label)),
+        !['Copy reference', 'Revise', 'Push to GitHub', 'Save', 'Download'].some((label) => collapsedCard.includes(label)),
       collapsedCard.slice(0, 300),
     )
     // The settings a fresh install ships with, unseeded: the note stays closed.
@@ -6564,8 +6804,24 @@ async function testMemoryFeature() {
     const ordinaryCard = renderToString(createElement(ArtifactCard, { artifactId: ordinary.id, conversationId })).replace(/<!-- -->/g, '')
     check(
       'an ordinary artifact card keeps its subtitle and its footer actions',
-      ordinaryCard.includes('artifact-sub') && ordinaryCard.includes('From Mock Pro') && ordinaryCard.includes('Copy reference') && ordinaryCard.includes('Send back to model'),
+      ordinaryCard.includes('artifact-sub') && ordinaryCard.includes('From Mock Pro') && ordinaryCard.includes('Copy reference') && ordinaryCard.includes('Revise'),
       ordinaryCard.slice(0, 300),
+    )
+    check(
+      'its footer actions are icons named by tooltip: revise, push and save',
+      (() => {
+        const foot = ordinaryCard.slice(ordinaryCard.indexOf('artifact-foot'))
+        return (
+          foot.includes('aria-label="Revise"') &&
+          foot.includes('aria-label="Push to GitHub"') &&
+          foot.includes('aria-label="Save"') &&
+          foot.includes('title="Save notes.md to Local Files"') &&
+          !foot.includes('Send back to model') &&
+          !foot.includes('Publish to GitHub') &&
+          !foot.includes('Save to Files')
+        )
+      })(),
+      ordinaryCard.slice(ordinaryCard.indexOf('artifact-foot'), ordinaryCard.indexOf('artifact-foot') + 700),
     )
     check(
       'a Memory Added card saved before the flag existed is upgraded on load',
@@ -6644,6 +6900,7 @@ async function main() {
   testModelPicker()
   testProviderManagement()
   testLocalFsPrimitives()
+  testFsDirectiveFencesRenderNothing()
   testLocalFsStore()
   testConversationScopedFs()
   await testAgentLocalFsIntegration()
