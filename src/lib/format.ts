@@ -48,3 +48,14 @@ export function relativeCooldown(until: number, now = Date.now()): string {
   if (s < 60) return `${s}s`
   return `${Math.ceil(s / 60)}m`
 }
+
+/** Compact wall-clock duration for command executions (input in milliseconds). */
+export function formatExecutionDuration(ms: number): string {
+  if (!Number.isFinite(ms)) return '—'
+  const duration = Math.max(0, ms)
+  if (duration < 1000) return `${Math.floor(duration)}ms`
+  if (duration < 60_000) return `${Number((Math.floor(duration / 10) / 100).toFixed(2))}s`
+  const minutes = Math.floor(duration / 60_000)
+  const seconds = Math.floor((duration % 60_000) / 1000)
+  return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`
+}

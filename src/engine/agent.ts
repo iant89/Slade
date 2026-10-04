@@ -18,6 +18,7 @@ import { useChat } from '../store/chat'
 import { useSettings } from '../store/settings'
 import { useUI } from '../store/ui'
 import { useFs } from '../store/fs'
+import { useDiskFs, diskWorkspaceContext, applyDiskAgentOutput, workspaceSession, assertWorkspaceSession, type WorkspaceSession } from '../store/diskFs'
 import { useGitHub } from '../store/github'
 import { formatMemoryContext } from '../store/memory'
 import { useGitHubActivity } from '../store/githubActivity'
@@ -52,11 +53,21 @@ import {
 } from './completion'
 import { ProviderError } from '../providers/base'
 import { uid } from '../lib/id'
+import { runWorkerCompletion } from './shellCompletion'
+import { useShell } from '../lib/shell'
 import { CODING_AGENT_ORCHESTRATOR_PROMPT } from './orchestratorPrompt'
 
 /* ------------------------------------------------------------------ */
 /* Prompts                                                             */
 /* ------------------------------------------------------------------ */
+
+function shellAwareOrchestratorPrompt(): string {
+  if (!useShell.getState().token) return CODING_AGENT_ORCHESTRATOR_PROMPT
+  return CODING_AGENT_ORCHESTRATOR_PROMPT.replace(
+    /1\. You have NO shell,[\s\S]*?(?=2\. You have)/,
+    `1. Worker steps have an authenticated automatic bash tool in the host checkout ${JSON.stringify(useShell.getState().root)}. Delegate command execution to workers. Planning and synthesis cannot invoke bash directly. Require actual tool results as evidence. The connected Files panel and filename-tagged file blocks use this same disk checkout. Legacy browser files remain separate until explicitly imported. Workers may use bash or final file blocks to edit; do not repeat already-applied changes in synthesis. Commands have host-user permissions, not sandbox isolation. Never read credentials or perform unrelated/destructive operations.\n`,
+  )
+}
 
 export const PLAN_MARKER = '[SLADE:ORCHESTRATOR:PLAN]'
 export const SYNTH_MARKER = '[SLADE:ORCHESTRATOR:SYNTH]'
@@ -81,11 +92,11 @@ export function planSystemPrompt(settings: Settings, maxSteps: number, fsContext
     })
     .join('\n')
 
-  return `${CODING_AGENT_ORCHESTRATOR_PROMPT}
+  return `${shellAwareOrchestratorPrompt()}
 
 SLADE AGENT-MODE PLANNING CONTRACT
 
-The coding-agent prompt above is your governing role and quality standard. This call is the planning stage of Slade's orchestrator. Slade supplies the conversation, the local file system workspace, and the available worker roster, then dispatches the subtasks you return. You do not have shell, git, or test-runner tools in this runtime, so never claim that you ran commands or tests or inspected local Git state.
+The coding-agent prompt above is your governing role and quality standard. This call is the planning stage of Slade's orchestrator. Slade supplies the conversation, the local file system workspace, and the available worker roster, then dispatches the subtasks you return. ${useShell.getState().token ? "Workers have a live automatic bash tool in the connected host checkout. Delegate checkout edits and tests to workers; require tool evidence. When a task needs any command execution, return a plan with at least one worker, even for a simple task; do not answer as if the command already ran. Filename-tagged file blocks write to the connected disk checkout; legacy browser files are not imported automatically." : "You do not have shell, git, or test-runner tools in this runtime, so never claim that you ran commands or tests or inspected local Git state."}
 
 Slade mounts a persistent LOCAL FILE SYSTEM shared across the orchestrator, all worker steps, and future turns, and bridged directly to the connected GitHub repository when one is open:
 - Workers (and you) can create or overwrite files in the local file system by emitting fenced blocks tagged with the target file path: \`\`\`<lang>:<path/to/file.ext> (e.g. \`\`\`typescript:src/index.ts or \`\`\`csv:data/report.csv).
@@ -128,11 +139,11 @@ ${roster || '(no workers configured — answer directly)'}${fsContext ? `\n\n${f
 }
 
 function synthSystemPrompt(fsContext = ''): string {
-  return `${CODING_AGENT_ORCHESTRATOR_PROMPT}
+  return `${shellAwareOrchestratorPrompt()}
 
 SLADE AGENT-MODE FINAL SYNTHESIS CONTRACT
 
-This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. When the request carries a "${DECISIONS_HEADING}" block, those are answers the user picked in response to questions this run asked: treat each one as an explicit user requirement, honour it in the answer, and say so in SUMMARY. A question the user skipped is not a free choice — use the safest interpretation and record the assumption under ISSUES. In this Slade runtime you have access to Slade's persistent local file system (where worker file blocks were stored), but you do not have shell, git, or test-runner tools. Do not claim that tests/builds were run or a Git checkout diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
+This call happens after the worker-model responses below. The results may be incomplete, incorrect, or unverified; review them against the user's actual request and provided context, reconcile conflicts, and never treat an agent's report as proof. When the request carries a "${DECISIONS_HEADING}" block, those are answers the user picked in response to questions this run asked: treat each one as an explicit user requirement, honour it in the answer, and say so in SUMMARY. A question the user skipped is not a free choice — use the safest interpretation and record the assumption under ISSUES. In this Slade runtime you have access to Slade's persistent local file system (where worker file blocks were stored), ${useShell.getState().token ? "and workers can return runtime-captured bash results from the connected host checkout" : "but you do not have shell, git, or test-runner tools"}. Do not claim that tests/builds were run or a Git checkout diff was reviewed unless the conversation contains evidence that those actions actually occurred. If required verification was unavailable, state that plainly and do not mark the work verified or complete.
 
 For a software-development task, provide a concise final report with these headings, in this order:
 
@@ -149,7 +160,7 @@ STATUS
 
 SUMMARY is two to four plain sentences on what was done and the outcome; lead with it. ISSUES lists everything the user should be made aware of — failed, skipped, or unrunnable tests and builds; acceptance criteria you could not verify; worker steps that failed or were cut off; assumptions you made; risky, breaking, or destructive changes; manual actions the user must take; problems you noticed but did not fix — each with its impact and your recommended next step. Include ISSUES only when there is something real to report, and never pad it. ROADMAP appears only when a roadmap or milestone file was used (see ROADMAP UPDATE below).
 
-Describe files stored in the local file system accurately. Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. Preserve useful worker file blocks with their filename tags (\`\`\`lang:path/to/file.ext) so Slade renders them as artifacts and keeps the local file system up to date. If a worker failed or returned unusable output, say so and continue with the usable results.
+Describe files stored in the local file system accurately. Report actual test and build results only when they are present in the supplied context. Use a status such as BLOCKED, NEEDS_REVIEW, or IN_PROGRESS when any applicable acceptance criterion remains unverified; reserve VERIFIED / COMPLETE for work supported by actual verification. ${useShell.getState().token ? "DISK MODE: worker changes have already been applied. Do not re-emit their file blocks or append/move/delete directives in synthesis. Only emit new intentional changes (for example a roadmap update)." : ""} ${useShell.getState().token ? "Reference changed disk paths without repeating their contents." : "Preserve useful worker file blocks with their filename tags so Slade renders them as artifacts and keeps the local file system up to date."} If a worker failed or returned unusable output, say so and continue with the usable results.
 
 ROADMAP UPDATE. If the local file system holds a roadmap or milestone file (ROADMAP.md, MILESTONES.md, docs/roadmap.md, or similar), you own it. When this run advanced or changed any of its steps, emit the COMPLETE updated file exactly once, as a fenced block tagged with its exact path (\`\`\`markdown:ROADMAP.md), so Slade stores it. Mark a step [x] only when the conversation or files give evidence that its acceptance criteria are met; mark partly finished work [~]; leave every other line exactly as it was — same order, wording, and format — and add newly discovered work as new [ ] steps. If a worker already updated the roadmap, check it against the results and correct it only where it is wrong. Do not create a roadmap when none exists unless the user asked for one, and do not touch it when the work did not advance it. If the roadmap is shown as truncated, never rewrite it — the file you emit would replace the whole roadmap and delete the part you cannot see; say in ROADMAP and ISSUES which steps need updating instead. Slade reads the file after the run and renders the previous, current, and next step and the overall completion progress itself, so do not draw a timeline or progress bar; the ROADMAP section only says which steps changed and why.
 
@@ -173,9 +184,12 @@ export async function prepareAgentWorkspaceContext(
   queryHint: string,
   conversationId?: string,
   includeLocalFs = true,
+  session = workspaceSession(),
 ): Promise<string> {
+  assertWorkspaceSession(session)
   const memoryBlock = formatMemoryContext()
   if (!includeLocalFs) return memoryBlock
+  if (session.token) return [memoryBlock, await diskWorkspaceContext(queryHint, session)].filter(Boolean).join("\n\n")
 
   const ownerId = conversationId ?? useFs.getState().currentConversationId
   await useGitHub.getState().syncRepoFilesForPrompt(queryHint, ownerId)
@@ -194,8 +208,15 @@ export async function applyAgentOutputWithGit(
     source: { origin: 'model'; modelId: string; modelLabel: string }
     conversationId?: string
     messageId?: string
+    workspaceSession?: WorkspaceSession
+    alreadyApplied?: Set<string>
+    signal?: AbortSignal
   },
 ): Promise<FsOpRecord[]> {
+  const session = meta.workspaceSession ?? workspaceSession()
+  assertWorkspaceSession(session)
+  meta.signal?.throwIfAborted()
+  if (session.token) return applyDiskAgentOutput(markdown, meta.source, session, meta.alreadyApplied, meta.signal)
   const pullOps: FsOpRecord[] = []
   const actions = extractFsActions(markdown)
   for (const action of actions) {
@@ -553,6 +574,7 @@ async function runAgent(
   }
 
   const settings = useSettings.getState().s
+  const fsSession = workspaceSession()
   const conv = useChat.getState().conversations[conversationId]
   if (!conv) return
   const userMessage = conv.messages.find((m) => m.id === userMessageId)
@@ -632,7 +654,7 @@ async function runAgent(
     try {
       return buildRoadmapReport({
         before: roadmapBefore,
-        after: snapshotRoadmapFiles(useFs.getState().listFiles(undefined, conversationId)),
+        after: snapshotRoadmapFiles(fsSession.token ? Object.values(useDiskFs.getState().files) : useFs.getState().listFiles(undefined, conversationId)),
         delegated,
       })
     } catch {
@@ -652,8 +674,8 @@ async function runAgent(
     // A resumed run re-plans with the exchange it just had: the questions it
     // asked (as its own turn) and the answers the user picked (as the user's).
     let planTurns: ChatTurn[] = [...historyTurns, ...(previous ? answersTurnsFor(previous) : [])]
-    const planFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs)
-    if (useLocalFs) roadmapBefore = snapshotRoadmapFiles(useFs.getState().listFiles(undefined, conversationId))
+    const planFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs, fsSession)
+    if (useLocalFs) roadmapBefore = snapshotRoadmapFiles(fsSession.token ? Object.values(useDiskFs.getState().files) : useFs.getState().listFiles(undefined, conversationId))
 
     let plannerReply: PlannerReply | undefined
     let planModel: ModelDef = orchestrator
@@ -786,6 +808,8 @@ async function runAgent(
             source: { origin: 'model', modelId: planModel.id, modelLabel: directLabel },
             conversationId,
             messageId: assistantMessageId,
+            workspaceSession: fsSession,
+            signal,
           })
         : []
       const directRoadmap = roadmapReport(false)
@@ -874,8 +898,8 @@ async function runAgent(
       }, 140)
 
       try {
-        const stepFsContext = await prepareAgentWorkspaceContext(step.prompt, conversationId, useLocalFs)
-        const result = await runCompletion({
+        const stepFsContext = await prepareAgentWorkspaceContext(step.prompt, conversationId, useLocalFs, fsSession)
+        const result = await runWorkerCompletion({
           purpose: `Step “${step.title}”`,
           turns: [{ role: 'user', text: step.prompt }],
           systemPrompt: workerSystemPrompt(stepFsContext),
@@ -892,7 +916,7 @@ async function runAgent(
             appendAgentThought(assistantMessageId, `step:${step.id}`, step.modelId, t)
             flush()
           },
-        })
+        }, { conversationId, messageId: assistantMessageId })
         collectAttempts(result.attempts)
         usageAcc.current = mergeUsage(usageAcc.current, result.usage)
         appendMissingThoughtTail(
@@ -909,6 +933,8 @@ async function runAgent(
               source: { origin: 'model', modelId: result.model.id, modelLabel: stepLabel },
               conversationId,
               messageId: `step-${step.id}`,
+              workspaceSession: fsSession,
+              signal,
             })
           : []
         patchStep(assistantMessageId, step.id, {
@@ -943,7 +969,7 @@ async function runAgent(
       }
     }
 
-    await runPool(steps, Math.max(1, Math.min(settings.agent.maxParallel, steps.length)), runStep)
+    await runPool(steps, useShell.getState().token ? 1 : Math.max(1, Math.min(settings.agent.maxParallel, steps.length)), runStep)
     signal.throwIfAborted()
 
     const done = readRun(assistantMessageId)
@@ -982,8 +1008,9 @@ async function runAgent(
     let synthReasoning = ''
     let streamedSynthReasoning = ''
     let synthTruncated = false
+    let synthGenerated = false
     let synthModelId = orchestrator.id
-    const synthFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs)
+    const synthFsContext = await prepareAgentWorkspaceContext(goal, conversationId, useLocalFs, fsSession)
     try {
       const synth = await runCompletion({
         purpose: 'Synthesis',
@@ -1007,6 +1034,7 @@ async function runAgent(
       collectAttempts(synth.attempts)
       usageAcc.current = mergeUsage(usageAcc.current, synth.usage)
       content = synth.text
+      synthGenerated = true
       synthModelId = synth.model.id
       synthTruncated = Boolean(synth.truncated)
       if (synth.reasoning) synthReasoning = synth.reasoning
@@ -1037,7 +1065,7 @@ async function runAgent(
     }
 
     const synthFsOps =
-      useLocalFs && content
+      useLocalFs && content && (!fsSession.token || synthGenerated)
         ? await applyAgentOutputWithGit(content, {
             source: {
               origin: 'model',
@@ -1046,6 +1074,9 @@ async function runAgent(
             },
             conversationId,
             messageId: assistantMessageId,
+            workspaceSession: fsSession,
+            signal,
+            alreadyApplied: new Set((done?.steps ?? []).filter((step) => step.status === 'complete').flatMap((step) => extractFsActions(step.result ?? '').map((action) => JSON.stringify(action)))),
           })
         : []
 

@@ -434,12 +434,22 @@ export const memoryEntrySchema = z.object({
   updatedAt: z.number(),
 })
 
+const bashExecutionBase = z.object({
+  command: z.string(), output: z.string(), startedAt: z.number().finite(),
+})
+export const bashExecutionSchema = z.discriminatedUnion('status', [
+  bashExecutionBase.extend({ status: z.literal('running') }),
+  bashExecutionBase.extend({ status: z.literal('finished'), finishedAt: z.number().finite(), exitCode: z.literal(0) }),
+  bashExecutionBase.extend({ status: z.literal('failed'), finishedAt: z.number().finite(), exitCode: z.number().int().optional() }),
+])
+
 export const artifactSchema = z.object({
   id: z.string(),
   name: z.string(),
   mime: z.string(),
   size: z.number(),
   kind: z.enum(['image', 'code', 'doc', 'sheet', 'audio', 'video', 'archive', 'unknown']),
+  bashExecution: bashExecutionSchema.optional(),
   createdAt: z.number(),
   provenance: z.union([
     z.object({ origin: z.literal('user') }),
@@ -512,6 +522,7 @@ export const fsFileSchema = z.object({
   encoding: z.enum(['utf8', 'base64']).optional(),
   mime: z.string(),
   kind: z.enum(['image', 'code', 'doc', 'sheet', 'audio', 'video', 'archive', 'unknown']),
+  bashExecution: bashExecutionSchema.optional(),
   size: z.number().nonnegative(),
   createdAt: z.number(),
   updatedAt: z.number(),

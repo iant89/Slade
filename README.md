@@ -102,9 +102,11 @@ For software-repository tasks, the orchestrator and worker models can use conver
 history, files attached from GitHub, and the current conversation's isolated **Local File System**
 workspace (`slade.fs.v2`) as context, and any path-tagged file blocks they emit are
 automatically stored in that conversation's Local Files. New conversations start with an empty workspace; branching a chat copies
-its current workspace into a separate, independently editable one. The runtime does not execute OS shell
-commands, Git checkouts, or test runners, so it cannot independently execute tests or builds against a
-local checkout.
+its current workspace into a separate, independently editable one. By default the browser runtime cannot execute OS shell
+commands or test runners. An optional authenticated [local bash backend](#local-bash-backend) gives agent workers
+live command execution against an explicitly configured disk checkout. When connected, the Files panel, agent file edits,
+and bash all use that checkout. Existing browser workspaces stay untouched and can be copied through a reviewed import.
+Disconnecting restores browser-only mode; backend errors never silently redirect writes to browser storage.
 
 ### Clarification questions (the agent asks, you choose)
 
@@ -669,3 +671,54 @@ scripts/
 workers/
   github-oauth-relay/       the same relay as a deployable Cloudflare Worker
 ```
+
+
+### Local bash backend
+
+Requires Node.js 20+ and `/bin/bash` (Linux, macOS, or WSL). This is an **opt-in, trusted single-user backend**, not a sandbox or multi-tenant service. Commands execute automatically with the server user's permissions. The configured root sets the working directory; it does **not** prevent a command from accessing other host files or the network. Prefer a dedicated unprivileged account/container and disposable checkout. Never expose this API publicly without TLS and appropriate access controls.
+
+1. Copy `.env.example` to `.env.local` (ignored by Git). Set `SLADE_SHELL_ROOT` to an explicit absolute checkout directory and `SLADE_SHELL_TOKEN` to a random token of at least 32 characters. Generate a token locally with:
+
+   ```bash
+   node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
+   ```
+
+   Put the token in `.env.local`; do not share or commit it. Never prefix it with `VITE_`, which would expose it to browser code. Exported server environment variables also work and take precedence over `.env.local`.
+
+2. Run **`npm run dev`** (or build and run **`npm run preview`**). The disk/bash service starts automatically in the same process; no second terminal is needed. Vite proxies same-origin `/api/shell/*` requests to the loopback-only service on port 8788, or `SLADE_SHELL_PORT` if configured. It restarts with Vite and stops with the app, cancelling active commands. `npm run build` does not start the service or embed the private token.
+3. In **Settings → Agent → Automatic bash execution**, enter the token and select **Connect & enable automatic execution**. The UI confirms the disk root. Service auto-start does not bypass browser authentication or automatically enable execution. The browser token stays only in memory, is not sent to models or included in backups, and must be entered again after reload.
+4. Enable **Agent** mode in the composer and ask for a checkout task, such as “Run `pwd` and `git status --short`, and report the results.” Workers can issue commands, consume real results, and continue. Planning/synthesis delegate execution to workers rather than executing directly. Ordinary chat and ordinary bash code fences never execute.
+
+Without a root/token, Slade starts in browser-only mode and logs setup guidance. Incomplete/invalid shell configuration fails startup with an error rather than running unauthenticated. An occupied shell port also fails clearly—Slade does not attach to or terminate an unknown process. To use a separately managed backend, set `SLADE_SHELL_AUTOSTART=false` for Vite and run `npm run shell:serve` with the root, token and optional port **exported in that service's environment**. Vite's proxy follows the configured port in either mode.
+
+A different production web server needs the equivalent authenticated streaming reverse proxy; GitHub Pages alone cannot host this backend. Disable proxy response buffering for streamed output. Browser requests use relative URLs, never the browser machine's localhost.
+
+Each execution streams combined stdout/stderr into its bash artifact card with a spinner, success/failure icon, exit status in the model result, and duration measured by the backend. **Stop** aborts the request and terminates the process group. Closing the connection also cancels the command; there is no background-job/resume facility. Commands are non-interactive (stdin is closed); long-lived servers are not supported. Descendant cleanup is best-effort process-group cleanup, not OS isolation: a deliberately detached process can escape it. Do not use this as a security boundary.
+
+Limits: 8 commands per worker step, 4 concurrent server commands, 120-second default timeout (maximum 300 seconds), 8,000 command characters, and 256 KiB output per command. Exceeding a time/output limit terminates the command and reports failure. Model context receives shortened large outputs; the card retains captured output up to the cap. All conversations connected to this backend share its disk root—unlike browser Local Files, disk workspaces are **not conversation-isolated**. Worker steps run sequentially while shell access is enabled to reduce edit races; avoid simultaneous runs from different chats against the same checkout.
+
+The child environment includes only PATH, HOME, LANG, TERM, and CI, not backend or provider tokens. This prevents accidental environment inheritance, **not** intentional access to secrets by commands. Shell results and their cards may contain sensitive data and are stored with chat history and sent to configured models. Use **Disconnect disk & bash** to revoke frontend execution access and return to browser-only files; this does not stop an already-running command (use **Stop**).
+
+Tests: `npm run test:shell` exercises real bash execution, authentication, path validation including symlinks, output streaming, exit codes, environment filtering, timeouts, output limits, disconnect cancellation, and process-group cleanup. `npm run test:smoke` covers the frontend stream reader, artifact attachment, explicit tool parsing, result feedback loop, and command budget.
+
+
+### Optional disk-backed Files workspace
+
+The same backend and connection described above also provide real filesystem access. **No separate server is needed.** Restart `npm run dev` / `npm run preview` after upgrading (or your separately managed `shell:serve` process) to get the `/api/shell/files/*` endpoints.
+
+- **Disconnected:** the existing per-conversation browser workspace continues to work, including its offline storage, archives, and GitHub integration.
+- **Connected:** Files displays the configured checkout, with path filtering, text editing, file creation/upload, rename, delete, attachment, download, and refresh. Model-generated filename-tagged blocks and write/append/move/delete directives persist to the same disk root that bash uses. The Local File System setting still controls whether model file output is applied. Ordinary fenced bash examples do not execute.
+- **Legacy browser data is never auto-copied or deleted.** In Files, choose **Import browser files → Review current browser files**. Review browser/disk previews, choose files, explicitly check any conflicting replacements, and select **Import selected**. Each file is checked again against its reviewed disk revision. A file changed since review is rejected and must be reviewed again. Import results are per-file (not an all-or-nothing transaction). Originals remain in the browser. To import another conversation's files, switch conversations and review again.
+- **Shared checkout:** connected conversations use one disk root. Branching a conversation does not branch/copy the checkout. Browser workspace branching stays unchanged. Disk files are not copied into localStorage or included as a filesystem snapshot in Slade's browser backup/export; use Git or an OS backup for the checkout. Attached files, model context, and chat artifacts can still contain copies of disk content.
+- **GitHub:** the old GitHub pull/archive workflows remain browser-staging operations, not silent disk overwrites. Use reviewed import to move staged files into the checkout, or use bash/git in the real checkout. `fs:pull` is intentionally unavailable to models in disk mode. Use the real checkout's Git workflow for disk commits; browser GitHub publishing still operates on browser files/artifacts.
+
+Disk saves, deletes, renames, and imports require a SHA-256 revision (or explicit absence for a new file). Stale operations return a conflict rather than overwrite newer contents. The API serializes its operations and uses temporary files plus rename for file writes. These are optimistic checks, not filesystem transactions/locks against external editors or arbitrary bash; avoid simultaneous external writes to the same files. Changing the connection during a model run fails the file operation instead of redirecting it to another workspace. Backend outages keep disk mode selected and show an error; disconnect explicitly if you want browser mode.
+
+The Files API accepts only relative paths, rejects traversal and symbolic/hard links, and protects common sensitive/generated paths (`.git`, `.env`/`.env.*` except example/sample files, `.ssh`, `.aws`, PEM/key files, `node_modules`, `dist`, `build`, `.cache`, `.next`, `.venv`). This is not an exhaustive secret detector: review what you expose to models. Bash still has full host-user permissions and is not constrained by these Files API rules. The editor/upload limit is **5 MB per file**; listings are capped at **5,000 files / 15,000 visited entries / 24 directory levels**, with truncation shown. Binary files support upload, attachment, download, rename and deletion, but not text editing. Agent context includes a bounded selection of complete text files (up to 20 candidates, 32 KB each, 64 KB total); use bash to inspect/edit omitted or larger files.
+
+The listing refreshes when Files opens, the window regains focus, after bash commands, or when you select **Refresh**. An open editor keeps its own draft/revision; use **Reload disk version** to inspect external changes before saving. This is not a live filesystem watcher. Path/content protections are intended for trusted single-user use, not a hostile multi-user service or protection against a malicious concurrent process.
+
+Run `npm run test:disk` for real HTTP filesystem tests plus frontend-client integration: path protection, create/read/update/move/delete, concurrent/stale write rejection, binary handling, import conflicts, shared bash/Files contents, model context revision checks, preservation of browser data, and disconnected fallback.
+
+
+`npm run test:shell-startup` verifies private env loading, dev/preview startup, authenticated proxying, Vite restart, service shutdown, browser-only mode, explicit opt-out, invalid configuration, and occupied-port handling.

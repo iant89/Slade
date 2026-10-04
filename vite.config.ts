@@ -1,5 +1,6 @@
-import { defineConfig, type Connect, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type Connect, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { shellService, shellServicePort } from './scripts/shell-plugin'
 import { handleRelayRequest } from './scripts/github-oauth-relay'
 
 // GitHub Pages project sites serve the app under /<repo>/ — the CI workflow
@@ -54,23 +55,36 @@ function githubOAuthRelay(): Plugin {
 
 // Slade — single-page app. The dev server binds 0.0.0.0 so it is reachable
 // through the sandbox preview proxy, and allows proxy Host headers.
-export default defineConfig({
-  base,
-  plugins: [react(), githubOAuthRelay()],
-  server: {
-    host: '0.0.0.0',
-    port: 5173,
-    strictPort: true,
-    allowedHosts: true,
-  },
-  preview: {
-    host: '0.0.0.0',
-    port: 5173,
-    strictPort: true,
-    allowedHosts: true,
-  },
-  build: {
-    target: 'es2022',
-    chunkSizeWarningLimit: 1600,
-  },
+export default defineConfig(({ mode, command }) => {
+  // SLADE_ variables stay on the server; never expose these via VITE_ or define.
+  const env = loadEnv(mode, process.cwd(), 'SLADE_')
+  const shell = {
+    root: env.SLADE_SHELL_ROOT,
+    token: env.SLADE_SHELL_TOKEN,
+    port: env.SLADE_SHELL_PORT,
+    autostart: env.SLADE_SHELL_AUTOSTART,
+  }
+  const shellTarget = `http://127.0.0.1:${command === 'serve' ? shellServicePort(shell) : 8788}`
+  return {
+    base,
+    plugins: [react(), githubOAuthRelay(), shellService(shell)],
+    server: {
+      host: '0.0.0.0',
+      port: 5173,
+      strictPort: true,
+      proxy: { '/api/shell': { target: shellTarget } },
+      allowedHosts: true,
+    },
+    preview: {
+      host: '0.0.0.0',
+      port: 5173,
+      strictPort: true,
+      proxy: { '/api/shell': { target: shellTarget } },
+      allowedHosts: true,
+    },
+    build: {
+      target: 'es2022',
+      chunkSizeWarningLimit: 1600,
+    },
+  }
 })

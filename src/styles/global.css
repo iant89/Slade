@@ -4351,3 +4351,39 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
   .memory-entry-footer { align-items: flex-start; flex-direction: column; }
   .memory-entry-actions { align-self: flex-end; }
 }
+
+/* Bash executions share the artifact outline, with joined command/output panels. */
+.bash-artifact-head {
+  width: 100%; text-align: left; color: var(--text); background: transparent;
+  border: 0; cursor: pointer;
+}
+.bash-artifact-head:hover { background: var(--bg-hover); }
+.bash-artifact-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.bash-chevron, .bash-status { display: inline-flex; flex: none; }
+.bash-chevron { color: var(--text-muted); }
+.bash-artifact.is-running .bash-status { color: var(--text-muted); }
+.bash-artifact.is-finished .bash-status { color: var(--ok); }
+.bash-artifact.is-failed .bash-status { color: var(--danger); }
+.bash-command, .bash-output { border-top: 1px solid var(--border); padding: 10px 12px; }
+.bash-command { background: var(--bg-raised); }
+.bash-panel-label { font-size: 0.7em; color: var(--text-faint); margin-bottom: 6px; }
+.bash-artifact pre {
+  margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 0.8em; line-height: 1.6;
+}
+
+/* Connected disk workspace uses the same drawer as browser-only Local Files. */
+.disk-workspace-body { overflow: auto; padding: 12px; min-height: 0; flex: 1; }
+.disk-root { font-family: var(--font-mono); font-size: 0.8em; overflow-wrap: anywhere; }
+.disk-toolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.disk-file-list { list-style: none; padding: 0; margin: 8px 0; max-height: 32vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.disk-file-list .gh-tree-row { width: 100%; text-align: left; }
+.disk-file-list .gh-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.disk-editor, .disk-import, .disk-create { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.disk-editor h3 { overflow-wrap: anywhere; font-size: 0.9em; }
+.disk-editor textarea, .disk-create textarea { width: 100%; min-height: 260px; resize: vertical; font-family: var(--font-mono); font-size: 0.8em; line-height: 1.6; padding: 10px; background: var(--bg-raised); color: var(--text); border: 1px solid var(--border); border-radius: 8px; }
+.disk-create label { display: block; margin: 8px 0; }
+.disk-error { color: var(--danger); font-size: 0.85em; overflow-wrap: anywhere; }
+.disk-import p { font-size: 0.8em; color: var(--text-muted); }
+.disk-import-row { border-bottom: 1px solid var(--border); padding: 10px 0; overflow-wrap: anywhere; }
+.disk-import pre { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 0.75em; }

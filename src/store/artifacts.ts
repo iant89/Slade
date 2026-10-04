@@ -69,7 +69,7 @@ export const useArtifacts = create<ArtifactsState>((set, get) => {
     if (persistTimer) clearTimeout(persistTimer)
     persistTimer = setTimeout(() => {
       persistTimer = null
-      const list = Object.values(get().byId).filter((a) => !a.ephemeral && (a.dataURL || a.text))
+      const list = Object.values(get().byId).filter((a) => !a.ephemeral && (a.dataURL || a.text || a.bashExecution))
       saveJSON(KEYS.artifacts, list)
     }, 500)
   }

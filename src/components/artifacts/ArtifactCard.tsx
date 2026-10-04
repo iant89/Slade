@@ -3,6 +3,8 @@ import { motion } from 'framer-motion'
 import type { Artifact, FsFile } from '../../types'
 import { useArtifacts } from '../../store/artifacts'
 import { useFs } from '../../store/fs'
+import { useShell } from '../../lib/shell'
+import { useDiskFs, maybeReadDiskFile, writeDiskFile, workspaceSession } from '../../store/diskFs'
 import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
 import { formatBytes } from '../../lib/format'
@@ -27,6 +29,7 @@ import {
   IconTable,
   IconVideo,
 } from '../icons'
+import { BashArtifactCard } from './BashArtifactCard'
 import { CodeArtifact } from './CodeArtifact'
 import { SheetTable } from './SheetTable'
 import { AudioPlayer, VideoPlayer } from './media'
@@ -76,9 +79,12 @@ export function ArtifactCard({
   const activeConversationId = useFs((s) => s.currentConversationId)
   const workspaceId = conversationId ?? activeConversationId
   const targetFsPath = artifact ? (artifact.localPath ?? tryNormalizeFsPath(artifact.name) ?? undefined) : undefined
-  const storedFile = useFs((s) => (targetFsPath ? s.workspaces[workspaceId]?.files[targetFsPath] : undefined))
+  const diskConnected = useShell((s) => Boolean(s.token))
+  const diskFile = useDiskFs((s) => targetFsPath ? s.files[targetFsPath] : undefined)
+  const browserFile = useFs((s) => (targetFsPath ? s.workspaces[workspaceId]?.files[targetFsPath] : undefined))
+  const storedFile = diskConnected ? diskFile : browserFile
   const storedInFs = Boolean(
-    artifact && storedFile && (artifact.conversationId === workspaceId || artifactMatchesFile(artifact, storedFile)),
+    artifact && storedFile && ((!diskConnected && artifact.conversationId === workspaceId) || artifactMatchesFile(artifact, storedFile)),
   )
 
   // Cards arrive closed; a peek (the composer chip) is the one that does not.
@@ -97,6 +103,10 @@ export function ArtifactCard({
         <div className="artifact-body skeleton-body" style={{ height: 120 }} />
       </div>
     )
+  }
+
+  if (artifact.bashExecution) {
+    return <BashArtifactCard key={artifact.id} execution={artifact.bashExecution} peek={peek} />
   }
 
   const kind = artifact.kind
@@ -246,7 +256,28 @@ function ArtifactActions({
       </button>
       <button
         className="artifact-action is-icon"
-        onClick={() => {
+        onClick={async () => {
+          if (useShell.getState().token) {
+            const session = workspaceSession()
+            const path = targetFsPath ?? artifact.name
+            try {
+              if (!storedInFs) {
+                let content = artifact.text
+                let encoding: 'utf8' | 'base64' = 'utf8'
+                if (content == null && artifact.dataURL) {
+                  const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(artifact.dataURL)
+                  if (match) { encoding = match[2] ? 'base64' : 'utf8'; content = match[2] ? match[3] : decodeURIComponent(match[3] ?? '') }
+                }
+                if (content == null) throw new Error('This artifact has no file content available to save.')
+                const existing = await maybeReadDiskFile(path, session)
+                if (existing && (existing.content !== content || existing.encoding !== encoding) && !window.confirm(`Overwrite the existing disk file ${path} with this artifact?`)) return
+                await writeDiskFile(path, content, encoding, existing?.revision ?? null, artifact.provenance, session)
+              }
+              useDiskFs.setState({ selectedPath: path })
+              useUI.getState().openFiles()
+            } catch (error) { toast({ kind: 'error', title: 'Could not save to disk', detail: error instanceof Error ? error.message : String(error) }) }
+            return
+          }
           if (storedInFs && targetFsPath) {
             useFs.getState().selectFile(targetFsPath, workspaceId)
             useUI.getState().openFiles()

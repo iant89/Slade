@@ -1,4 +1,5 @@
 import type { AttemptFailure, FailureClass, Handoff, ModelDef, ProviderDef, Settings, StreamEvent, Usage } from '../types'
+import { workspaceSession, type WorkspaceSession } from '../store/diskFs'
 import { useChat, titleFromPrompt } from '../store/chat'
 import { useSettings, effectiveParams } from '../store/settings'
 import { useHealth, getEligibleTokens, isTokenRoutable } from '../store/health'
@@ -93,6 +94,7 @@ function dispatchTurn(
 }
 
 interface ChainState {
+  workspaceSession: WorkspaceSession
   content: string
   reasoning?: string
   chain: string[]
@@ -141,6 +143,7 @@ async function runChain(
   const attempt = registerRun(conversationId, controller)
 
   const state: ChainState = {
+    workspaceSession: workspaceSession(),
     content: '',
     reasoning: '',
     chain: [],
@@ -175,7 +178,7 @@ async function runChain(
         }
         const finalModelId = lastOf(state.chain)
         if ((settings.agent.useLocalFs ?? true) && finalModelId && state.content) {
-          await applyAgentOutputWithGit(state.content, {
+          try { await applyAgentOutputWithGit(state.content, {
             source: {
               origin: 'model',
               modelId: finalModelId,
@@ -183,7 +186,16 @@ async function runChain(
             },
             conversationId,
             messageId: assistantMessageId,
-          })
+            workspaceSession: state.workspaceSession,
+            signal: controller.signal,
+          }) } catch (error) {
+            if (controller.signal.aborted) { finalizeCancelled(assistantMessageId, state, Boolean(state.content.trim())); return }
+            // Filesystem errors must not trigger a model failover that replays
+            // partially applied file operations.
+            finalize(assistantMessageId, { status: 'error', modelId: finalModelId,
+              error: `File changes were not fully applied: ${error instanceof Error ? error.message : String(error)}`, errorClass: 'unknown' })
+            return
+          }
         }
         finalize(assistantMessageId, {
           status: 'complete',
@@ -594,7 +606,7 @@ async function attemptOnce(args: {
   arm('first-token', settings.defaults.firstTokenTimeoutMs)
   const useLocalFs = settings.agent.useLocalFs ?? true
   const lastUserText = [...turns].reverse().find((t) => t.role === 'user')?.text ?? ''
-  const fsBlock = await prepareAgentWorkspaceContext(lastUserText, conversationId, useLocalFs)
+  const fsBlock = await prepareAgentWorkspaceContext(lastUserText, conversationId, useLocalFs, state.workspaceSession)
   const fileInstruction = useLocalFs
     ? "To create or update files in Slade's local file system, emit fenced blocks tagged with the target path (```lang:path/to/file.ext)."
     : ''
