@@ -5,6 +5,7 @@ import { extOf, guessLanguage, type GitHubTreeEntry } from '../../lib/github'
 import { CodeArtifact } from '../artifacts/CodeArtifact'
 import { Markdown } from '../chat/Markdown'
 import { GhEmpty, GhError, Spinner } from './bits'
+import { OpenPullRequestButton } from './OpenPullRequest'
 import {
   IconChevronDown,
   IconChevronRight,
@@ -254,6 +255,8 @@ export function FileBrowser() {
         >
           {pullBusy ? <Spinner /> : <IconDownload size={12} />} Pull to Local Files
         </button>
+        {/* The branch being browsed becomes the head; the card in the chat is what you merge from. */}
+        <OpenPullRequestButton />
       </div>
 
       <div className="gh-search-inline">

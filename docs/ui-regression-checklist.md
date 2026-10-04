@@ -33,6 +33,7 @@ Run this after changes to layout, controls, message rendering, or the model chai
 - [ ] Open nested model/provider dialogs. Check focus trap and Escape closes only the upper dialog; inputs and save/cancel remain reachable.
 - [ ] Browse/search a connected repository, open a file, and close the preview. Check empty/loading/error states when disconnected or offline.
 - [ ] GitHub action cards: a call with a response (reading a file or a tree) shows an expand toggle that reveals the output; a routine call with nothing to show has no toggle at all; a failed call's toggle reveals the error. While signed out, run through one read and one write to check both.
+- [ ] Open pull request (Files tab, by the branch picker): on the default branch the form says to switch branches first; on another branch it picks the default as the base, and submitting opens a PR whose card appears in the chat. With a token that cannot push, the button is disabled and says why; signed out, it is not there at all.
 - [ ] Pull request card: opening a PR renders the card open — number, title, state, `head → base`, author, commits, files, `+/−` lines, whether it can be merged, and the description — with no expand toggle. *Open on GitHub* opens the PR in a new tab; *Merge pull request* merges it, the card then reads **Merged** (and keeps that after a reload); a PR that is already closed offers no merge button.
 - [ ] Open Files panel; navigate folders and preview/download a file. Check long filenames wrap or truncate without covering actions.
 

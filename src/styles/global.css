@@ -3027,6 +3027,31 @@ input[type='range']::-moz-range-thumb {
 }
 
 .gh-pr-foot { justify-content: flex-start; }
+
+/* ---------- opening a pull request (Files tab) ----------
+
+   Next to the branch picker: the branch being browsed is the head, the form
+   picks the base, and the card that comes back in the chat is what you read
+   and merge. */
+
+.gh-pr-open-wrap { display: contents; }
+.gh-pr-form {
+  flex-basis: 100%;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+}
+.gh-pr-form-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin-bottom: 9px;
+  font-size: 0.82em;
+}
+.gh-pr-form-head .gh-muted { margin: 0; font-family: var(--font-mono); }
+.gh-pr-form .gh-field { margin-bottom: 8px; }
+.gh-pr-form .gh-textarea { resize: vertical; min-height: 62px; line-height: 1.5; }
+.gh-pr-form code { font-family: var(--font-mono); }
 .gh-pr-merge {
   border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   color: var(--accent-ink);

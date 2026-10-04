@@ -343,6 +343,10 @@ halves, both wired into the thread:
   read files, search code with GitHub's own index, and attach whatever you find
   straight into the composer. Attached repo files become artifact cards and fold
   into the prompt exactly like an upload, with the source recorded.
+- **Pull requests** — **Open pull request** sits with the branch picker in the
+  Files tab: the branch you are browsing is the head, you pick the base, add a
+  title and a description, and Slade opens it. The card that lands in the chat
+  is where you read it and merge it (below).
 - **Publishing** — every artifact card (bar the one-line Memory Added card) and
   every message has *Publish to GitHub*: create a **gist** (secret by default),
   **commit a file** into a repo

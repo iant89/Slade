@@ -3391,6 +3391,65 @@ function testGitHubUiRenders() {
     const search = renderToString(createElement(GitHubPanel))
     check('the search tab renders its empty state', search.includes('No repository open'), search.slice(0, 120))
 
+    /* ---- opening a pull request, next to the branch picker ---- */
+    const ghSnapshot: Record<string, unknown> = { ...ghInit }
+    const demoRepo = {
+      id: 1,
+      name: 'demo',
+      full_name: 'octo/demo',
+      owner: { login: 'octo', avatar_url: '' },
+      private: false,
+      fork: false,
+      archived: false,
+      description: 'demo',
+      default_branch: 'main',
+      html_url: 'https://github.com/octo/demo',
+      pushed_at: null,
+      updated_at: null,
+      language: 'TypeScript',
+      stargazers_count: 1,
+    }
+    ghInit.token = 'ghp_' + 'r'.repeat(24)
+    ghInit.login = 'octo'
+    ghInit.authStatus = 'authorized'
+    ghInit.scopes = ['repo', 'gist', 'read:user']
+    ghInit.activeRepo = 'octo/demo'
+    ghInit.activeBranch = 'slade/thing'
+    ghInit.branches = [
+      { name: 'main', commit: { sha: 'sha_main' } },
+      { name: 'slade/thing', commit: { sha: 'sha_thing' } },
+    ]
+    ghInit.repos = [demoRepo]
+    uiInit.githubTab = 'files'
+    const browse = renderToString(createElement(GitHubPanel))
+    check(
+      'the branch picker sits next to a button that opens a pull request',
+      browse.includes('gh-pr-open-wrap') && browse.includes('Open pull request'),
+      browse.slice(Math.max(0, browse.indexOf('gh-row')), browse.indexOf('gh-row') + 400),
+    )
+    const openButton = browse.slice(browse.indexOf('gh-pr-open-wrap'))
+    check(
+      '…live on a branch, with a token that can push',
+      !openButton.slice(0, openButton.indexOf('</button>')).includes('disabled') &&
+        openButton.includes('from slade/thing'),
+      openButton.slice(0, 300),
+    )
+    ghInit.scopes = ['read:user']
+    const readOnly = renderToString(createElement(GitHubPanel))
+    const readOnlyButton = readOnly.slice(readOnly.indexOf('gh-pr-open-wrap'))
+    check(
+      'a token that cannot push says so instead of offering the button',
+      readOnlyButton.slice(0, readOnlyButton.indexOf('</button>')).includes('disabled') &&
+        readOnlyButton.includes('missing the repo scope'),
+      readOnlyButton.slice(0, 260),
+    )
+    ghInit.token = ''
+    ghInit.scopes = []
+    const anonymous = renderToString(createElement(GitHubPanel))
+    check('with no token there is no pull request button at all', !anonymous.includes('gh-pr-open-wrap'), anonymous.slice(0, 160))
+    for (const key of Object.keys(ghInit)) delete ghInit[key]
+    Object.assign(ghInit, ghSnapshot)
+
     const message = {
       id: 'msg_render',
       role: 'assistant' as const,
