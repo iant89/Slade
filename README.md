@@ -330,6 +330,10 @@ Files pulled in from a GitHub repository are the same cards, with their origin
 kept on the card (`repo @ ref`, path, "open on GitHub") and a **Publish to
 GitHub** action in the footer.
 
+Cards arrive **collapsed** — the name and an expand toggle, nothing else — so a
+transcript full of them stays scannable; **Settings → Artifacts → Collapse
+artifact cards by default** opens them on arrival instead.
+
 ## GitHub (repo context & publishing)
 
 Open the workspace with the GitHub button in the header or `Ctrl/Cmd + G`. Two
@@ -339,6 +343,10 @@ halves, both wired into the thread:
   read files, search code with GitHub's own index, and attach whatever you find
   straight into the composer. Attached repo files become artifact cards and fold
   into the prompt exactly like an upload, with the source recorded.
+- **Pull requests** — **Open pull request** sits with the branch picker in the
+  Files tab: the branch you are browsing is the head, you pick the base, add a
+  title and a description, and Slade opens it. The card that lands in the chat
+  is where you read it and merge it (below).
 - **Publishing** — every artifact card (bar the one-line Memory Added card) and
   every message has *Publish to GitHub*: create a **gist** (secret by default),
   **commit a file** into a repo
@@ -381,8 +389,10 @@ card: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
 the thing it touched (`/src/lib/util.ts`) underneath.
 
 - **A call is inserted like a saved memory.** Each card becomes an entry of its
-  own in the conversation, so it scrolls with the chat and is saved with it:
-  reload the page and the log is still there, in the order the calls happened.
+  own in the conversation and takes the same slot in it a Memory Added card
+  does, so the two line up exactly; it scrolls with the chat and is saved with
+  it: reload the page and the log is still there, in the order the calls
+  happened.
 - **A run's calls go inline with the run.** When the orchestrator makes GitHub
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
   cards render in that run's activity timeline, in the order things happened,
@@ -398,6 +408,17 @@ the thing it touched (`/src/lib/util.ts`) underneath.
   the bottom, records the chosen answer on the card (so it survives a reload)
   and fires `slade:github-response` for whatever asked. Cards that finish on
   their own never grow a button they do not need.
+- **A pull request gets a card of its own, drawn open.** Opening a PR is the one
+  call whose result is the point of the call, so its card never folds: the
+  number, title, state (`Open` / `Draft` / `Merged` / `Closed`), `head → base`,
+  author, commits, files touched, `+`/`−` line counts, whether GitHub can merge
+  it, and the description are all on the card. Under it sit **Merge pull
+  request** — which merges it through the same REST client, so the merge is
+  logged as its own card too — and **Open on GitHub**. Merging writes the merge
+  commit and the time back onto the card, so a reloaded conversation still
+  shows the PR as merged; a PR that is closed (or already merged) offers no
+  button. GitHub's own refusal (`405` — not mergeable, `409` — conflict) comes
+  back as a result with its reason, not as a failed call.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,

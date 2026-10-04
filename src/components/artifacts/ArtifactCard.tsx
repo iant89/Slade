@@ -55,7 +55,21 @@ function artifactMatchesFile(artifact: Artifact, file: FsFile): boolean {
   }
 }
 
-export function ArtifactCard({ artifactId, conversationId }: { artifactId: string; conversationId?: string }) {
+export function ArtifactCard({
+  artifactId,
+  conversationId,
+  peek = false,
+}: {
+  artifactId: string
+  conversationId?: string
+  /**
+   * Show the preview whatever the collapse preference says. The composer's
+   * queued-attachment chip is a look at what is about to be sent rather than a
+   * card in the transcript — it already drops the footer — so it keeps the
+   * preview that makes the chip worth showing.
+   */
+  peek?: boolean
+}) {
   const artifact = useArtifacts((s) => s.byId[artifactId])
   const prefs = useSettings((s) => s.s.artifacts)
   const activeConversationId = useFs((s) => s.currentConversationId)
@@ -66,10 +80,11 @@ export function ArtifactCard({ artifactId, conversationId }: { artifactId: strin
     artifact && storedFile && (artifact.conversationId === workspaceId || artifactMatchesFile(artifact, storedFile)),
   )
 
-  const [collapsed, setCollapsed] = useState(prefs.collapsedByDefault)
+  // Cards arrive closed; a peek (the composer chip) is the one that does not.
+  const [collapsed, setCollapsed] = useState(peek ? false : prefs.collapsedByDefault)
   useEffect(() => {
-    if (prefs.collapsedByDefault) setCollapsed(true)
-  }, [prefs.collapsedByDefault, artifactId])
+    if (prefs.collapsedByDefault && !peek) setCollapsed(true)
+  }, [prefs.collapsedByDefault, artifactId, peek])
 
   if (!artifact) {
     return (

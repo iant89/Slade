@@ -304,6 +304,9 @@ function classify(res: Response, body: string): GitHubError {
       status,
     )
   }
+  // 405 is what GitHub answers when an action is refused outright — a pull
+  // request that cannot be merged, for instance.
+  if (status === 405) return new GitHubError('validation', withDetail('GitHub refused this action.'), status)
   if (status === 409) return new GitHubError('conflict', withDetail('Conflict — the file changed on GitHub.'), status)
   if (status === 422) return new GitHubError('validation', withDetail('GitHub rejected the request.'), status)
   if (status >= 500) return new GitHubError('server', withDetail(`GitHub had a server error (${status}).`), status)
@@ -876,6 +879,78 @@ export async function createGist(
   })
   return { id: res.id, htmlUrl: res.html_url, public: res.public }
 }
+
+export interface PullRequestResult {
+  number: number
+  htmlUrl: string
+  state?: string
+}
+
+/**
+ * Open a pull request. The response GitHub returns is what the card shows, so
+ * this hands back only what a caller needs to point at it — the card itself is
+ * drawn from the response the REST client already observed.
+ */
+export async function createPullRequest(
+  fullName: string,
+  o: GhRequest & { title: string; head: string; base: string; body?: string; draft?: boolean },
+): Promise<PullRequestResult> {
+  const res = await ghFetch<{ number: number; html_url: string; state?: string }>(`/repos/${fullName}/pulls`, {
+    token: o.token,
+    baseUrl: o.baseUrl,
+    signal: o.signal,
+    method: 'POST',
+    body: { title: o.title, head: o.head, base: o.base, body: o.body, draft: o.draft },
+  })
+  return { number: res.number, htmlUrl: res.html_url, state: res.state }
+}
+
+export interface MergeResult {
+  merged: boolean
+  /** The merge commit, when GitHub made one. */
+  sha?: string
+  /** GitHub's own sentence — "Pull Request successfully merged", or why not. */
+  message: string
+}
+
+/**
+ * Merge a pull request. GitHub answers `200` with `merged: true`, and `405` /
+ * `409` with `merged: false` and a reason, so a refusal comes back as a result
+ * here rather than as a thrown error.
+ */
+export async function mergePullRequest(
+  fullName: string,
+  number: number,
+  o: GhRequest & { method?: MergeMethod; commitTitle?: string; commitMessage?: string } = {},
+): Promise<MergeResult> {
+  try {
+    const res = await ghFetch<{ merged?: boolean; sha?: string | null; message?: string }>(
+      `/repos/${fullName}/pulls/${number}/merge`,
+      {
+        token: o.token,
+        baseUrl: o.baseUrl,
+        signal: o.signal,
+        method: 'PUT',
+        body: {
+          merge_method: o.method ?? 'merge',
+          commit_title: o.commitTitle,
+          commit_message: o.commitMessage,
+        },
+      },
+    )
+    return { merged: res.merged === true, sha: res.sha ?? undefined, message: res.message ?? '' }
+  } catch (err) {
+    // A merge GitHub refuses comes back as 405 (not mergeable) or 409 (conflict)
+    // rather than as a 200 with `merged: false`. Both are the answer to the
+    // question the card asked, not a failed call — so they read as a result.
+    if (isGitHubError(err) && (err.status === 405 || err.status === 409)) {
+      return { merged: false, message: githubErrorMessage(err) }
+    }
+    throw err
+  }
+}
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase'
 
 export interface IssueResult {
   number: number

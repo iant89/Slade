@@ -2556,6 +2556,25 @@ async function testGitHubActionCards() {
   check('the rate-limit probe is titled', budget.title === 'GitHub Action: Checking API Budget', budget.title)
   const listing = describe({ method: 'GET', path: '/repos/octo/demo/contents/docs' })
   check('a directory read names the directory', listing.subject === '/docs', listing.subject)
+  // The signed-in user's own list: the title already says whose it is.
+  const ownRepos = describe({ method: 'GET', path: '/user/repos' })
+  check(
+    'refreshing your own repositories is titled and carries no subject',
+    ownRepos.title === 'GitHub Action: Refreshing Repository List' && ownRepos.subject === '',
+    `${ownRepos.title} / "${ownRepos.subject}"`,
+  )
+  const theirRepos = describe({ method: 'GET', path: '/users/octo/repos' })
+  check(
+    "another account's list still says whose it is",
+    theirRepos.title === 'GitHub Action: Refreshing Repository List' && theirRepos.subject === '@octo',
+    `${theirRepos.title} / "${theirRepos.subject}"`,
+  )
+  const orgRepos = describe({ method: 'GET', path: '/orgs/acme/repos' })
+  check(
+    "an organisation's list still names the organisation",
+    orgRepos.subject === 'acme (organisation)',
+    orgRepos.subject,
+  )
   const unknown = describe({ method: 'GET', path: '/emojis' })
   check('an unmapped call still gets a card', unknown.title === 'GitHub Action: Performed API Request' && unknown.subject === '/emojis', `${unknown.title} ${unknown.subject}`)
 
@@ -2699,7 +2718,16 @@ async function testGitHubActionCards() {
 
     const titles = () => useGitHubActivity.getState().entries.map((e) => `${e.title} ${e.subject}`)
     check('a clone gets its own card', titles().some((t) => t === 'GitHub Action: Cloning Repository 1 of 1 file in Local Files'), JSON.stringify(titles()))
-    check('listing repos logs a card', titles().some((t) => t === 'GitHub Action: Refreshing Repository List your repositories'), JSON.stringify(titles()))
+    check(
+      'listing repos logs a card with no subject line',
+      useGitHubActivity.getState().entries.some((e) => e.title === 'GitHub Action: Refreshing Repository List' && e.subject === ''),
+      JSON.stringify(titles()),
+    )
+    check(
+      '…and the card never says “your repositories”',
+      !useGitHubActivity.getState().entries.some((e) => e.subject === 'your repositories'),
+      JSON.stringify(titles().filter((t) => t.includes('Refreshing'))),
+    )
     check('opening a repo logs a card', titles().some((t) => t === 'GitHub Action: Fetching Repository octo/demo'), JSON.stringify(titles()))
     check('reading the tree logs a card', titles().some((t) => t.startsWith('GitHub Action: Read Repository Tree')), JSON.stringify(titles()))
     check('reading a file logs it with its path', titles().some((t) => t === 'GitHub Action: Get File Contents /src/lib/util.ts'), JSON.stringify(titles()))
@@ -2878,6 +2906,12 @@ async function testGitHubActionCards() {
       'a standalone card renders as its own message',
       messageHtml.includes('msg-gh-action') && messageHtml.includes('gh-artifact-card'),
       messageHtml.slice(0, 220),
+    )
+    check(
+      '…in the same attachment slot a Memory Added card takes, so the two line up',
+      messageHtml.includes('msg-attachments') &&
+        messageHtml.indexOf('msg-attachments') < messageHtml.indexOf('gh-artifact-card'),
+      messageHtml.slice(0, 260),
     )
     check(
       '…carrying the action and what it touched',
@@ -3087,6 +3121,211 @@ async function testGitHubActionCards() {
   }
 }
 
+/**
+ * Opening a pull request: the card that comes back is the one card drawn open —
+ * everything GitHub answered with, plus a Merge button and a way to go read it
+ * on GitHub. Merging from the card is a real call, and the card keeps the
+ * answer, so the record survives a reload.
+ */
+async function testPullRequestCard() {
+  console.log('pull request card:')
+  const token = 'ghp_' + 'p'.repeat(24)
+  const realFetch = globalThis.fetch
+  let mergeCalls = 0
+
+  const fake = await startFakeGitHub({
+    '/repos/octo/demo/pulls': (body) => ({
+      status: 201,
+      json: {
+        number: 42,
+        title: 'Add the thing',
+        state: 'open',
+        draft: false,
+        html_url: 'https://github.com/octo/demo/pull/42',
+        head: { ref: 'slade/thing' },
+        base: { ref: 'main' },
+        user: { login: 'octo' },
+        body: 'It does the thing, and it is tested.',
+        commits: 3,
+        changed_files: 7,
+        additions: 120,
+        deletions: 14,
+        mergeable: true,
+        mergeable_state: 'clean',
+        created_at: '2026-10-03T10:00:00Z',
+        ...(body?.draft === true ? { draft: true } : {}),
+      },
+    }),
+    '/repos/octo/demo/pulls/42/merge': () => {
+      mergeCalls += 1
+      // First click merges; a second one (or a blocked PR) would not.
+      return mergeCalls === 1
+        ? { status: 200, json: { merged: true, sha: 'mergesha1deadbeef', message: 'Pull Request successfully merged' } }
+        : { status: 405, json: { message: 'Pull Request is not mergeable' } }
+    },
+  })
+
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('https://api.github.com')) return realFetch(url.replace('https://api.github.com', fake.base), init)
+    return realFetch(url, init)
+  }) as typeof fetch
+
+  const before = useGitHubActivity.getState().entries.length
+  try {
+    useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo'], publishDefaults: { ...useGitHub.getState().publishDefaults, repo: undefined } })
+    const opened = await useGitHub.getState().openPullRequest({
+      repo: 'octo/demo',
+      title: 'Add the thing',
+      head: 'slade/thing',
+      base: 'main',
+      body: 'It does the thing, and it is tested.',
+    })
+    check('opening a pull request comes back with its number and link', opened?.number === 42 && opened?.htmlUrl === 'https://github.com/octo/demo/pull/42', JSON.stringify(opened))
+
+    const card = useGitHubActivity.getState().entries.slice(before).find((e) => e.kind === 'create-pr')
+    check('a pull request logs its own card', Boolean(card), JSON.stringify(useGitHubActivity.getState().entries.slice(before).map((e) => e.kind)))
+    if (!card) return
+    const pr = card.output?.pr
+    check(
+      'the card keeps the whole pull request, not just a line of it',
+      pr?.number === 42 &&
+        pr.title === 'Add the thing' &&
+        pr.head === 'slade/thing' &&
+        pr.base === 'main' &&
+        pr.url === 'https://github.com/octo/demo/pull/42' &&
+        pr.author === 'octo' &&
+        pr.commits === 3 &&
+        pr.changedFiles === 7 &&
+        pr.additions === 120 &&
+        pr.deletions === 14 &&
+        pr.mergeable === true &&
+        pr.mergeableState === 'clean',
+      JSON.stringify(pr),
+    )
+    check('the card says which pull request it is', card.subject === '#42 Add the thing', card.subject)
+    check('a description is kept, but clipped', (pr?.body ?? '').startsWith('It does the thing') && (pr?.body?.length ?? 0) < 200, String(pr?.body))
+    check('a fresh pull request is neither merged nor closed', pr?.merged === undefined && pr?.state === 'open', JSON.stringify(pr && { merged: pr.merged, state: pr.state }))
+
+    /* ---- the card is drawn open ---- */
+    const html = renderToString(createElement(GitHubActionCard, { entry: card })).replace(/<!-- -->/g, '')
+    check(
+      'a pull request card has no expand toggle — it is open for good',
+      !html.includes('Show output') && !html.includes('aria-expanded') && !html.includes('gh-artifact-output'),
+      html.slice(0, 300),
+    )
+    check(
+      '…and shows what the pull request is: number, title and its state',
+      html.includes('gh-pr-body') && html.includes('#42') && html.includes('Add the thing') && html.includes('gh-pr-state open') && html.includes('Open'),
+      html.slice(html.indexOf('gh-pr-body'), html.indexOf('gh-pr-body') + 400),
+    )
+    for (const [label, needle] of [
+      ['branches', 'slade/thing'],
+      ['its base', 'main'],
+      ['who opened it', 'octo'],
+      ['the commit count', '3'],
+      ['the files it touches', '7'],
+      ['its size in lines', '+120'],
+      ['…and what it removes', '−14'],
+      ['whether it can be merged', 'no conflicts'],
+      ['the description', 'It does the thing'],
+      ['its link', 'https://github.com/octo/demo/pull/42'],
+    ] as const) {
+      check(`the card shows ${label}`, html.includes(needle), `${needle} — ${html.slice(html.indexOf('gh-pr-facts'), html.indexOf('gh-pr-facts') + 500)}`)
+    }
+    check(
+      '…with a button that opens it on GitHub',
+      html.includes('gh-pr-open') && html.includes('href="https://github.com/octo/demo/pull/42"') && html.includes('Open on GitHub'),
+      html.slice(html.indexOf('gh-pr-foot')),
+    )
+    check(
+      '…and a button that merges it',
+      html.includes('gh-pr-merge') && html.includes('Merge pull request') && !html.includes('disabled'),
+      html.slice(html.indexOf('gh-pr-foot')),
+    )
+
+    /* ---- merging from the card ---- */
+    const merged = await useGitHub.getState().mergePullRequest({ repo: 'octo/demo', number: 42, silent: true })
+    check('merging a pull request reports the merge commit', merged?.merged === true && merged.sha === 'mergesha1deadbeef', JSON.stringify(merged))
+    check('the merge is its own logged call', useGitHubActivity.getState().entries.slice(before).some((e) => e.kind === 'merge-pr'), JSON.stringify(useGitHubActivity.getState().entries.slice(before).map((e) => e.kind)))
+
+    useGitHubActivity.getState().markPrMerged(card.id, { sha: merged?.sha })
+    const afterMerge = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+    check(
+      'the card records the merge',
+      afterMerge.output?.pr?.merged === true &&
+        afterMerge.output.pr.state === 'closed' &&
+        afterMerge.output.pr.mergeSha === 'mergesha1deadbeef' &&
+        afterMerge.output.pr.mergedAt != null,
+      JSON.stringify(afterMerge.output?.pr),
+    )
+    const mergedHtml = renderToString(createElement(GitHubActionCard, { entry: afterMerge })).replace(/<!-- -->/g, '')
+    check(
+      'a merged card reads as merged and stops offering the button',
+      mergedHtml.includes('gh-pr-state merged') && mergedHtml.includes('Merged') && !mergedHtml.includes('Merge pull request'),
+      mergedHtml.slice(mergedHtml.indexOf('gh-pr-foot')),
+    )
+    check(
+      '…but still opens on GitHub',
+      mergedHtml.includes('Open on GitHub') && mergedHtml.includes('github.com/octo/demo/pull/42'),
+      mergedHtml.slice(mergedHtml.indexOf('gh-pr-foot')),
+    )
+    check(
+      'merging twice cannot rewrite the record',
+      (() => {
+        const first = afterMerge.output!.pr!.mergedAt
+        useGitHubActivity.getState().markPrMerged(card.id, { sha: 'latersha' })
+        const again = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+        return again.output?.pr?.mergedAt === first && again.output.pr.mergeSha === 'mergesha1deadbeef'
+      })(),
+    )
+
+    /* ---- a refusal is a result, not a crash ---- */
+    const refused = await useGitHub.getState().mergePullRequest({ repo: 'octo/demo', number: 42, silent: true })
+    check(
+      'a pull request GitHub will not merge comes back unmerged, with the reason',
+      refused?.merged === false && refused.message.includes('Pull Request is not mergeable'),
+      JSON.stringify(refused),
+    )
+    check(
+      '…and the card is left alone when the merge was refused',
+      (() => {
+        const still = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+        return still.output?.pr?.merged === true
+      })(),
+    )
+
+    /* ---- the card survives a reload ---- */
+    const convId = useChat.getState().currentId
+    const cardMessage = useChat.getState().conversations[convId]?.messages.find((m) => m.githubAction?.id === card.id)
+    check('the pull request card is a message in the conversation', Boolean(cardMessage), JSON.stringify(cardMessage?.githubAction?.subject))
+    const persisted = conversationSchema.safeParse(useChat.getState().conversations[convId])
+    check(
+      'a merged pull request card passes conversation persistence validation',
+      persisted.success &&
+        Boolean(persisted.data.messages.some((m) => m.githubAction?.id === card.id && m.githubAction.output?.pr?.merged === true)),
+      persisted.success ? 'ok' : String(persisted.error),
+    )
+
+    /* ---- a closed pull request cannot be merged again ---- */
+    const closedHtml = renderToString(
+      createElement(GitHubActionCard, {
+        entry: { ...card, output: { text: 'closed', pr: { ...pr!, merged: false, state: 'closed' } } },
+      }),
+    ).replace(/<!-- -->/g, '')
+    check(
+      'a closed pull request disables its merge button and says why',
+      closedHtml.includes('disabled') && closedHtml.includes('gh-pr-state closed') && closedHtml.includes('nothing left to merge'),
+      closedHtml.slice(closedHtml.indexOf('gh-pr-foot')),
+    )
+  } finally {
+    globalThis.fetch = realFetch
+    fake.close()
+    useGitHub.setState({ token: '', authStatus: 'anonymous' })
+    useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
+  }
+}
+
 function testGitHubUiRenders() {
   console.log('github ui renders:')
 
@@ -3151,6 +3390,65 @@ function testGitHubUiRenders() {
     uiInit.githubTab = 'search'
     const search = renderToString(createElement(GitHubPanel))
     check('the search tab renders its empty state', search.includes('No repository open'), search.slice(0, 120))
+
+    /* ---- opening a pull request, next to the branch picker ---- */
+    const ghSnapshot: Record<string, unknown> = { ...ghInit }
+    const demoRepo = {
+      id: 1,
+      name: 'demo',
+      full_name: 'octo/demo',
+      owner: { login: 'octo', avatar_url: '' },
+      private: false,
+      fork: false,
+      archived: false,
+      description: 'demo',
+      default_branch: 'main',
+      html_url: 'https://github.com/octo/demo',
+      pushed_at: null,
+      updated_at: null,
+      language: 'TypeScript',
+      stargazers_count: 1,
+    }
+    ghInit.token = 'ghp_' + 'r'.repeat(24)
+    ghInit.login = 'octo'
+    ghInit.authStatus = 'authorized'
+    ghInit.scopes = ['repo', 'gist', 'read:user']
+    ghInit.activeRepo = 'octo/demo'
+    ghInit.activeBranch = 'slade/thing'
+    ghInit.branches = [
+      { name: 'main', commit: { sha: 'sha_main' } },
+      { name: 'slade/thing', commit: { sha: 'sha_thing' } },
+    ]
+    ghInit.repos = [demoRepo]
+    uiInit.githubTab = 'files'
+    const browse = renderToString(createElement(GitHubPanel))
+    check(
+      'the branch picker sits next to a button that opens a pull request',
+      browse.includes('gh-pr-open-wrap') && browse.includes('Open pull request'),
+      browse.slice(Math.max(0, browse.indexOf('gh-row')), browse.indexOf('gh-row') + 400),
+    )
+    const openButton = browse.slice(browse.indexOf('gh-pr-open-wrap'))
+    check(
+      '…live on a branch, with a token that can push',
+      !openButton.slice(0, openButton.indexOf('</button>')).includes('disabled') &&
+        openButton.includes('from slade/thing'),
+      openButton.slice(0, 300),
+    )
+    ghInit.scopes = ['read:user']
+    const readOnly = renderToString(createElement(GitHubPanel))
+    const readOnlyButton = readOnly.slice(readOnly.indexOf('gh-pr-open-wrap'))
+    check(
+      'a token that cannot push says so instead of offering the button',
+      readOnlyButton.slice(0, readOnlyButton.indexOf('</button>')).includes('disabled') &&
+        readOnlyButton.includes('missing the repo scope'),
+      readOnlyButton.slice(0, 260),
+    )
+    ghInit.token = ''
+    ghInit.scopes = []
+    const anonymous = renderToString(createElement(GitHubPanel))
+    check('with no token there is no pull request button at all', !anonymous.includes('gh-pr-open-wrap'), anonymous.slice(0, 160))
+    for (const key of Object.keys(ghInit)) delete ghInit[key]
+    Object.assign(ghInit, ghSnapshot)
 
     const message = {
       id: 'msg_render',
@@ -3340,6 +3638,24 @@ function testProviderManagement() {
   check('migrated instances keep kind-as-id and gain label/kind', openaiInstance?.kind === 'openai' && openaiInstance?.label === 'OpenAI')
   check('migrated keys and base URLs survive', openaiInstance?.apiKey === 'sk-legacy' && migratedProviders.find((p) => p.id === 'openai-compatible')?.baseURL === 'https://api.groq.com/openai/v1')
   check('migrated models keep pointing at the same provider', migrated?.models[0]?.provider === 'openai')
+
+  /* ---- artifact cards arrive closed ---- */
+  check('artifact cards are collapsed on a fresh install', DEFAULT_SETTINGS.artifacts.collapsedByDefault === true)
+  check(
+    'settings saved while cards still unfolded are upgraded to closed ones',
+    validateSettings({ ...legacy, version: 1 })?.artifacts.collapsedByDefault === true,
+    JSON.stringify(validateSettings({ ...legacy, version: 1 })?.artifacts),
+  )
+  check(
+    '…and an install that already moved to the new behaviour keeps its own choice',
+    validateSettings({ ...legacy, version: 2, providers: [] })?.artifacts.collapsedByDefault === false,
+    JSON.stringify(validateSettings({ ...legacy, version: 2, providers: [] })?.artifacts),
+  )
+  check(
+    'the upgrade leaves the rest of the artifact preferences alone',
+    validateSettings({ ...legacy, artifacts: { collapsedByDefault: false, autoExpandImages: false, maxPreviewHeight: 300 } })?.artifacts.maxPreviewHeight === 300,
+    JSON.stringify(validateSettings({ ...legacy, artifacts: { collapsedByDefault: false, autoExpandImages: false, maxPreviewHeight: 300 } })?.artifacts),
+  )
 
   // Store round-trip: add a connection, hang models off it, delete it and
   // confirm the cascade (models gone, pin cleared).
@@ -4222,6 +4538,13 @@ function testInlineThoughtsRendering() {
   check('streaming message renders open thought body with reasoning text', streamHtml.includes('thought-block') && streamHtml.includes('streaming') && streamHtml.includes('First consider step A'), streamHtml.slice(0, 400))
   check('streaming thought card is still called Thoughts', streamHtml.includes('thought-title\">Thoughts<') && streamHtml.includes('thinking…'), streamHtml.slice(0, 400))
   check('streaming thought card keeps the brain icon', streamHtml.includes('M9.5 2A2.5 2.5') && !streamHtml.includes('M12 3v3.5M12 17.5V21'), streamHtml.slice(0, 300))
+  // Thoughts are the one card that opens itself: it unfolds while it is being
+  // written and folds again the moment the thought is finished.
+  check(
+    'a thought opens as it is written and hides its text once it is finished',
+    streamHtml.includes('thought-text') && !html.includes('thought-text'),
+    `${streamHtml.includes('thought-text')} / ${html.includes('thought-text')}`,
+  )
 
   // 2. Disabling showThoughts on the model suppresses the thought block
   settingsInit.s = {
@@ -6207,6 +6530,22 @@ async function testMemoryFeature() {
         !['Copy reference', 'Send back to model', 'Publish to GitHub', 'Save to Files', 'Download'].some((label) => collapsedCard.includes(label)),
       collapsedCard.slice(0, 300),
     )
+    // The settings a fresh install ships with, unseeded: the note stays closed.
+    settingsInitial.s = originalSettings
+    const stockCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
+    check(
+      'a Memory Added card is closed out of the box',
+      stockCard.includes('Expand preview') && !stockCard.includes(note),
+      `${originalSettings.artifacts.collapsedByDefault} · ${stockCard.slice(0, 160)}`,
+    )
+    // The composer's queued-attachment chip is a peek at what will be sent, so
+    // it keeps its preview even while cards in the transcript stay closed.
+    const peekCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId, peek: true })).replace(/<!-- -->/g, '')
+    check(
+      'a queued attachment still previews itself, whatever the preference says',
+      peekCard.includes(note) && peekCard.includes('Collapse preview') && !peekCard.includes('artifact-foot'),
+      peekCard.slice(0, 200),
+    )
     settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: false } }
     const expandedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
     check('the expanded Memory Added preview contains the saved note', expandedCard.includes('Memory Added') && expandedCard.includes(note) && expandedCard.includes('Collapse preview'))
@@ -6300,6 +6639,7 @@ async function main() {
   await testGitHubStoreAgainstFakeApi()
   testGitHubStore()
   await testGitHubActionCards()
+  await testPullRequestCard()
   testGitHubUiRenders()
   testModelPicker()
   testProviderManagement()

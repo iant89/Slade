@@ -2826,7 +2826,9 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* A standalone card is the whole message, so it takes the message column and
-   sits closer to its neighbours than a paragraph of prose would. */
+   sits closer to its neighbours than a paragraph of prose would. Inside it the
+   card sits in the same attachment slot a Memory Added card uses, so the two
+   kinds of card are the same width and share one alignment. */
 .msg-gh-action {
   margin-bottom: 4px;
 }
@@ -2946,6 +2948,117 @@ input[type='range']::-moz-range-thumb {
 .gh-choice.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
 .gh-choice.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 .gh-artifact-answer { color: var(--ok); }
+
+/* ---------- the pull request panel ----------
+
+   The one card that is drawn open: a call that opened a pull request has
+   nothing to hide behind a chevron, so the panel shows everything GitHub
+   answered with — the branches, the size of the change, whether it can be
+   merged — and the two things to do with it sit underneath (see
+   `.gh-pr-foot`). */
+
+.gh-pr-body { padding: 9px 11px 11px; display: flex; flex-direction: column; gap: 8px; }
+
+.gh-pr-headline { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.gh-pr-number { font-family: var(--font-mono); font-size: 0.78em; color: var(--text-faint); }
+.gh-pr-title {
+  flex: 1; min-width: 0;
+  font-size: 0.86em; font-weight: 650;
+  overflow-wrap: anywhere;
+}
+/* The state is a tint, like the call status above it — one word, no glyph. */
+.gh-pr-state {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.68em;
+  text-transform: capitalize;
+  color: var(--text-muted);
+}
+.gh-pr-state.open { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.gh-pr-state.merged {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.gh-pr-state.closed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+
+/* A two-column list of facts, so a card full of them still reads at a glance. */
+.gh-pr-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px 14px;
+  margin: 0;
+}
+.gh-pr-fact { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.gh-pr-fact dt { font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
+.gh-pr-fact dd {
+  margin: 0;
+  font-size: 0.78em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.gh-pr-fact.branches dd { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.gh-pr-branch {
+  font-family: var(--font-mono);
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gh-pr-arrow { color: var(--text-faint); }
+.gh-pr-diff { display: flex; gap: 7px; font-family: var(--font-mono); }
+.gh-pr-add { color: var(--ok); }
+.gh-pr-del { color: var(--danger); }
+.gh-pr-blocked { color: var(--warn); }
+.gh-pr-link { color: var(--accent-ink); overflow-wrap: anywhere; }
+.gh-pr-link:hover { text-decoration: underline; }
+
+/* The description is the PR's own words: kept plain, and clipped by the card
+   that captured it rather than by the layout. */
+.gh-pr-description {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 0.78em;
+  line-height: 1.55;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gh-pr-foot { justify-content: flex-start; }
+
+/* ---------- opening a pull request (Files tab) ----------
+
+   Next to the branch picker: the branch being browsed is the head, the form
+   picks the base, and the card that comes back in the chat is what you read
+   and merge. */
+
+.gh-pr-open-wrap { display: contents; }
+.gh-pr-form {
+  flex-basis: 100%;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-panel) 55%, transparent);
+}
+.gh-pr-form-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  margin-bottom: 9px;
+  font-size: 0.82em;
+}
+.gh-pr-form-head .gh-muted { margin: 0; font-family: var(--font-mono); }
+.gh-pr-form .gh-field { margin-bottom: 8px; }
+.gh-pr-form .gh-textarea { resize: vertical; min-height: 62px; line-height: 1.5; }
+.gh-pr-form code { font-family: var(--font-mono); }
+.gh-pr-merge {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent-ink);
+}
+.gh-pr-merge:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-ink); }
+.gh-pr-merge:disabled { opacity: 0.5; cursor: default; }
+.gh-pr-merged { color: var(--ok); }
 
 /* ---------- Settings → GitHub ---------- */
 

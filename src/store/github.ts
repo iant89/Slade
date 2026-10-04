@@ -30,6 +30,8 @@ import {
   parseRepoInput,
   readFile,
   searchCode,
+  createPullRequest,
+  mergePullRequest as mergePullRequestRest,
   type CommitTreeEntryInput,
   type CommitTreeResult,
   type GitHubBranch,
@@ -37,6 +39,9 @@ import {
   type GitHubRepo,
   type GitHubSearchHit,
   type GitHubTreeEntry,
+  type MergeMethod,
+  type MergeResult,
+  type PullRequestResult,
   type RemoteFile,
 } from '../lib/github'
 import { executePublish, publishErrorMessage, type PublishRequest, type PublishResult, type PublishTarget } from '../lib/github-publish'
@@ -228,6 +233,28 @@ export interface GitHubState {
     silent?: boolean
     conversationId?: string
   }) => Promise<CommitTreeResult | null>
+  /**
+   * Open a pull request. The card that shows it is logged by the REST client
+   * like any other call, so this only has to make it and point at it.
+   */
+  openPullRequest: (opts: {
+    repo?: string
+    title: string
+    head: string
+    base: string
+    body?: string
+    draft?: boolean
+    silent?: boolean
+  }) => Promise<PullRequestResult | null>
+  /** Merge a pull request. A refusal from GitHub comes back as `{ merged: false }`, not as a throw. */
+  mergePullRequest: (opts: {
+    repo?: string
+    number: number
+    method?: MergeMethod
+    commitTitle?: string
+    commitMessage?: string
+    silent?: boolean
+  }) => Promise<MergeResult | null>
   runSearch: (query: string) => Promise<void>
   clearSearch: () => void
   attachHit: (hit: GitHubSearchHit) => Promise<Artifact | null>
@@ -822,6 +849,92 @@ export const useGitHub = create<GitHubState>((set, get) => {
         if (!opts.silent) {
           useUI.getState().toast({ kind: 'error', title: 'Commit failed', detail: msg })
         }
+        return null
+      }
+    },
+
+    /* ---------------- pull requests ---------------- */
+
+    openPullRequest: async (opts) => {
+      const token = get().token
+      if (!token) {
+        if (!opts.silent) {
+          useUI.getState().toast({ kind: 'error', title: 'Not connected to GitHub', detail: 'Connect GitHub first (Settings → GitHub).' })
+        }
+        return null
+      }
+      const repo = (opts.repo ?? get().activeRepo ?? get().publishDefaults.repo ?? '').trim()
+      if (!repo) {
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: 'Choose a GitHub repository first.' })
+        return null
+      }
+      const head = opts.head.trim()
+      const base = opts.base.trim()
+      if (!head || !base) {
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: 'A pull request needs a head and a base branch.' })
+        return null
+      }
+      try {
+        const res = await createPullRequest(repo, {
+          token,
+          title: opts.title.trim() || `Update ${base} (via Slade)`,
+          head,
+          base,
+          body: opts.body?.trim() || undefined,
+          draft: opts.draft,
+        })
+        if (!opts.silent) {
+          useUI.getState().toast({
+            kind: 'success',
+            title: `Opened pull request #${res.number}`,
+            detail: `${repo} · ${head} → ${base}`,
+          })
+        }
+        return res
+      } catch (err) {
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: 'Could not open the pull request', detail: textOf(err) })
+        return null
+      }
+    },
+
+    mergePullRequest: async (opts) => {
+      const token = get().token
+      if (!token) {
+        if (!opts.silent) {
+          useUI.getState().toast({ kind: 'error', title: 'Not connected to GitHub', detail: 'Connect GitHub first (Settings → GitHub).' })
+        }
+        return null
+      }
+      const repo = (opts.repo ?? get().activeRepo ?? get().publishDefaults.repo ?? '').trim()
+      if (!repo) {
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: 'Choose a GitHub repository first.' })
+        return null
+      }
+      try {
+        const res = await mergePullRequestRest(repo, opts.number, {
+          token,
+          method: opts.method,
+          commitTitle: opts.commitTitle,
+          commitMessage: opts.commitMessage,
+        })
+        if (!opts.silent) {
+          if (res.merged) {
+            useUI.getState().toast({
+              kind: 'success',
+              title: `Merged pull request #${opts.number}`,
+              detail: res.sha ? `${repo} @ ${res.sha.slice(0, 7)}` : repo,
+            })
+          } else {
+            useUI.getState().toast({
+              kind: 'error',
+              title: `GitHub did not merge #${opts.number}`,
+              detail: res.message || 'It may have conflicts, or the branch may need to be up to date.',
+            })
+          }
+        }
+        return res
+      } catch (err) {
+        if (!opts.silent) useUI.getState().toast({ kind: 'error', title: `Could not merge #${opts.number}`, detail: textOf(err) })
         return null
       }
     },

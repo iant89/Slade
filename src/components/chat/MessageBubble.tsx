@@ -178,14 +178,23 @@ function HandoffDivider({ fromLabel, toLabel }: { fromLabel: string; toLabel: st
   )
 }
 
+/**
+ * The slot a card occupies inside a message. Every card in the transcript goes
+ * through it — an artifact the user or a model produced, and the GitHub action
+ * cards below — so they share one width, one gap and one alignment.
+ */
+function AttachmentSlot({ children }: { children: React.ReactNode }) {
+  return <div className="msg-attachments">{children}</div>
+}
+
 function Attachments({ ids, conversationId }: { ids?: string[]; conversationId: string }) {
   if (!ids?.length) return null
   return (
-    <div className="msg-attachments">
+    <AttachmentSlot>
       {ids.map((id) => (
         <ArtifactCard key={id} artifactId={id} conversationId={conversationId} />
       ))}
-    </div>
+    </AttachmentSlot>
   )
 }
 
@@ -198,13 +207,19 @@ function Attachments({ ids, conversationId }: { ids?: string[]; conversationId: 
  * whole message: no author line, no copy/retry/branch row — one card that
  * scrolls and is saved with the chat. It carries only what the call produced:
  * an output panel when it has output, answer buttons when it needs one.
+ *
+ * The card sits in the same attachment slot a Memory Added card does, so the
+ * two line up exactly: same column, same width, same spacing — the only
+ * difference between them is what the card itself says.
  */
 function GitHubActionMessage({ message }: { message: Message }) {
   const entry = message.githubAction!
   return (
     <article className="msg msg-assistant msg-gh-action" aria-label={entry.title}>
       <div className="msg-main">
-        <GitHubActionCard entry={entry} />
+        <AttachmentSlot>
+          <GitHubActionCard entry={entry} />
+        </AttachmentSlot>
       </div>
     </article>
   )

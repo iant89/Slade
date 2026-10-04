@@ -32,6 +32,7 @@ import type {
   GitHubActionOutput,
   GitHubActionQuestion,
   GitHubActionStatus,
+  GitHubPullRequestInfo,
   Message,
 } from '../types'
 import { onGitHubCall } from '../lib/github'
@@ -106,6 +107,12 @@ export interface GitHubActivityState {
    * Fires `slade:github-response` on `window` for whatever asked.
    */
   respond: (id: string, choiceId: string) => void
+  /**
+   * Note on a card that the pull request it opened was merged — the sha and
+   * the moment, kept on the card so the record survives a reload. No-op for a
+   * card that carries no pull request, or one already marked merged.
+   */
+  markPrMerged: (id: string, patch?: { sha?: string; at?: number }) => void
   /** Attribute every card logged from now on to `id` and its assistant message. */
   enterScope: (id: string, messageId?: string) => void
   /** Stop attributing cards to `id` (safe out of order, e.g. two open chats). */
@@ -167,8 +174,9 @@ function scopedEntry(input: GitHubActionInput, status: GitHubActionStatus): GitH
 
 /**
  * Insert one standalone card as a message of its own — the same way a saved
- * memory note announces itself — and return that message's id, so the card can
- * be kept current while its call is in flight.
+ * memory note announces itself, and into the same slot of that message — and
+ * return the message's id, so the card can be kept current while its call is
+ * in flight.
  */
 function insertCardMessage(card: GitHubActionArtifact): string {
   const chat = useChat.getState()
@@ -233,7 +241,10 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
         updated = {
           ...entry,
           status: patch.status,
-          subject: patch.subject ?? entry.subject,
+          // A pull request only learns its number when the call comes back, and
+          // a card that says "#42 Add the thing" is worth more than one that
+          // repeats the title it was opened with.
+          subject: patch.subject ?? (patch.output?.pr ? `#${patch.output.pr.number} ${patch.output.pr.title}`.trim() : entry.subject),
           // A card that was never a timed request (clone, sign-in) still knows
           // how long it was open, because it was opened with a timestamp.
           elapsedMs:
@@ -285,6 +296,27 @@ export const useGitHubActivity = create<GitHubActivityState>((set) => ({
 
   // There is deliberately no remove/clear operation: action cards are part of
   // the record of the run, including requests that were cancelled.
+
+  markPrMerged: (id, patch) => {
+    let updated: GitHubActionEntry | undefined
+    set((st) => {
+      const entries = st.entries.map((entry) => {
+        const pr = entry.output?.pr
+        if (entry.id !== id || !pr || pr.merged) return entry
+        const prMerged: GitHubPullRequestInfo = {
+          ...pr,
+          merged: true,
+          state: 'closed',
+          mergedAt: patch?.at ?? Date.now(),
+          mergeSha: patch?.sha ?? pr.mergeSha,
+        }
+        updated = { ...entry, output: { ...entry.output!, pr: prMerged } }
+        return updated
+      })
+      return updated ? { entries } : st
+    })
+    if (updated) placeCard(updated)
+  },
 
   enterScope: (id, messageId) =>
     set((st) => ({

@@ -19,7 +19,7 @@
  * a listing for a search) that the card can show behind its expand toggle.
  */
 
-import type { GitHubActionInfo, GitHubActionKind, GitHubActionOutput } from '../types'
+import type { GitHubActionInfo, GitHubActionKind, GitHubActionOutput, GitHubPullRequestInfo } from '../types'
 import { formatBytes } from './format'
 import { redactSecrets } from '../providers/base'
 export type { GitHubActionInfo, GitHubActionKind } from '../types'
@@ -260,8 +260,12 @@ export function describeGitHubCall(call: GitHubCallLike): GitHubActionInfo {
   }
 
   /* ---------------- account + search + misc ---------------- */
+  // `GET /user/repos` — the signed-in user's own list, and the only list Slade
+  // can be about without saying whose it is. "Refreshing Repository List" is
+  // already the whole sentence, so the card carries no subject and reads as
+  // one line. A list for another account or an org still names it.
   if (head === 'user' && second === 'repos') {
-    return make('list-repos', 'your repositories', { ref })
+    return make('list-repos', '', { ref })
   }
   if (head === 'users' && second) {
     if (third === 'repos') return make('list-repos', `@${second}`, { ref })
@@ -393,10 +397,57 @@ function clipOutput(text: string): { text: string; truncated?: boolean } {
   return { text: `${clean.slice(0, MAX_OUTPUT_CHARS).trimEnd()}\n…`, truncated: true }
 }
 
-function cardOutput(label: string | undefined, text: string, language?: string): GitHubActionOutput | undefined {
+function cardOutput(
+  label: string | undefined,
+  text: string,
+  language?: string,
+  pr?: GitHubPullRequestInfo,
+): GitHubActionOutput | undefined {
   const clipped = clipOutput(text)
-  if (!clipped.text.trim()) return undefined
-  return { label: label?.trim() || undefined, text: clipped.text, truncated: clipped.truncated, language }
+  // A pull request is worth a card even when it has no description to clip.
+  if (!clipped.text.trim() && !pr) return undefined
+  return { label: label?.trim() || undefined, text: clipped.text, truncated: clipped.truncated, language, pr }
+}
+
+/** How much of a pull request's description a card keeps. */
+const MAX_PR_BODY_CHARS = 600
+
+/**
+ * Read one pull request out of a response, in the shape a card draws it.
+ *
+ * The request that opened it is passed along as a fallback: a proxy or a fake
+ * that echoes the PR back without its branches would otherwise leave the card
+ * unable to say what it merged into what. Only scalar fields are read — never
+ * a diff, a patch or a file listing.
+ */
+function pullRequestFrom(json: unknown, requested?: unknown): GitHubPullRequestInfo | undefined {
+  if (!isRecord(json)) return undefined
+  const number = num(json.number)
+  if (number == null) return undefined
+  const asked = isRecord(requested) ? requested : {}
+  const head = isRecord(json.head) ? json.head : {}
+  const base = isRecord(json.base) ? json.base : {}
+  const user = isRecord(json.user) ? json.user : {}
+  const body = str(json.body) ?? str(asked.body)
+  return {
+    number,
+    title: firstLine(str(json.title) ?? str(asked.title)) || '(no title)',
+    state: str(json.state) ?? 'open',
+    draft: json.draft === true ? true : undefined,
+    head: str(head.ref) ?? str(asked.head) ?? '',
+    base: str(base.ref) ?? str(asked.base) ?? '',
+    url: str(json.html_url) ?? '',
+    author: str(user.login),
+    body: body ? clip(redactSecrets(body.replace(/\r\n/g, '\n')), MAX_PR_BODY_CHARS) : undefined,
+    commits: num(json.commits),
+    changedFiles: num(json.changed_files),
+    additions: num(json.additions),
+    deletions: num(json.deletions),
+    mergeable: typeof json.mergeable === 'boolean' ? json.mergeable : undefined,
+    mergeableState: str(json.mergeable_state),
+    createdAt: str(json.created_at),
+    merged: json.merged === true ? true : undefined,
+  }
 }
 
 /** The scalar fields worth showing for any object we do not model. */
@@ -441,6 +492,8 @@ export function describeGitHubOutput(call: GitHubOutputInput): GitHubActionOutpu
   const method = (call.method || 'GET').toUpperCase()
   const parts = segments(call.path)
   const json = call.json
+  /** What the call asked for: a fallback for fields a thin response omits. */
+  const asked = call.body
   const [head, second, third] = parts
 
   /* ---------------- repo-scoped responses ---------------- */
@@ -526,6 +579,9 @@ export function describeGitHubOutput(call: GitHubOutputInput): GitHubActionOutpu
         return cardOutput(`${json.length} pull request${json.length === 1 ? '' : 's'}`, listed(lines, json.length))
       }
       if (isRecord(json)) {
+        // Opening or reading one pull request: the card keeps the whole thing,
+        // not just a line of it — see `GitHubPullRequestInfo`.
+        const pr = pullRequestFrom(json, asked)
         const number = num(json.number)
         const label = [number == null ? '' : `#${number}`, firstLine(str(json.title)) || ''].filter(Boolean).join(' ')
         const line = [
@@ -535,7 +591,7 @@ export function describeGitHubOutput(call: GitHubOutputInput): GitHubActionOutpu
           num(json.deletions) == null ? '' : `-${num(json.deletions)}`,
           str(json.html_url) ?? '',
         ].filter(Boolean).join(' · ')
-        return cardOutput(label || repo, line)
+        return cardOutput(pr ? `#${pr.number} ${pr.title}` : label || repo, line, undefined, pr)
       }
     }
 

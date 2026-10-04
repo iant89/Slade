@@ -10,7 +10,7 @@ import type {
   Settings,
 } from '../types'
 import { DEFAULT_MODELS, DEFAULT_PROVIDERS } from '../providers/registry'
-import { validateSettings } from '../lib/schemas'
+import { SETTINGS_VERSION, validateSettings } from '../lib/schemas'
 import { normalizeProviderDef, providerTokens } from '../lib/providerCatalog'
 import { KEYS, loadRaw, saveJSON } from '../lib/storage'
 import { uid } from '../lib/id'
@@ -19,7 +19,7 @@ import { useHealth } from './health'
 export { providerTokens }
 
 export const DEFAULT_SETTINGS: Settings = {
-  version: 1,
+  version: SETTINGS_VERSION,
   models: DEFAULT_MODELS,
   defaults: {
     temperature: 0.7,
@@ -36,7 +36,9 @@ export const DEFAULT_SETTINGS: Settings = {
     firstTokenTimeoutMs: 120_000,
   },
   artifacts: {
-    collapsedByDefault: false,
+    // A card lands closed: the transcript stays scannable, and the preview is
+    // one click away. Settings → Artifacts opens them on arrival instead.
+    collapsedByDefault: true,
     autoExpandImages: true,
     maxPreviewHeight: 420,
   },
@@ -107,6 +109,13 @@ function hydrate(): Settings {
     merged.providers = migrated
   }
   merged.pinnedModelId = raw.pinnedModelId
+  // The v1 → v2 upgrade in `settingsSchema` only ever sees a blob that
+  // validates; a salvaged one gets the same rule, so cards land closed either
+  // way. Kept in step with the schema: bump it when a v3 upgrade is added.
+  if (merged.version < 2) {
+    merged.version = 2
+    merged.artifacts.collapsedByDefault = true
+  }
   return merged
 }
 

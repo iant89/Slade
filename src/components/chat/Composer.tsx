@@ -543,7 +543,8 @@ export function Composer() {
         <div className="pending-row" aria-label="Attachments queued for next message">
           {pendingIds.map((id) => (
             <div key={id} className="pending-chip">
-              <ArtifactCard artifactId={id} conversationId={conv?.id} />
+              {/* A peek, not a transcript card: what is queued keeps its preview. */}
+              <ArtifactCard artifactId={id} conversationId={conv?.id} peek />
               <button className="pending-remove icon-btn" onClick={() => removePending(id)} aria-label="Remove attachment" type="button">
                 <IconX size={12} />
               </button>
