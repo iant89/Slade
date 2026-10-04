@@ -257,6 +257,30 @@ const githubActionArtifactSchema = z.object({
       text: z.string(),
       truncated: z.boolean().optional(),
       language: z.string().optional(),
+      /** The pull request a `create-pr` / `get-pr` call came back with. */
+      pr: z
+        .object({
+          number: z.number().int().positive(),
+          title: z.string(),
+          state: z.string(),
+          draft: z.boolean().optional(),
+          head: z.string(),
+          base: z.string(),
+          url: z.string(),
+          author: z.string().optional(),
+          body: z.string().optional(),
+          commits: z.number().int().nonnegative().optional(),
+          changedFiles: z.number().int().nonnegative().optional(),
+          additions: z.number().int().nonnegative().optional(),
+          deletions: z.number().int().nonnegative().optional(),
+          mergeable: z.boolean().optional(),
+          mergeableState: z.string().optional(),
+          createdAt: z.string().optional(),
+          merged: z.boolean().optional(),
+          mergedAt: z.number().optional(),
+          mergeSha: z.string().optional(),
+        })
+        .optional(),
     })
     .optional(),
   /** Present when the action needs a user response; the card renders its choices. */

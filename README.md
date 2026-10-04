@@ -404,6 +404,17 @@ the thing it touched (`/src/lib/util.ts`) underneath.
   the bottom, records the chosen answer on the card (so it survives a reload)
   and fires `slade:github-response` for whatever asked. Cards that finish on
   their own never grow a button they do not need.
+- **A pull request gets a card of its own, drawn open.** Opening a PR is the one
+  call whose result is the point of the call, so its card never folds: the
+  number, title, state (`Open` / `Draft` / `Merged` / `Closed`), `head → base`,
+  author, commits, files touched, `+`/`−` line counts, whether GitHub can merge
+  it, and the description are all on the card. Under it sit **Merge pull
+  request** — which merges it through the same REST client, so the merge is
+  logged as its own card too — and **Open on GitHub**. Merging writes the merge
+  commit and the time back onto the card, so a reloaded conversation still
+  shows the PR as merged; a PR that is closed (or already merged) offers no
+  button. GitHub's own refusal (`405` — not mergeable, `409` — conflict) comes
+  back as a result with its reason, not as a failed call.
 - The vocabulary lives in `src/lib/github-actions.ts`, one entry per call shape —
   reading/creating/updating/deleting files, branches and refs, commits and trees,
   pull requests (create, merge, fetch), code search, repository and branch lists,

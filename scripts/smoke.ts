@@ -3121,6 +3121,211 @@ async function testGitHubActionCards() {
   }
 }
 
+/**
+ * Opening a pull request: the card that comes back is the one card drawn open —
+ * everything GitHub answered with, plus a Merge button and a way to go read it
+ * on GitHub. Merging from the card is a real call, and the card keeps the
+ * answer, so the record survives a reload.
+ */
+async function testPullRequestCard() {
+  console.log('pull request card:')
+  const token = 'ghp_' + 'p'.repeat(24)
+  const realFetch = globalThis.fetch
+  let mergeCalls = 0
+
+  const fake = await startFakeGitHub({
+    '/repos/octo/demo/pulls': (body) => ({
+      status: 201,
+      json: {
+        number: 42,
+        title: 'Add the thing',
+        state: 'open',
+        draft: false,
+        html_url: 'https://github.com/octo/demo/pull/42',
+        head: { ref: 'slade/thing' },
+        base: { ref: 'main' },
+        user: { login: 'octo' },
+        body: 'It does the thing, and it is tested.',
+        commits: 3,
+        changed_files: 7,
+        additions: 120,
+        deletions: 14,
+        mergeable: true,
+        mergeable_state: 'clean',
+        created_at: '2026-10-03T10:00:00Z',
+        ...(body?.draft === true ? { draft: true } : {}),
+      },
+    }),
+    '/repos/octo/demo/pulls/42/merge': () => {
+      mergeCalls += 1
+      // First click merges; a second one (or a blocked PR) would not.
+      return mergeCalls === 1
+        ? { status: 200, json: { merged: true, sha: 'mergesha1deadbeef', message: 'Pull Request successfully merged' } }
+        : { status: 405, json: { message: 'Pull Request is not mergeable' } }
+    },
+  })
+
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (url.startsWith('https://api.github.com')) return realFetch(url.replace('https://api.github.com', fake.base), init)
+    return realFetch(url, init)
+  }) as typeof fetch
+
+  const before = useGitHubActivity.getState().entries.length
+  try {
+    useGitHub.setState({ token, login: 'octo', authStatus: 'authorized', scopes: ['repo'], publishDefaults: { ...useGitHub.getState().publishDefaults, repo: undefined } })
+    const opened = await useGitHub.getState().openPullRequest({
+      repo: 'octo/demo',
+      title: 'Add the thing',
+      head: 'slade/thing',
+      base: 'main',
+      body: 'It does the thing, and it is tested.',
+    })
+    check('opening a pull request comes back with its number and link', opened?.number === 42 && opened?.htmlUrl === 'https://github.com/octo/demo/pull/42', JSON.stringify(opened))
+
+    const card = useGitHubActivity.getState().entries.slice(before).find((e) => e.kind === 'create-pr')
+    check('a pull request logs its own card', Boolean(card), JSON.stringify(useGitHubActivity.getState().entries.slice(before).map((e) => e.kind)))
+    if (!card) return
+    const pr = card.output?.pr
+    check(
+      'the card keeps the whole pull request, not just a line of it',
+      pr?.number === 42 &&
+        pr.title === 'Add the thing' &&
+        pr.head === 'slade/thing' &&
+        pr.base === 'main' &&
+        pr.url === 'https://github.com/octo/demo/pull/42' &&
+        pr.author === 'octo' &&
+        pr.commits === 3 &&
+        pr.changedFiles === 7 &&
+        pr.additions === 120 &&
+        pr.deletions === 14 &&
+        pr.mergeable === true &&
+        pr.mergeableState === 'clean',
+      JSON.stringify(pr),
+    )
+    check('the card says which pull request it is', card.subject === '#42 Add the thing', card.subject)
+    check('a description is kept, but clipped', (pr?.body ?? '').startsWith('It does the thing') && (pr?.body?.length ?? 0) < 200, String(pr?.body))
+    check('a fresh pull request is neither merged nor closed', pr?.merged === undefined && pr?.state === 'open', JSON.stringify(pr && { merged: pr.merged, state: pr.state }))
+
+    /* ---- the card is drawn open ---- */
+    const html = renderToString(createElement(GitHubActionCard, { entry: card })).replace(/<!-- -->/g, '')
+    check(
+      'a pull request card has no expand toggle — it is open for good',
+      !html.includes('Show output') && !html.includes('aria-expanded') && !html.includes('gh-artifact-output'),
+      html.slice(0, 300),
+    )
+    check(
+      '…and shows what the pull request is: number, title and its state',
+      html.includes('gh-pr-body') && html.includes('#42') && html.includes('Add the thing') && html.includes('gh-pr-state open') && html.includes('Open'),
+      html.slice(html.indexOf('gh-pr-body'), html.indexOf('gh-pr-body') + 400),
+    )
+    for (const [label, needle] of [
+      ['branches', 'slade/thing'],
+      ['its base', 'main'],
+      ['who opened it', 'octo'],
+      ['the commit count', '3'],
+      ['the files it touches', '7'],
+      ['its size in lines', '+120'],
+      ['…and what it removes', '−14'],
+      ['whether it can be merged', 'no conflicts'],
+      ['the description', 'It does the thing'],
+      ['its link', 'https://github.com/octo/demo/pull/42'],
+    ] as const) {
+      check(`the card shows ${label}`, html.includes(needle), `${needle} — ${html.slice(html.indexOf('gh-pr-facts'), html.indexOf('gh-pr-facts') + 500)}`)
+    }
+    check(
+      '…with a button that opens it on GitHub',
+      html.includes('gh-pr-open') && html.includes('href="https://github.com/octo/demo/pull/42"') && html.includes('Open on GitHub'),
+      html.slice(html.indexOf('gh-pr-foot')),
+    )
+    check(
+      '…and a button that merges it',
+      html.includes('gh-pr-merge') && html.includes('Merge pull request') && !html.includes('disabled'),
+      html.slice(html.indexOf('gh-pr-foot')),
+    )
+
+    /* ---- merging from the card ---- */
+    const merged = await useGitHub.getState().mergePullRequest({ repo: 'octo/demo', number: 42, silent: true })
+    check('merging a pull request reports the merge commit', merged?.merged === true && merged.sha === 'mergesha1deadbeef', JSON.stringify(merged))
+    check('the merge is its own logged call', useGitHubActivity.getState().entries.slice(before).some((e) => e.kind === 'merge-pr'), JSON.stringify(useGitHubActivity.getState().entries.slice(before).map((e) => e.kind)))
+
+    useGitHubActivity.getState().markPrMerged(card.id, { sha: merged?.sha })
+    const afterMerge = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+    check(
+      'the card records the merge',
+      afterMerge.output?.pr?.merged === true &&
+        afterMerge.output.pr.state === 'closed' &&
+        afterMerge.output.pr.mergeSha === 'mergesha1deadbeef' &&
+        afterMerge.output.pr.mergedAt != null,
+      JSON.stringify(afterMerge.output?.pr),
+    )
+    const mergedHtml = renderToString(createElement(GitHubActionCard, { entry: afterMerge })).replace(/<!-- -->/g, '')
+    check(
+      'a merged card reads as merged and stops offering the button',
+      mergedHtml.includes('gh-pr-state merged') && mergedHtml.includes('Merged') && !mergedHtml.includes('Merge pull request'),
+      mergedHtml.slice(mergedHtml.indexOf('gh-pr-foot')),
+    )
+    check(
+      '…but still opens on GitHub',
+      mergedHtml.includes('Open on GitHub') && mergedHtml.includes('github.com/octo/demo/pull/42'),
+      mergedHtml.slice(mergedHtml.indexOf('gh-pr-foot')),
+    )
+    check(
+      'merging twice cannot rewrite the record',
+      (() => {
+        const first = afterMerge.output!.pr!.mergedAt
+        useGitHubActivity.getState().markPrMerged(card.id, { sha: 'latersha' })
+        const again = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+        return again.output?.pr?.mergedAt === first && again.output.pr.mergeSha === 'mergesha1deadbeef'
+      })(),
+    )
+
+    /* ---- a refusal is a result, not a crash ---- */
+    const refused = await useGitHub.getState().mergePullRequest({ repo: 'octo/demo', number: 42, silent: true })
+    check(
+      'a pull request GitHub will not merge comes back unmerged, with the reason',
+      refused?.merged === false && refused.message.includes('Pull Request is not mergeable'),
+      JSON.stringify(refused),
+    )
+    check(
+      '…and the card is left alone when the merge was refused',
+      (() => {
+        const still = useGitHubActivity.getState().entries.find((e) => e.id === card.id)!
+        return still.output?.pr?.merged === true
+      })(),
+    )
+
+    /* ---- the card survives a reload ---- */
+    const convId = useChat.getState().currentId
+    const cardMessage = useChat.getState().conversations[convId]?.messages.find((m) => m.githubAction?.id === card.id)
+    check('the pull request card is a message in the conversation', Boolean(cardMessage), JSON.stringify(cardMessage?.githubAction?.subject))
+    const persisted = conversationSchema.safeParse(useChat.getState().conversations[convId])
+    check(
+      'a merged pull request card passes conversation persistence validation',
+      persisted.success &&
+        Boolean(persisted.data.messages.some((m) => m.githubAction?.id === card.id && m.githubAction.output?.pr?.merged === true)),
+      persisted.success ? 'ok' : String(persisted.error),
+    )
+
+    /* ---- a closed pull request cannot be merged again ---- */
+    const closedHtml = renderToString(
+      createElement(GitHubActionCard, {
+        entry: { ...card, output: { text: 'closed', pr: { ...pr!, merged: false, state: 'closed' } } },
+      }),
+    ).replace(/<!-- -->/g, '')
+    check(
+      'a closed pull request disables its merge button and says why',
+      closedHtml.includes('disabled') && closedHtml.includes('gh-pr-state closed') && closedHtml.includes('nothing left to merge'),
+      closedHtml.slice(closedHtml.indexOf('gh-pr-foot')),
+    )
+  } finally {
+    globalThis.fetch = realFetch
+    fake.close()
+    useGitHub.setState({ token: '', authStatus: 'anonymous' })
+    useGitHubActivity.setState({ entries: [], total: 0, scopes: [], scopeMessages: {} })
+  }
+}
+
 function testGitHubUiRenders() {
   console.log('github ui renders:')
 
@@ -6375,6 +6580,7 @@ async function main() {
   await testGitHubStoreAgainstFakeApi()
   testGitHubStore()
   await testGitHubActionCards()
+  await testPullRequestCard()
   testGitHubUiRenders()
   testModelPicker()
   testProviderManagement()

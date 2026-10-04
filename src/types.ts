@@ -181,6 +181,48 @@ export interface GitHubActionOutput {
   truncated?: boolean
   /** Highlighting hint (`ts`, `json`, …) when the output is code-shaped. */
   language?: string
+  /**
+   * The pull request a call opened (or read), kept in the shape a card draws
+   * it — so the card can show the whole thing and merge it without asking
+   * GitHub again. Only `create-pr` / `get-pr` carry one.
+   */
+  pr?: GitHubPullRequestInfo
+}
+
+/**
+ * A pull request as a card holds it: the numbers GitHub answered with when it
+ * was opened. `merged`, `mergedAt` and `mergeSha` are filled in by Slade, when
+ * the card's own Merge button is what merged it.
+ */
+export interface GitHubPullRequestInfo {
+  number: number
+  title: string
+  /** `open`, `closed`, … exactly as GitHub reports it. */
+  state: string
+  /** A draft is still `open` to GitHub; this says which. */
+  draft?: boolean
+  /** Branch carrying the change. */
+  head: string
+  /** Branch the change targets. */
+  base: string
+  /** Permalink on github.com. */
+  url: string
+  author?: string
+  /** The PR's description, clipped. */
+  body?: string
+  commits?: number
+  changedFiles?: number
+  additions?: number
+  deletions?: number
+  /** Whether GitHub says it can be merged; absent when it did not say. */
+  mergeable?: boolean
+  /** GitHub's own word for it: `clean`, `blocked`, `behind`, `dirty`, … */
+  mergeableState?: string
+  createdAt?: string
+  /** Set once this card merged it. */
+  merged?: boolean
+  mergedAt?: number
+  mergeSha?: string
 }
 
 /** One button offered by a card that needs a user response. */

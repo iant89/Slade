@@ -219,6 +219,14 @@ export const IconGithub = ({ size = 16, ...rest }: P) => (
 export const IconGitCommit = (p: P) => (
   <I {...p}><circle cx="12" cy="12" r="3.2" /><path d="M2.5 12h6.3M15.2 12h6.3" /></I>
 )
+/** Merge: the branch tip, the line it came from, and the commit that joins it. */
+export const IconGitMerge = (p: P) => (
+  <I {...p}>
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="18" cy="18" r="3" />
+    <path d="M6 21V9a9 9 0 0 0 9 9" />
+  </I>
+)
 export const IconRepo = (p: P) => (
   <I {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></I>
 )
