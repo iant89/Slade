@@ -6925,10 +6925,66 @@ async function main() {
   testChatPanelRenders()
   await testMemoryFeature()
   testBashArtifactCard()
+  testBashCommandFenceRendersBashCard()
   await testShellClientAndLoop()
   testDiskWorkspaceUi()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
+}
+
+function testBashCommandFenceRendersBashCard() {
+  console.log('bash command fences:')
+  const initial = useArtifacts.getInitialState() as { byId: Record<string, Artifact> }
+  const previous = initial.byId
+  const render = (id: string, content: string) =>
+    renderToString(
+      createElement(MessageBubble, {
+        message: {
+          id,
+          role: 'assistant' as const,
+          conversationId: 'conv_bash_ls',
+          content,
+          createdAt: Date.now(),
+          status: 'complete' as const,
+          modelId: 'mock-pro',
+        },
+      }),
+    ).replace(/<!-- -->/g, '')
+
+  try {
+    render('msg_bash_ls', 'Here is the listing:\n\n```bash:ls\nREADME.md\npackage.json\n```\n')
+    const created = Object.values(useArtifacts.getState().byId).filter((a) => a.bashExecution?.command === 'ls')
+    const docs = Object.values(useArtifacts.getState().byId).filter((a) => a.name === 'ls' || a.localPath === 'ls')
+    check(
+      '```bash:ls registers a bash execution artifact, not a document',
+      created.length === 1 && created[0]?.name === 'Bash' && created[0]?.kind !== 'doc' && Boolean(created[0]?.bashExecution),
+      JSON.stringify({
+        bash: created.map((a) => ({ kind: a.kind, name: a.name, command: a.bashExecution?.command })),
+        docs: docs.map((a) => ({ kind: a.kind, name: a.name, id: a.id, bash: Boolean(a.bashExecution) })),
+      }),
+    )
+    const artifact = created[0]
+    if (artifact) {
+      initial.byId = { ...previous, [artifact.id]: { ...artifact } }
+      const html = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, peek: true })).replace(/<!-- -->/g, '')
+      check(
+        '```bash:ls renders the bash command card with the listing',
+        html.includes('bash-artifact') && html.includes('ls') && html.includes('README.md') && html.includes('package.json'),
+        html.slice(0, 400),
+      )
+      check('```bash:ls is not labelled Document', !html.includes('Document'), html.slice(0, 300))
+    }
+
+    render('msg_bash_script', '```bash:scripts/setup.sh\necho hi\n```\n')
+    const script = Object.values(useArtifacts.getState().byId).find((a) => a.localPath === 'scripts/setup.sh' || a.name === 'setup.sh')
+    check(
+      '```bash:scripts/setup.sh stays a file artifact, not an execution card',
+      Boolean(script) && !script?.bashExecution && script?.kind === 'code',
+      JSON.stringify({ name: script?.name, kind: script?.kind, bash: Boolean(script?.bashExecution) }),
+    )
+  } finally {
+    initial.byId = previous
+  }
 }
 
 function testBashArtifactCard() {
