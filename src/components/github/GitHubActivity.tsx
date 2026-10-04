@@ -14,7 +14,10 @@ import { IconCheck, IconChevronDown, IconExternal, IconGitMerge, IconGithub, Ico
 /*                                                                     */
 /* One card per API call, built like the Memory Added artifact card:   */
 /* the GitHub mark, the action as its name, and the thing it touched   */
-/* underneath. Three things can be added:                              */
+/* underneath — except a file read, which is one card for the whole    */
+/* batch: its name is the action, its sub-title is how many files it   */
+/* stands for ("3 Files"), and its block lists their repository paths. */
+/* Three things can be added:                                          */
 /*                                                                     */
 /* - `output` — what the call returned (file contents, a listing, a    */
 /*   sha) — sits behind the expand toggle. No output, no toggle: the   */
@@ -39,7 +42,9 @@ function detailOf(entry: GitHubActionArtifact): string {
     githubActionPhrase(entry.title),
     entry.subject,
     where,
-    entry.count > 1 ? `${entry.count} calls` : '',
+    // A read card's subject is already a count of its files; the call count
+    // beside it would only differ when one file was read twice.
+    entry.count > 1 && entry.kind !== 'get-file' ? `${entry.count} calls` : '',
     entry.status === 'running' ? 'in progress' : entry.status === 'cancelled' ? 'cancelled' : '',
     entry.error ?? '',
     elapsed,
@@ -52,6 +57,9 @@ function statusOf(entry: GitHubActionArtifact): string {
   if (entry.status === 'running') return 'in progress'
   if (entry.status === 'cancelled') return 'cancelled'
   if (entry.status === 'error') return 'failed'
+  // A read card's sub-title is already a count of its files ("3 Files"), so the
+  // call count beside it would say the same thing twice. It stays in the tooltip.
+  if (entry.kind === 'get-file') return ''
   return entry.count > 1 ? `${entry.count} calls` : ''
 }
 

@@ -14,6 +14,7 @@ import {
   IconArchive,
   IconChevronDown,
   IconCode,
+  IconCopy,
   IconDownload,
   IconExpand,
   IconExternal,
@@ -186,9 +187,13 @@ export function ArtifactCard({
 }
 
 /**
- * The row of actions under a card: copy a reference, send it back to the model,
- * publish it to GitHub, save it into Local Files, open it on GitHub, download
- * it. A minimal card (the Memory Added card) leaves all of them out.
+ * The row of actions under a card: copy a reference, revise it with the model,
+ * push it to GitHub, save it into Local Files, open it on GitHub, download it.
+ *
+ * Every one of them is an icon with a tooltip. A card is narrow and the row is
+ * up to six buttons wide, so the words live in the tooltip (and in the button's
+ * accessible name) instead of on the button. A minimal card (the Memory Added
+ * card) leaves all of them out.
  */
 function ArtifactActions({
   artifact,
@@ -205,38 +210,42 @@ function ArtifactActions({
 }) {
   const toast = useUI((s) => s.toast)
   return (
-    <figcaption className="artifact-foot">
+    <figcaption className="artifact-foot icon-actions">
       <button
-        className="artifact-action"
+        className="artifact-action is-icon"
         onClick={async () => {
           const ok = await copyText(`${artifact.name} (${artifact.mime}, ${formatBytes(artifact.size)})`)
           toast({ kind: ok ? 'success' : 'error', title: ok ? 'Reference copied' : 'Copy failed' })
         }}
+        aria-label="Copy reference"
+        title={`Copy reference — ${artifact.name} (${artifact.mime}, ${formatBytes(artifact.size)})`}
         type="button"
       >
-        Copy reference
+        <IconCopy size={13} />
       </button>
       <button
-        className="artifact-action"
+        className="artifact-action is-icon"
         onClick={() => {
           toast({ kind: 'info', title: `${artifact.name} attached`, detail: 'It will be sent with your next message as context.' })
           window.dispatchEvent(new CustomEvent('slade:attach-artifact', { detail: artifact.id }))
         }}
+        aria-label="Revise"
+        title="Revise — attach this file and send it back to the model with your next message"
         type="button"
-        title="Send this artifact back to the model as context"
       >
-        <IconPin size={12} /> Send back to model
+        <IconPin size={13} />
       </button>
       <button
-        className="artifact-action"
+        className="artifact-action is-icon"
         onClick={() => useUI.getState().openPublish({ kind: 'artifact', artifactId: artifact.id })}
-        title="Publish this artifact to GitHub as a gist, a commit or an issue"
+        aria-label="Push to GitHub"
+        title="Push to GitHub — a commit, a gist, an issue or a pull request"
         type="button"
       >
-        <IconGithub size={12} /> Publish to GitHub
+        <IconGithub size={13} />
       </button>
       <button
-        className="artifact-action"
+        className="artifact-action is-icon"
         onClick={() => {
           if (storedInFs && targetFsPath) {
             useFs.getState().selectFile(targetFsPath, workspaceId)
@@ -252,29 +261,37 @@ function ArtifactActions({
             toast({ kind: 'error', title: `Couldn't save ${artifact.name} to Local Files` })
           }
         }}
+        aria-label={storedInFs ? 'Open in Files' : 'Save'}
         title={
           storedInFs
-            ? `Open ${targetFsPath ?? artifact.name} in the local file system`
-            : `Save ${artifact.name} into the local file system`
+            ? `Open in Files — ${targetFsPath ?? artifact.name} is already in Local Files`
+            : `Save ${artifact.name} to Local Files`
         }
         type="button"
       >
-        <IconFolder size={12} /> {storedInFs ? 'Open in Files' : 'Save to Files'}
+        <IconFolder size={13} />
       </button>
       {artifact.remote ? (
         <a
-          className="artifact-action"
+          className="artifact-action is-icon"
           href={artifact.remote.url}
           target="_blank"
           rel="noreferrer"
-          title={`Open ${artifact.remote.path} on GitHub`}
+          aria-label="Open on GitHub"
+          title={`Open on GitHub — ${artifact.remote.path} @ ${artifact.remote.ref}`}
         >
-          <IconExternal size={12} /> GitHub
+          <IconExternal size={13} />
         </a>
       ) : null}
       {src && (
-        <button className="artifact-action" onClick={() => downloadUrl(src, artifact.name)} type="button">
-          <IconDownload size={12} /> Download
+        <button
+          className="artifact-action is-icon"
+          onClick={() => downloadUrl(src, artifact.name)}
+          aria-label="Download"
+          title={`Download ${artifact.name}`}
+          type="button"
+        >
+          <IconDownload size={13} />
         </button>
       )}
     </figcaption>

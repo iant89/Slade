@@ -154,6 +154,11 @@ export interface GitHubCallEvent extends GitHubCallLike {
   phase: 'start' | 'end'
   /** Epoch ms when this event fired. */
   at: number
+  /**
+   * A background read the UI made on its own (see `GhRequest.quiet`). The
+   * activity log drops these instead of putting a card in the conversation.
+   */
+  quiet?: boolean
   /** `end` only: wall-clock ms the request took. */
   elapsedMs?: number
   /** `end` only: HTTP status when GitHub answered. */
@@ -214,6 +219,15 @@ export interface GhRequest {
   /** Overrides the API host — used by tests against a local fake. */
   baseUrl?: string
   signal?: AbortSignal
+  /**
+   * A housekeeping read the UI makes on its own — bootstrapping the composer's
+   * repository/branch pickers when a chat opens, restoring a repo from the last
+   * session, refreshing the changes chip. It still happens, and still fails
+   * loudly where a failure is shown, but it is never inserted into the
+   * conversation as a GitHub action card: nothing the user asked for happened.
+   * Anything the user clicked (open a repo, switch branch, reload) stays loud.
+   */
+  quiet?: boolean
 }
 
 interface CallOptions extends GhRequest {
@@ -326,10 +340,13 @@ async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
 
   // Observability: one start/end pair per call, which is what renders the
   // GitHub action cards. Only the URL and the (already-parsed) body object are
-  // handed over — never the token, never the file payload.
+  // handed over — never the token, never the file payload. `quiet` travels with
+  // both halves of the pair so the log can drop a background read at its start
+  // and never look for a card to close at its end.
   const callId = ++callSeq
   const startedAt = Date.now()
-  emitCall({ callId, phase: 'start', at: startedAt, method, path, query: opts.query, body: opts.body })
+  const quiet = opts.quiet === true
+  emitCall({ callId, phase: 'start', at: startedAt, method, path, query: opts.query, body: opts.body, quiet })
   const finish = (end: { ok: boolean; status?: number; error?: string; aborted?: boolean; output?: GitHubActionOutput }) =>
     emitCall({
       callId,
@@ -339,6 +356,7 @@ async function ghFetch<T>(path: string, opts: CallOptions = {}): Promise<T> {
       path,
       query: opts.query,
       body: opts.body,
+      quiet,
       elapsedMs: Date.now() - startedAt,
       ...end,
     })
@@ -760,9 +778,10 @@ export async function commitTree(fullName: string, o: CommitTreeOptions): Promis
 
   // Read the modes the branch already has, so a commit can't clear the
   // executable bit by omission. Only fetched when an entry has no explicit mode.
+  // Quiet: it is plumbing inside the commit, which gets a card of its own.
   const baseModes = new Map<string, string>()
   if (o.entries.some((e) => !e.deleted && !e.mode)) {
-    const base = await getTree(fullName, baseTreeSha, reqOpts)
+    const base = await getTree(fullName, baseTreeSha, { ...reqOpts, quiet: true })
     for (const entry of base.entries) {
       if (entry.type === 'blob') baseModes.set(entry.path, entry.mode)
     }

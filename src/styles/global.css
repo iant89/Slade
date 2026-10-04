@@ -1574,6 +1574,19 @@ kbd {
 }
 .artifact-action:hover { background: var(--bg-hover); color: var(--text); }
 
+/* Icon-only actions. A card is narrow and the row is up to six buttons wide, so
+   the words a text button would carry live in the tooltip (and in the button's
+   accessible name) instead — one square, one icon, one hover. */
+.artifact-foot.icon-actions { gap: 2px; }
+.artifact-action.is-icon {
+  width: 26px; height: 26px;
+  padding: 0;
+  justify-content: center;
+  color: var(--text-faint);
+}
+.artifact-action.is-icon:hover { color: var(--text); }
+.artifact-action.is-icon svg { display: block; flex: none; }
+
 /* skeleton */
 .skeleton { position: relative; overflow: hidden; background: var(--bg-raised); border-radius: 6px; }
 .skeleton::after, .skeleton-body::after, .img-skeleton::after {

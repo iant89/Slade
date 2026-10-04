@@ -60,11 +60,13 @@ function RepoCombobox() {
 
   // Pull the repo list in the background as soon as there is a token, so the
   // composer selector is ready before the user ever opens the GitHub panel.
+  // It is the picker filling itself in, not something the user asked for, so it
+  // is fetched quietly: no card lands in a chat that has only just started.
   const bootstrapped = useRef(false)
   useEffect(() => {
     if (bootstrapped.current || !token) return
     bootstrapped.current = true
-    void loadRepos()
+    void loadRepos({ quiet: true })
   }, [token, loadRepos])
 
   const options = useMemo<ComboboxOption[]>(() => {
@@ -193,13 +195,14 @@ function BranchCombobox() {
 
   // Eagerly fetch the branch list when it is missing for the active repo
   // (e.g. a repo restored from a previous session) — one attempt per repo so
-  // a failing endpoint can never spin into a retry loop.
+  // a failing endpoint can never spin into a retry loop. Quiet for the same
+  // reason the repo list is: restoring a session is not a conversation event.
   const triedRepo = useRef<string | null>(null)
   useEffect(() => {
     if (!activeRepo || branches.length > 0 || branchesLoading) return
     if (triedRepo.current === activeRepo) return
     triedRepo.current = activeRepo
-    void loadBranches()
+    void loadBranches({ quiet: true })
   }, [activeRepo, branches.length, branchesLoading, loadBranches])
 
   const defaultBranch = repos.find((r) => r.full_name === activeRepo)?.default_branch

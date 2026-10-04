@@ -108,7 +108,9 @@ async function loadBase(o: {
   }
 
   try {
-    const file = await readFile(o.repo, o.path, o.ref, o.token ? { token: o.token } : {})
+    // A base copy is fetched for the changes chip on a debounce, without the
+    // user asking for anything: quiet, so it never lands in the conversation.
+    const file = await readFile(o.repo, o.path, o.ref, { token: o.token, quiet: true })
     const result: BaseResult = file.text != null ? { kind: 'text', text: file.text } : { kind: 'binary' }
     // Under a tree sha, the tree remains the validity key even if the fetch
     // raced an external push — that keeps the cache stable until refresh.

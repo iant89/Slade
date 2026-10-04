@@ -12,6 +12,13 @@
  * between the run's thoughts. The ledger itself is runtime-only; it keeps the
  * session's running/idle state and folds identical repeats of the same call.
  *
+ * Two kinds of call are not one-card-per-request:
+ *  - a *background* read (`quiet` on the request) is housekeeping the UI does
+ *    on its own — bootstrapping the composer's pickers when a chat opens,
+ *    restoring a repo, refreshing the changes chip. It is never inserted.
+ *  - a *file read* folds: one card for the whole batch, listing every
+ *    repository path it fetched, sub-titled with how many files that is.
+ *
  * The card itself is drawn like a Memory Added card (see
  * `components/github/GitHubActivity.tsx`), with two things it can add: `output`
  * — the clipped extract the REST client captured — sits behind an expand
@@ -23,9 +30,13 @@ import { create } from 'zustand'
 import { uid } from '../lib/id'
 import {
   describeGitHubCall,
+  fileReadOutput,
+  fileReadSubject,
   githubActionSignature,
   githubActionTitle,
+  type GitHubActionInfo,
   type GitHubActionKind,
+  type GitHubFileRead,
 } from '../lib/github-actions'
 import type {
   GitHubActionArtifact,
@@ -341,6 +352,137 @@ const openCards = new Map<number, string>()
 /** callIds folded into an existing card, so its count and status stay current. */
 const absorbed = new Map<number, string>()
 
+/* ------------------------------------------------------------------ */
+/* File reads: one card for the whole batch                            */
+/*                                                                     */
+/* Pulling a repository's files is twenty reads of one repo, and twenty */
+/* cards in a row say nothing twenty times. Every read of the same repo */
+/* and branch folds into the newest read card instead: its block grows  */
+/* by one repository path, and its sub-title is the number of paths in  */
+/* that block ("3 Files"). The fold is runtime state — the card itself  */
+/* keeps only the list, so it reads the same after a reload.            */
+/* ------------------------------------------------------------------ */
+
+/** callId → the read card it belongs to, and the file that call is fetching. */
+const openReads = new Map<number, { id: string; path: string }>()
+/**
+ * Read card → the files it lists, plus how many of its reads are still out.
+ * Kept for the life of the session (like the ledger itself) so a batch that
+ * resumes after a pause continues the same list instead of starting one.
+ */
+const readFolds = new Map<string, { files: GitHubFileRead[]; pending: number }>()
+
+/**
+ * How long a gap between two reads still counts as one batch. A clone walks a
+ * whole tree file by file, so the window is generous; a read minutes later is
+ * something else the user did and earns a card of its own.
+ */
+const READ_FOLD_WINDOW_MS = 20_000
+
+/** The card a new read belongs on: the newest one, when it reads the same repo. */
+function readFoldTarget(
+  state: GitHubActivityState,
+  info: GitHubActionInfo,
+): { entry: GitHubActionEntry; fold: { files: GitHubFileRead[]; pending: number } } | undefined {
+  const newest = state.entries[state.entries.length - 1]
+  if (!newest || newest.kind !== 'get-file') return undefined
+  // Only within the same scope, so a manual read never lands on an agent's card.
+  if (newest.scope !== activeScope(state)) return undefined
+  if ((newest.repo ?? '') !== (info.repo ?? '') || (newest.ref ?? '') !== (info.ref ?? '')) return undefined
+  if (Date.now() - newest.at >= READ_FOLD_WINDOW_MS) return undefined
+  const fold = readFolds.get(newest.id)
+  return fold ? { entry: newest, fold } : undefined
+}
+
+/** Open (or grow) the read card one `GET …/contents/…` call belongs to. */
+function openRead(callId: number, info: GitHubActionInfo): void {
+  const state = useGitHubActivity.getState()
+  const target = readFoldTarget(state, info)
+
+  if (target) {
+    const { entry, fold } = target
+    // The same path read twice inside one batch (a retry, a second pass over
+    // the tree) is still one file: the card counts the call, the block keeps
+    // the single line it already has.
+    const known = fold.files.some((file) => file.path === info.subject)
+    const files = known ? fold.files : [...fold.files, { path: info.subject } as GitHubFileRead]
+    readFolds.set(entry.id, { files, pending: fold.pending + 1 })
+    openReads.set(callId, { id: entry.id, path: info.subject })
+    const updated: GitHubActionEntry = {
+      ...entry,
+      count: entry.count + 1,
+      at: Date.now(),
+      status: 'running',
+      error: undefined,
+      subject: fileReadSubject(files.length),
+      output: fileReadOutput(entry.repo, entry.ref, files),
+    }
+    useGitHubActivity.setState((st) => ({
+      entries: st.entries.map((candidate) => (candidate.id === entry.id ? updated : candidate)),
+      total: st.total + 1,
+    }))
+    placeCard(updated)
+    return
+  }
+
+  const files: GitHubFileRead[] = [{ path: info.subject }]
+  const id = state.log({
+    kind: 'get-file',
+    // The sub-title is the file count from the very first read; the path it
+    // stands for is the first line of the card's block.
+    subject: fileReadSubject(files.length),
+    repo: info.repo,
+    ref: info.ref,
+    output: fileReadOutput(info.repo, info.ref, files),
+  })
+  readFolds.set(id, { files, pending: 1 })
+  openReads.set(callId, { id, path: info.subject })
+}
+
+/** Close one read of a batch: annotate a failure, and settle the card when the last lands. */
+function closeRead(
+  callId: number,
+  event: { ok?: boolean; aborted?: boolean; elapsedMs?: number; error?: string },
+): void {
+  const call = openReads.get(callId)
+  openReads.delete(callId)
+  if (!call) return
+  const fold = readFolds.get(call.id)
+  const entry = useGitHubActivity.getState().entries.find((candidate) => candidate.id === call.id)
+  if (!fold || !entry) return
+
+  const failed = event.ok !== true || event.aborted === true
+  const files = failed
+    ? fold.files.map((file) =>
+        file.path === call.path && !file.failed ? { ...file, failed: true, error: event.error } : file,
+      )
+    : fold.files
+  const pending = Math.max(0, fold.pending - 1)
+  readFolds.set(call.id, { files, pending })
+
+  const failures = files.filter((file) => file.failed).length
+  const updated: GitHubActionEntry = {
+    ...entry,
+    // The batch is in progress until its last read comes back.
+    status: pending > 0 ? 'running' : event.aborted ? 'cancelled' : failures > 0 ? 'error' : 'done',
+    elapsedMs: event.elapsedMs ?? entry.elapsedMs ?? Date.now() - entry.at,
+    error:
+      failures === 0
+        ? event.aborted
+          ? 'Cancelled'
+          : undefined
+        : failures === files.length
+          ? event.error ?? 'GitHub returned none of these files'
+          : `${failures} of ${files.length} file reads failed`,
+    subject: fileReadSubject(files.length),
+    output: fileReadOutput(entry.repo, entry.ref, files),
+  }
+  useGitHubActivity.setState((st) => ({
+    entries: st.entries.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
+  }))
+  placeCard(updated)
+}
+
 function finishCall(
   activity: GitHubActivityState,
   id: string,
@@ -357,10 +499,23 @@ function finishCall(
 }
 
 onGitHubCall((event) => {
+  // A housekeeping read the UI made on its own — the composer bootstrapping its
+  // repository and branch pickers when a chat opens, a restored repo, the
+  // changes chip refreshing itself — is not something that happened *in* the
+  // conversation. No card is inserted and no call is counted for it.
+  if (event.quiet) return
+
   const activity = useGitHubActivity.getState()
 
   if (event.phase === 'start') {
     const info = describeGitHubCall(event)
+
+    // File reads are the one call that never gets a card per request: a batch
+    // of them is one card listing every repository path it fetched.
+    if (info.kind === 'get-file') {
+      openRead(event.callId, info)
+      return
+    }
 
     // Fold a repeat of the newest identical call into that card instead of
     // pushing another row for it. It remains the same immutable card; only its
@@ -394,6 +549,12 @@ onGitHubCall((event) => {
       event.callId,
       activity.log({ kind: info.kind, subject: info.subject, repo: info.repo, ref: info.ref }),
     )
+    return
+  }
+
+  // A read of a folded batch closes its own line, not the card's output.
+  if (openReads.has(event.callId)) {
+    closeRead(event.callId, event)
     return
   }
 

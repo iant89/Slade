@@ -205,14 +205,24 @@ export interface GitHubState {
   cancelSignIn: () => void
   signOut: (opts?: { keepConfig?: boolean }) => void
   connectWithToken: (token: string) => Promise<boolean>
-  loadRepos: (opts?: { force?: boolean }) => Promise<void>
+  /**
+   * Fetch the signed-in user's repository list. `quiet` marks the automatic
+   * bootstrap (the composer's picker filling itself in when a chat opens): the
+   * call still happens, it just is not inserted into the conversation as a card.
+   */
+  loadRepos: (opts?: { force?: boolean; quiet?: boolean }) => Promise<void>
   setRepoFilter: (v: string) => void
   openRepo: (input: string, opts?: { branch?: string }) => Promise<boolean>
   /** Fetch the branch list for the active repo (no tree reload). */
-  loadBranches: (opts?: { force?: boolean }) => Promise<void>
-  setBranch: (branch: string) => Promise<void>
+  loadBranches: (opts?: { force?: boolean; quiet?: boolean }) => Promise<void>
+  setBranch: (branch: string, opts?: { quiet?: boolean }) => Promise<void>
   setTreeFilter: (v: string) => void
-  refreshTree: () => Promise<void>
+  /**
+   * Re-read the open branch's tree. `quiet` is for the refresh Slade does on its
+   * own after a commit: the commit's cards already tell the story, so the
+   * housekeeping read behind them stays out of the conversation.
+   */
+  refreshTree: (opts?: { quiet?: boolean }) => Promise<void>
   openFile: (path: string) => Promise<void>
   closeFile: () => void
   attachFile: (path: string, opts?: { silent?: boolean }) => Promise<Artifact | null>
@@ -398,7 +408,9 @@ export const useGitHub = create<GitHubState>((set, get) => {
         adopt(token, check.user, check.scopes)
         finishGitHubAction(cardId, { status: 'done', subject: `@${check.user.login}` })
         useUI.getState().toast({ kind: 'success', title: `Connected to GitHub as @${check.user.login}` })
-        void get().loadRepos({ force: true })
+        // The sign-in card already says what happened; the list it fills in the
+        // pickers with is housekeeping.
+        void get().loadRepos({ force: true, quiet: true })
       } catch (err) {
         if (isAbort(err)) {
           finishGitHubAction(cardId, { status: 'error', subject: 'sign-in cancelled', error: 'Cancelled' })
@@ -453,7 +465,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
         const check = await verifyToken(clean)
         adopt(clean, check.user, check.scopes)
         useUI.getState().toast({ kind: 'success', title: `Connected to GitHub as @${check.user.login}` })
-        void get().loadRepos({ force: true })
+        void get().loadRepos({ force: true, quiet: true })
         return true
       } catch (err) {
         set({
@@ -474,7 +486,7 @@ export const useGitHub = create<GitHubState>((set, get) => {
       try {
         const all: GitHubRepo[] = []
         for (let page = 1; page <= 3; page++) {
-          const batch = await listRepos({ token, page, perPage: 100 })
+          const batch = await listRepos({ token, page, perPage: 100, quiet: opts?.quiet })
           all.push(...batch)
           if (batch.length < 100) break
         }
@@ -509,8 +521,10 @@ export const useGitHub = create<GitHubState>((set, get) => {
           tree: { repo: fullName, ref: branch, entries: tree.entries, truncated: tree.truncated, at: Date.now() },
           treeLoading: false,
         })
-        // Branch list is a nicety; never let it block the browser.
-        void listBranches(fullName, { token: get().token || undefined })
+        // Branch list is a nicety; never let it block the browser — and never
+        // let it into the conversation either, so it is fetched quietly. The
+        // repo and its tree, the two things opening a repo is *about*, stay loud.
+        void listBranches(fullName, { token: get().token || undefined, quiet: true })
           .then((branches) => set({ branches, branchesLoading: false }))
           .catch(() => set({ branches: [], branchesLoading: false }))
         return true
@@ -526,19 +540,19 @@ export const useGitHub = create<GitHubState>((set, get) => {
       if (branches.length && !opts?.force) return
       set({ branchesLoading: true })
       try {
-        const list = await listBranches(activeRepo, { token: token || undefined })
+        const list = await listBranches(activeRepo, { token: token || undefined, quiet: opts?.quiet })
         set({ branches: list, branchesLoading: false })
       } catch {
         set({ branches: [], branchesLoading: false })
       }
     },
 
-    setBranch: async (branch) => {
+    setBranch: async (branch, opts) => {
       const repo = get().activeRepo
       if (!repo) return
       set({ activeBranch: branch, treeLoading: true, treeError: undefined, preview: undefined })
       try {
-        const tree = await getTree(repo, branch, { token: get().token || undefined })
+        const tree = await getTree(repo, branch, { token: get().token || undefined, quiet: opts?.quiet })
         set({
           tree: { repo, ref: branch, entries: tree.entries, truncated: tree.truncated, at: Date.now() },
           treeLoading: false,
@@ -551,10 +565,10 @@ export const useGitHub = create<GitHubState>((set, get) => {
 
     setTreeFilter: (v) => set({ treeFilter: v }),
 
-    refreshTree: async () => {
+    refreshTree: async (opts) => {
       const { activeRepo, activeBranch } = get()
       if (!activeRepo || !activeBranch) return
-      await get().setBranch(activeBranch)
+      await get().setBranch(activeBranch, { quiet: opts?.quiet })
     },
 
     /* ---------------- files ---------------- */
@@ -831,8 +845,11 @@ export const useGitHub = create<GitHubState>((set, get) => {
         }
         set({ publishing: false, publishStep: undefined, lastPublish: publishResult })
 
+        // Slade refreshes the tree it is holding so the file browser and the
+        // changes chip agree with what was just committed — housekeeping behind
+        // the commit, so it is read quietly and the commit's cards stand alone.
         if (get().activeRepo === repo && get().activeBranch === res.branch) {
-          void get().refreshTree()
+          void get().refreshTree({ quiet: true })
         }
 
         if (!opts.silent) {

@@ -119,12 +119,16 @@ export const Markdown = memo(function Markdown({ text, provenance, messageId, co
         const token = langMatch?.[1] ?? ''
         const fsWriteMatch = /^fs:(?:write|create|save|update|append):(.+)$/i.exec(token)
         const colon = token.indexOf(':')
-        const isFsCmd = /^fs:(?:delete|rm|remove|move|rename)(?::|$)/i.test(token)
-        const fileName = fsWriteMatch
-          ? fsWriteMatch[1]!
-          : !isFsCmd && colon >= 0
-            ? token.slice(colon + 1)
-            : ''
+        // An `fs:` directive that *names* a file without carrying its contents:
+        // delete, move, and — the one that used to leak — pull. A pull reads a
+        // file out of the connected repository into Local Files; the file is not
+        // the model's output, so it must not become an artifact card in the
+        // message. What actually happened is already on the record: the GitHub
+        // read card says which repository paths were fetched, and the run's file
+        // summary says they were pulled.
+        const isFsCmd = /^fs:(?:delete|rm|remove|move|rename|pull|fetch|checkout)(?::|$)/i.test(token)
+        if (isFsCmd) return null
+        const fileName = fsWriteMatch ? fsWriteMatch[1]! : colon >= 0 ? token.slice(colon + 1) : ''
         const lang = fsWriteMatch ? '' : colon >= 0 ? token.slice(0, colon) : token
 
         if (fileName && provenance && messageId) {

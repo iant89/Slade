@@ -127,9 +127,12 @@ export async function executePublish(req: PublishRequest, ctx: PublishContext): 
         targetBranch = newBranch
       }
 
+      // Looking the file up is how Slade knows whether this is a create or an
+      // update — an internal step of the write, not a second thing that
+      // happened, so it is read quietly and the write's own card tells the story.
       ctx.onStep?.('looking up the current file…')
       const existingSha = targetBranch
-        ? await fileSha(repo, path, targetBranch, { token: ctx.token, baseUrl: ctx.baseUrl, signal: ctx.signal })
+        ? await fileSha(repo, path, targetBranch, { token: ctx.token, baseUrl: ctx.baseUrl, signal: ctx.signal, quiet: true })
         : undefined
 
       ctx.onStep?.(existingSha ? 'updating file…' : 'committing new file…')

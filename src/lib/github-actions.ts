@@ -15,8 +15,10 @@
  * (file contents, base64 blobs) ever reaches the UI.
  *
  * The same module also turns a response into the card's *output*: a clipped,
- * already-redacted extract (file contents for a read, sha and URL for a write,
- * a listing for a search) that the card can show behind its expand toggle.
+ * already-redacted extract (sha and URL for a write, a listing for a search,
+ * the pull request a call opened) that the card can show behind its expand
+ * toggle — and builds the one card that is not per-call: a batch of file reads,
+ * folded into a single card whose block lists every repository path it fetched.
  */
 
 import type { GitHubActionInfo, GitHubActionKind, GitHubActionOutput, GitHubPullRequestInfo } from '../types'
@@ -302,6 +304,55 @@ export function describeGitHubCall(call: GitHubCallLike): GitHubActionInfo {
  */
 export function githubActionSignature(info: Pick<GitHubActionInfo, 'kind' | 'subject' | 'repo' | 'ref'>): string {
   return [info.kind, info.repo ?? '', info.ref ?? '', info.subject].join('|')
+}
+
+/* ------------------------------------------------------------------ */
+/* File reads: one card for the whole batch                            */
+/*                                                                     */
+/* Pulling a repository's files is twenty reads, not twenty things that */
+/* happened — so the activity log folds every read of one repo into a   */
+/* single "Get File Contents" card. The card's sub-title is how many    */
+/* files it stands for, and its message block is the list of them: one  */
+/* repository path per line, appended as each read lands, with the repo */
+/* they came from as the block's caption. No file contents — the files  */
+/* themselves land in Local Files, and a card that copied them would be */
+/* a second, clipped copy of what is already there.                   */
+/* ------------------------------------------------------------------ */
+
+/** One file a read card stands for: its repository path, and how the read went. */
+export interface GitHubFileRead {
+  /** Repository path exactly as the describer saw it, e.g. `/src/lib/util.ts`. */
+  path: string
+  /** Set when this one read failed — the line says so rather than pretending. */
+  failed?: boolean
+  /** The failure sentence, kept on the line so the block explains itself. */
+  error?: string
+}
+
+/** A read card's sub-title is the number of file entries in its block. */
+export function fileReadSubject(count: number): string {
+  return `${count} File${count === 1 ? '' : 's'}`
+}
+
+/**
+ * The block a read card shows: which repository the files came from, then one
+ * line per file. `undefined` for a card with no files yet, so it grows no
+ * expand toggle until there is something behind it.
+ */
+export function fileReadOutput(
+  repo: string | undefined,
+  ref: string | undefined,
+  files: GitHubFileRead[],
+): GitHubActionOutput | undefined {
+  if (files.length === 0) return undefined
+  const shown = files.slice(0, MAX_OUTPUT_LINES)
+  const lines = shown.map((file) =>
+    file.failed ? `${file.path} — failed${file.error ? `: ${file.error}` : ''}` : file.path,
+  )
+  if (files.length > shown.length) lines.push(`… and ${files.length - shown.length} more`)
+  const where = [repo ?? '', ref ? `@ ${ref}` : ''].filter(Boolean).join(' ')
+  const caption = fileReadSubject(files.length)
+  return { label: where ? `${where} · ${caption}` : caption, text: lines.join('\n') }
 }
 
 /* ------------------------------------------------------------------ */
