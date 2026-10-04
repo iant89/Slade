@@ -178,6 +178,16 @@ import { archiveWithUndo, unarchiveWithToast } from '../src/components/layout/Co
 import { Header } from '../src/components/layout/Header'
 import { Sidebar } from '../src/components/layout/Sidebar'
 import { MENU_GAP, MENU_MARGIN, placeMenu, type MenuAnchor } from '../src/lib/menuPlacement'
+import {
+  clampPanelWidth,
+  EDGE_SNAP_ZONE,
+  edgeDistance,
+  MAIN_MIN_W,
+  MIN_PANEL_W,
+  snapRect,
+  snapTargetWidth,
+  zoneFor,
+} from '../src/lib/panelResize'
 import { AddModelForm, ProviderTokenManager } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
 import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
@@ -309,6 +319,7 @@ async function testFailover() {
   check('content non-empty', a1.content.length > 20)
   const failoverHtml = renderToString(createElement(MessageBubble, { message: a1 })).replace(/<!-- -->/g, '')
   check('successful failover names the destination inline', failoverHtml.includes('Switched to Simulacron Lite'))
+  check('the served reply keeps model attribution in the header', failoverHtml.includes('msg-model-name">Simulacron Lite'))
   check('failover explains why without relying on hover', failoverHtml.includes('<details') && failoverHtml.includes('Simulated:'))
   check(
     'health: pro is cooling down',
@@ -339,6 +350,13 @@ async function testFailover() {
     (a2.error ?? '').includes('Simulated: 429 rate limit reached') && !/unknown error/i.test(a2.error ?? ''),
     a2.error,
   )
+  // UI half of the checklist: a failed turn must show the attempts and reasons,
+  // and must NOT claim an answer was served (no "Switched to …" note, no model
+  // name wearing the failed last-attempt model as if it had answered).
+  const deadHtml = renderToString(createElement(MessageBubble, { message: a2 })).replace(/<!-- -->/g, '')
+  check('a dead turn never renders the “Switched to …” note', !deadHtml.includes('Switched to'), deadHtml.slice(0, 200))
+  check('…its header says “No model responded”', deadHtml.includes('No model responded'))
+  check('…while the banner still offers every provider reason', deadHtml.includes('what each provider said'))
 
   // Scenario 3: Pro is still cooling down → the chain skips it entirely.
   useSettings.getState().setModel('mock-lite', { simulate: 'ok' })
@@ -370,6 +388,39 @@ async function testFailover() {
     'pro re-entered cooldown after mid-stream drop',
     (useHealth.getState().byModel['mock-pro']?.cooldownUntil ?? 0) > Date.now(),
   )
+  const midHtml = renderToString(createElement(MessageBubble, { message: a4 })).replace(/<!-- -->/g, '')
+  check('a mid-stream handoff renders the divider in place', midHtml.includes('handoff-divider'))
+  check(
+    '…naming both sides of the switch',
+    midHtml.includes('handed off from Simulacron Pro') && midHtml.includes('→ Simulacron Lite'),
+  )
+
+  // Checklist §Failover: "Refresh the conversation and verify the same attribution,
+  // reasons, and handoff positions remain visible." End-to-end through the real
+  // (debounced) storage path and the hydrate validation, then re-rendered.
+  await new Promise((r) => setTimeout(r, 500)) // the store persists on a 350ms debounce
+  const persistedConvs = JSON.parse(localStorage.getItem('slade.conversations.v1') ?? '[]') as Conversation[]
+  const storedA1 = persistedConvs.flatMap((c) => c.messages).find((m) => m.id === a1.id)
+  const storedA4 = persistedConvs.flatMap((c) => c.messages).find((m) => m.id === a4.id)
+  check('storage validates against the conversation schema', z.array(conversationSchema).safeParse(persistedConvs).success)
+  check(
+    'a clean failover reaches storage with attribution, failedChain, and reasons',
+    storedA1?.modelId === 'mock-lite' &&
+      JSON.stringify(storedA1?.failedChain) === JSON.stringify(['mock-pro']) &&
+      Boolean(storedA1?.attempts?.length && storedA1.attempts[0]!.message.length > 0),
+    JSON.stringify({ modelId: storedA1?.modelId, failedChain: storedA1?.failedChain, attempts: storedA1?.attempts?.length }),
+  )
+  check(
+    'a mid-stream handoff keeps its exact character offset through storage',
+    typeof storedA4?.handoffs?.[0]?.atChar === 'number' &&
+      storedA4.handoffs[0]!.atChar === a4.handoffs?.[0]?.atChar &&
+      storedA4.handoffs[0]!.fromModelLabel === 'Simulacron Pro',
+    JSON.stringify({ stored: storedA4?.handoffs?.[0], live: a4.handoffs?.[0] }),
+  )
+  const hydrated = hydrateConversations(persistedConvs)
+  const reloadedA1 = hydrated.conversations[a1.conversationId]?.messages.find((m) => m.id === a1.id)
+  check('reload keeps the “Switched to …” note readable in the rehydrated chat',
+    Boolean(reloadedA1) && renderToString(createElement(MessageBubble, { message: reloadedA1! })).replace(/<!-- -->/g, '').includes('Switched to Simulacron Lite'))
 }
 
 /**
@@ -4812,6 +4863,49 @@ function seedConversations(list: Conversation[], openId?: string) {
   if (openId !== undefined) useChat.getState().selectConversation(openId)
 }
 
+function testPanelResize() {
+  console.log('panel resize geometry:')
+  const VW = 1440
+  check('clamp keeps the panel in range', clampPanelWidth(10, 240, 900) === 240 && clampPanelWidth(5000, 240, 900) === 900)
+  check('clamp rounds to whole pixels', clampPanelWidth(301.7, 240, 900) === 302)
+  check('an impossible range returns the minimum, never NaN', clampPanelWidth(500, 800, 300) === 800)
+  check('edge distance is side-symmetric (both measure to the far edge)', edgeDistance(VW, VW - EDGE_SNAP_ZONE) === EDGE_SNAP_ZONE)
+  check('inside the snap zone at exactly the boundary', zoneFor(EDGE_SNAP_ZONE) === 'near')
+  check('one pixel outside the zone is far', zoneFor(EDGE_SNAP_ZONE + 1) === 'far')
+  check('overlay drawers snap to the full viewport', snapTargetWidth({ side: 'right', overlay: true, viewportW: VW }) === VW)
+  check('grid panels leave the chat a live column', snapTargetWidth({ side: 'left', overlay: false, viewportW: VW }) === VW - MAIN_MIN_W)
+  check('a window barely wider than the min falls back to the min', snapTargetWidth({ side: 'right', overlay: false, viewportW: 500 }) === MIN_PANEL_W)
+  check('an absurdly small window still lands on the min', snapTargetWidth({ side: 'right', overlay: false, viewportW: 100 }) === MIN_PANEL_W)
+  const rectR = snapRect({ side: 'right', overlay: true, viewportW: VW })
+  check('the ghost rect covers the whole viewport for a full snap', rectR.left === 0 && rectR.width === VW)
+  const rectL = snapRect({ side: 'left', overlay: false, viewportW: VW })
+  check('left-docked ghost starts at the docking side', rectL.left === 0 && rectL.width === VW - MAIN_MIN_W)
+  let sane = true
+  for (let vw = 200; vw <= 4000; vw += 37) {
+    for (const overlay of [true, false]) {
+      for (const side of ['left', 'right'] as const) {
+        const t = snapTargetWidth({ side, overlay, viewportW: vw })
+        if (!Number.isFinite(t) || t !== Math.round(t) || t < MIN_PANEL_W || t > Math.max(vw, MIN_PANEL_W)) sane = false
+      }
+    }
+  }
+  check('snap target stays finite, integral and on-screen across window sizes', sane)
+
+  // The commit path: widths persist with settings, and a reset removes the key.
+  useSettings.getState().setLayoutWidth('sidebarW', 333)
+  useSettings.getState().setLayoutWidth('githubW', 640)
+  const saved = JSON.parse(localStorage.getItem('slade.settings.v1') ?? 'null')
+  check('resized widths persist with settings', saved?.layout?.sidebarW === 333 && saved?.layout?.githubW === 640, JSON.stringify(saved?.layout))
+  check('settings carrying a layout still validate', validateSettings(saved) !== null)
+  check('a non-integer or tiny width fails validation instead of stranding a panel',
+    validateSettings({ ...saved, layout: { sidebarW: 333.5 } }) === null && validateSettings({ ...saved, layout: { sidebarW: 40 } }) === null)
+  useSettings.getState().setLayoutWidth('sidebarW', null)
+  const after = JSON.parse(localStorage.getItem('slade.settings.v1') ?? 'null')
+  check('reset to the default drops the key rather than storing a width',
+    !('sidebarW' in (after?.layout ?? {})) && after?.layout?.githubW === 640, JSON.stringify(after?.layout))
+  useSettings.getState().setLayoutWidth('githubW', null)
+}
+
 function testConversationHelpers() {
   console.log('conversation helpers (titles · hydrate · schema · menu placement):')
 
@@ -5981,6 +6075,7 @@ async function main() {
   await testGitLocalFsReadWriteAcross()
   await testRoadmapFromGitHub()
   testInlineThoughtsRendering()
+  testPanelResize()
   testConversationHelpers()
   await testConversationArchive()
   testConversationMenuUi()

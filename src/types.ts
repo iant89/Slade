@@ -772,6 +772,20 @@ export interface Settings {
   agent: AgentSettings
   providers: ProviderDef[]
   pinnedModelId?: string
+  /** Manual widths from the panel resize handles; absent = the CSS default. */
+  layout?: PanelLayoutSettings
+}
+
+/**
+ * User-resized panel widths (px). Only ever set by the bottom-corner resize
+ * handles; `snapTargetWidth`/`clampPanelWidth` in `lib/panelResize` define the
+ * legal range, and a width equal to the panel's default is stored as absent.
+ */
+export interface PanelLayoutSettings {
+  sidebarW?: number
+  railW?: number
+  githubW?: number
+  filesW?: number
 }
 
 /* ------------------------------------------------------------------ */

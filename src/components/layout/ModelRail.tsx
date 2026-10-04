@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { useSettings, providerById } from '../../store/settings'
 import { useHealth, isRoutable } from '../../store/health'
 import { useUI } from '../../store/ui'
 import { formatCount, relativeCooldown } from '../../lib/format'
+import { ResizeHandle } from '../common/ResizeHandle'
 import { IconChevronDown, IconChevronRight, IconPin, IconX, IconZap } from '../icons'
 
 function RailRow({ modelId }: { modelId: string }) {
@@ -115,11 +116,19 @@ export function ModelRail() {
     document.querySelector<HTMLButtonElement>('[data-panel-toggle="rail"]')?.focus()
   }
   const strategy = settings.defaults.failoverStrategy
+  const railW = settings.layout?.railW
+  const setLayoutWidth = useSettings((s) => s.setLayoutWidth)
+  const asideRef = useRef<HTMLElement | null>(null)
 
   return (
     <>
       {railOpen && <div className="drawer-backdrop only-mobile" onClick={closeMobileRail} aria-hidden="true" />}
-      <aside className={`model-rail${railOpen ? ' open' : ''}`} aria-label="Model chain and health" ref={(node) => { if (node) node.inert = !railOpen }}>
+      <aside
+        className={`model-rail${railOpen ? ' open' : ''}`}
+        aria-label="Model chain and health"
+        ref={(node) => { asideRef.current = node; if (node) node.inert = !railOpen }}
+        style={railW ? ({ '--rail-w': `${railW}px` } as CSSProperties) : undefined}
+      >
         <div className="rail-head">
           <h2>
             <IconChevronRight size={13} className="rail-head-icon" /> Model chain
@@ -150,6 +159,15 @@ export function ModelRail() {
         <p className="rail-foot">
           Slade walks this chain top-down. Cooldowns mask a model temporarily — your priority order never changes.
         </p>
+        <ResizeHandle
+          side="right"
+          panelRef={asideRef}
+          varName="--rail-w"
+          fallback={304}
+          width={railW}
+          label="model chain"
+          onCommit={(w) => setLayoutWidth('railW', w)}
+        />
       </aside>
     </>
   )

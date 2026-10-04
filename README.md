@@ -447,6 +447,20 @@ status glyph, nothing to expand.
   so they never change a chat's time or its place in the list. Double-click the header
   name to rename it directly.
 
+## Resizing panels
+
+The sidebar, model chain rail, and the GitHub/Files drawers each carry a small
+grip in their bottom corner (bottom-right on the sidebar, bottom-left on the
+right-docked panels). Drag it to resize; the chat keeps a usable column (grid
+panels) or slides out of the way entirely (drawers). Bring a dragged edge close
+to the far side of the viewport and hold — a ghost panel appears showing the
+snap, and releasing there docks the panel flush to that edge. Drag away and the
+ghost vanishes; an Esc mid-drag cancels without committing. Keyboard: focus the
+grip and use ←/→ (Shift for bigger steps), `End` or `Enter` to snap, `Home` for
+the minimum, `Backspace` to return to the default width. Widths persist with
+your settings. On narrow layouts (≤900px) panels are overlay drawers and the
+grips hide themselves.
+
 ## Settings (Ctrl/Cmd + ,)
 
 - **Models** — enable/disable, drag-reorder priority, per-model temperature / max-tokens /

@@ -221,6 +221,10 @@ export function MessageBubble({ message }: { message: Message }) {
 
   if (message.githubAction) return <GitHubActionMessage message={message} />
 
+  // Did this turn actually serve text? A chain that exhausted itself without a
+  // single token must not read as "some model answered, after some others failed".
+  const servedText = message.content.trim().length > 0
+
   return (
     <article
       className={`msg ${isUser ? 'msg-user' : 'msg-assistant'} status-${message.status}`}
@@ -239,7 +243,7 @@ export function MessageBubble({ message }: { message: Message }) {
             {message.editedAt ? ' · edited' : ''}
           </span>
         </header>
-        {!isUser && !message.agent && message.failedChain?.length ? (
+        {!isUser && !message.agent && message.failedChain?.length && servedText ? (
           <FailoverNote message={message} labelOf={labelOf} />
         ) : null}
 
@@ -284,6 +288,15 @@ function ModelAttribution({
             {message.agent.steps.filter((s) => s.status === 'complete').length}/{message.agent.steps.length} steps delegated
           </span>
         )}
+      </span>
+    )
+  }
+  // A turn that errored without ever streaming a token served nothing to name;
+  // attributing it to the model that *failed last* would claim an answer exists.
+  if (message.status === 'error' && !message.content.trim()) {
+    return (
+      <span className="msg-model">
+        <span className="msg-model-name">No model responded</span>
       </span>
     )
   }

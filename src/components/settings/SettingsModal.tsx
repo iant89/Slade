@@ -1270,7 +1270,7 @@ function AppearanceTab() {
         onChange={(v) => set({ density: v })}
       />
       <SectionTitle>Behavior</SectionTitle>
-      <Toggle checked={appearance.enterToSend} onChange={(v) => set({ enterToSend: v })} label="Enter sends message" hint="Off: Enter makes a newline, Ctrl+Enter sends" />
+      <Toggle checked={appearance.enterToSend} onChange={(v) => set({ enterToSend: v })} label="Enter sends message" hint="Off: Enter makes a newline, Ctrl/⌘+Enter sends" />
       <Toggle checked={appearance.reduceMotion} onChange={(v) => set({ reduceMotion: v })} label="Reduce motion" hint="Also honors your OS reduced-motion preference" />
     </div>
   )

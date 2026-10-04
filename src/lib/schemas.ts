@@ -120,6 +120,16 @@ export const settingsSchema = z.object({
         : Object.entries(raw).map(([id, cfg]) => normalizeProviderDef({ id, ...cfg })),
     ),
   pinnedModelId: z.string().optional(),
+  // Added with the panel resize handles: optional so settings saved before it
+  // keep validating, clamped so a hand-edited value can never strand a panel.
+  layout: z
+    .object({
+      sidebarW: z.number().int().min(200).max(4000).optional(),
+      railW: z.number().int().min(200).max(4000).optional(),
+      githubW: z.number().int().min(200).max(8000).optional(),
+      filesW: z.number().int().min(200).max(8000).optional(),
+    })
+    .optional(),
 })
 
 export const attemptFailureSchema = z.object({

@@ -28,10 +28,27 @@ function ModelChip() {
   const health = useHealth((s) => s.byModel)
   const setConversationModel = useChat((s) => s.setConversationModel)
   const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
   const primary = currentPrimaryModel(settings, conv?.modelId)
   const enabled = settings.models.filter((m) => m.enabled)
+  // Row 0 is always "Chain default"; the rest are the enabled models in chain order.
+  const count = enabled.length + 1
+  const selectedIdx = conv?.modelId ? 1 + enabled.findIndex((m) => m.id === conv.modelId) : 0
+
+  const pick = (idx: number) => {
+    if (!conv) return
+    if (idx === 0) setConversationModel(conv.id, undefined)
+    else {
+      const m = enabled[idx - 1]
+      if (m) setConversationModel(conv.id, m.id)
+    }
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!open) return
@@ -41,6 +58,20 @@ function ModelChip() {
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
+
+  // Open at the selected row, with real focus on the listbox so its keys land
+  // here; the trigger hands over focus and gets it back on close.
+  useEffect(() => {
+    if (!open) return
+    setActive(selectedIdx >= 0 ? selectedIdx : 0)
+    listRef.current?.focus({ preventScroll: true })
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the highlighted row in view while arrowing, inside the popover only.
+  useEffect(() => {
+    if (!open) return
+    listRef.current?.querySelector<HTMLElement>(`#model-opt-${active}`)?.scrollIntoView({ block: 'nearest' })
+  }, [open, active])
 
   const stateOf = (m: ModelDef) => {
     const h = health[m.id]
@@ -52,13 +83,68 @@ function ModelChip() {
     return 'available'
   }
 
+  const onListKeyDown = (e: React.KeyboardEvent) => {
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault()
+        setActive((i) => (i + 1) % count)
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        setActive((i) => (i - 1 + count) % count)
+        break
+      case 'Home':
+        e.preventDefault()
+        setActive(0)
+        break
+      case 'End':
+        e.preventDefault()
+        setActive(count - 1)
+        break
+      case 'Enter':
+      case ' ':
+        e.preventDefault()
+        pick(active)
+        break
+      case 'Escape':
+        // Close just this popover; a drawer behind it must not also hear the Esc.
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+        triggerRef.current?.focus()
+        break
+      case 'Tab':
+        // Focus is on the listbox; tabbing out of it would land mid-popover or
+        // past it. Close and hand focus back to the chip.
+        e.preventDefault()
+        setOpen(false)
+        triggerRef.current?.focus()
+        break
+    }
+  }
+
+  const openMenu = (startAt: number) => {
+    setActive(startAt)
+    setOpen(true)
+  }
+
   return (
     <div className="model-chip-wrap" ref={ref}>
       <button
+        ref={triggerRef}
         className="model-chip"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? setOpen(false) : openMenu(selectedIdx >= 0 ? selectedIdx : 0))}
+        onKeyDown={(e) => {
+          if (open) return
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            openMenu(e.key === 'ArrowUp' ? Math.max(0, count - 1) : selectedIdx >= 0 ? selectedIdx : 0)
+          }
+        }}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? 'composer-model-menu' : undefined}
+        aria-activedescendant={open && active >= 0 ? `model-opt-${active}` : undefined}
         title="Primary model — Slade fails over down the rest of your priority chain"
         type="button"
       >
@@ -69,22 +155,26 @@ function ModelChip() {
       <AnimatePresence>
         {open && (
           <motion.div
+            id="composer-model-menu"
+            ref={listRef}
             className="model-menu"
             role="listbox"
             aria-label="Choose primary model"
+            tabIndex={-1}
+            onKeyDown={onListKeyDown}
             initial={{ opacity: 0, y: 6, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 4, scale: 0.98 }}
             transition={{ type: 'spring', stiffness: 500, damping: 34 }}
           >
             <button
-              className={`model-menu-item${!conv?.modelId ? ' selected' : ''}`}
+              id="model-opt-0"
+              className={`model-menu-item${selectedIdx === 0 ? ' selected' : ''}${active === 0 ? ' active' : ''}`}
               role="option"
-              aria-selected={!conv?.modelId}
-              onClick={() => {
-                setConversationModel(conv!.id, undefined)
-                setOpen(false)
-              }}
+              aria-selected={selectedIdx === 0}
+              tabIndex={-1}
+              onMouseEnter={() => setActive(0)}
+              onClick={() => pick(0)}
               type="button"
             >
               <IconLayers size={13} />
@@ -92,18 +182,18 @@ function ModelChip() {
                 Chain default <small>(strict priority)</small>
               </span>
             </button>
-            {enabled.map((m) => {
+            {enabled.map((m, i) => {
               const st = stateOf(m)
               return (
                 <button
                   key={m.id}
-                  className={`model-menu-item${conv?.modelId === m.id ? ' selected' : ''}`}
+                  id={`model-opt-${i + 1}`}
+                  className={`model-menu-item${selectedIdx === i + 1 ? ' selected' : ''}${active === i + 1 ? ' active' : ''}`}
                   role="option"
-                  aria-selected={conv?.modelId === m.id}
-                  onClick={() => {
-                    setConversationModel(conv!.id, m.id)
-                    setOpen(false)
-                  }}
+                  aria-selected={selectedIdx === i + 1}
+                  tabIndex={-1}
+                  onMouseEnter={() => setActive(i + 1)}
+                  onClick={() => pick(i + 1)}
                   type="button"
                 >
                   <span className={`state-dot ${st}`} aria-hidden="true" />
@@ -355,10 +445,16 @@ export function Composer() {
         return
       }
     }
-    const sendKey = e.key === 'Enter' && !e.shiftKey
-    if (sendKey && enterToSend && !e.nativeEvent.isComposing) {
-      e.preventDefault()
-      send()
+    // With "Enter sends" on, plain Enter sends and Shift+Enter breaks the line.
+    // With it off, Enter stays a newline and the send chord is Ctrl/Cmd+Enter —
+    // the combination the Settings hint (and the composer footer) promise.
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+      const chord = e.metaKey || e.ctrlKey
+      const wantsSend = enterToSend ? !e.shiftKey : chord
+      if (wantsSend) {
+        e.preventDefault()
+        send()
+      }
     }
   }
 
@@ -575,7 +671,15 @@ export function Composer() {
 
       <div className="composer-foot">
         <span>
-          <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for newline
+          {enterToSend ? (
+            <>
+              <strong>Enter</strong> to send · <strong>Shift+Enter</strong> for newline
+            </>
+          ) : (
+            <>
+              <strong>Ctrl/⌘+Enter</strong> to send · <strong>Enter</strong> for newline
+            </>
+          )}
         </span>
         <button className="link-btn" onClick={() => openSettings('providers')} type="button">
           <IconGear size={11} /> providers & keys
