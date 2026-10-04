@@ -261,6 +261,7 @@ kbd {
 /* ---------- Sidebar ---------- */
 
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   background: var(--bg-sidebar);
@@ -268,7 +269,7 @@ kbd {
   min-height: 0;
   margin-left: calc(-1 * var(--sidebar-w));
   visibility: hidden;
-  transition: margin-left var(--dur-slow) var(--ease-drawer), visibility 0s linear var(--dur-slow);
+  transition: margin-left var(--dur-slow) var(--ease-drawer), width 180ms ease, visibility 0s linear var(--dur-slow);
 }
 .app.sidebar-open .sidebar {
   margin-left: 0;
@@ -1742,6 +1743,7 @@ kbd {
 /* ---------- Model rail ---------- */
 
 .model-rail {
+  position: relative;
   display: flex; flex-direction: column;
   background: var(--bg-sidebar);
   width: var(--rail-w);
@@ -1749,7 +1751,7 @@ kbd {
   overflow: hidden;
   margin-right: calc(-1 * var(--rail-w));
   visibility: hidden;
-  transition: margin-right var(--dur-slow) var(--ease-drawer), visibility 0s linear var(--dur-slow);
+  transition: margin-right var(--dur-slow) var(--ease-drawer), width 180ms ease, visibility 0s linear var(--dur-slow);
 }
 .app.rail-open .model-rail {
   margin-right: 0;
@@ -2317,9 +2319,72 @@ input[type='range']::-moz-range-thumb {
 /* ---------- Pending footer ---------- */
 .pending-footer { padding: 0 clamp(16px, 4vw, 32px) 6px; display: flex; justify-content: center; }
 
+/* ---------- Panel resize handles (bottom corners) ---------- */
+
+/* The grip lives in the corner the pointer drags the far edge from:
+   bottom-right on the left-docked sidebar, bottom-left on every
+   right-docked panel (rail, GitHub and Files drawers). */
+.panel-resize-handle {
+  position: absolute;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  z-index: 6;
+  border: 0;
+  padding: 0;
+  background:
+    repeating-linear-gradient(135deg, transparent 0 3px, var(--text-faint) 3px 4.5px, transparent 4.5px 7px)
+      center / 11px 11px no-repeat;
+  border-radius: 4px;
+  opacity: 0.4;
+  touch-action: none;
+  transition: opacity var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+.panel-resize-handle.side-left { right: 0; cursor: nwse-resize; }
+.panel-resize-handle.side-right { left: 0; cursor: nesw-resize; }
+.panel-resize-handle:hover { opacity: 0.9; }
+.panel-resize-handle:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
+.panel-resize-handle.near { background-color: color-mix(in srgb, var(--accent) 20%, transparent); opacity: 1; }
+.panel-resize-handle.active { opacity: 1; }
+/* While a drag is in flight the width must track the pointer exactly. */
+.resizing { transition: none !important; }
+.resizing, .resizing * { user-select: none !important; }
+/* Ghost preview drawn while the drag is held near a viewport edge. */
+.snap-ghost {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  z-index: 120;
+  pointer-events: none;
+  border: 2px dashed color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  animation: ghost-in 160ms ease-out;
+}
+.snap-ghost-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.78em;
+  padding: 6px 12px;
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+@keyframes ghost-in { from { opacity: 0; transform: scale(0.985); } }
+
 /* ---------- Responsive ---------- */
 
 .only-mobile { display: none !important; }
+
+/* Resize is a pointer affordance; overlay drawers on narrow layouts get no grip. */
+@media (max-width: 900px) {
+  .panel-resize-handle { display: none; }
+}
 
 @media (max-width: 1200px) {
   :root { --rail-w: 280px; }
@@ -2359,6 +2424,8 @@ input[type='range']::-moz-range-thumb {
   @keyframes fade-in { from { opacity: 0; } }
 
   .msg-actions { opacity: 1; }
+  /* Keep the rounded-corner gutter on tablet widths when a resized drawer runs wide. */
+  .github-drawer { width: min(var(--gh-w, 470px), 94vw); }
 }
 
 @media (max-width: 640px) {
@@ -2499,7 +2566,8 @@ input[type='range']::-moz-range-thumb {
 
 .github-drawer {
   position: fixed; top: 0; right: 0; bottom: 0;
-  width: min(470px, 94vw);
+  width: min(var(--gh-w, 470px), 100vw);
+  transition: width 180ms ease;
   max-width: 100%;
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);

@@ -1,5 +1,7 @@
-import { useEffect } from 'react'
+import { useEffect, useRef, type CSSProperties } from 'react'
 import { useGitHub, canGist, canWriteRepos } from '../../store/github'
+import { useSettings } from '../../store/settings'
+import { ResizeHandle } from '../common/ResizeHandle'
 import { useUI } from '../../store/ui'
 import { formatCount } from '../../lib/format'
 import { ConnectCard } from './ConnectCard'
@@ -49,6 +51,9 @@ export function GitHubPanel() {
     close()
     document.querySelector<HTMLButtonElement>('[data-panel-toggle="github"]')?.focus()
   }
+  const drawerRef = useRef<HTMLElement>(null)
+  const githubW = useSettings((s) => s.s.layout?.githubW)
+  const setLayoutWidth = useSettings((s) => s.setLayoutWidth)
   const setTab = useUI((s) => s.setGithubTab)
   const { login, avatarUrl, token, authStatus } = useGitHub()
   const connectWithToken = useGitHub((s) => s.connectWithToken)
@@ -74,7 +79,12 @@ export function GitHubPanel() {
   return (
     <>
       <div className="gh-drawer-backdrop only-mobile" onClick={closeAndFocus} aria-hidden="true" />
-      <aside className="github-drawer" aria-label="GitHub workspace">
+      <aside
+        className="github-drawer"
+        aria-label="GitHub workspace"
+        ref={drawerRef}
+        style={githubW ? ({ '--gh-w': `${githubW}px` } as CSSProperties) : undefined}
+      >
         <header className="gh-head">
           <h2>
             <IconGithub size={14} /> GitHub
@@ -144,6 +154,16 @@ export function GitHubPanel() {
           ) : null}
           <RateFooter />
         </footer>
+        <ResizeHandle
+          side="right"
+          overlay
+          panelRef={drawerRef}
+          varName="--gh-w"
+          fallback={470}
+          width={githubW}
+          label="GitHub"
+          onCommit={(w) => setLayoutWidth('githubW', w)}
+        />
       </aside>
     </>
   )

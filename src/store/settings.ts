@@ -61,6 +61,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   providers: DEFAULT_PROVIDERS,
   pinnedModelId: undefined,
+  layout: {},
 }/* ------------------------------------------------------------------ */
 /* Provider lookups                                                    */
 /* ------------------------------------------------------------------ */
@@ -82,6 +83,16 @@ function hydrate(): Settings {
   if (raw.artifacts) merged.artifacts = { ...merged.artifacts, ...raw.artifacts }
   if (raw.appearance) merged.appearance = { ...merged.appearance, ...raw.appearance }
   if (raw.agent) merged.agent = { ...merged.agent, ...raw.agent }
+  if (raw.layout) {
+    // Sanitized rather than spread: this branch runs exactly when validation
+    // failed, so raw values may be junk; a leaked "abc" here would re-persist
+    // and keep every future load on the fallback path.
+    const w = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 200 ? Math.round(v) : undefined)
+    for (const key of ['sidebarW', 'railW', 'githubW', 'filesW'] as const) {
+      const px = w(raw.layout[key])
+      if (px !== undefined) merged.layout![key] = px
+    }
+  }
   if (raw.providers) {
     // Handles both shapes: the new provider-instance list and the legacy
     // record keyed by kind (migrated in place, ids = kinds, so existing
@@ -109,6 +120,8 @@ export interface SettingsState {
   setArtifactsPrefs: (patch: Partial<ArtifactSettings>) => void
   setAgent: (patch: Partial<AgentSettings>) => void
   setAppearance: (patch: Partial<AppearanceSettings>) => void
+  /** Commit (or reset, passing null) a panel's manually resized width. */
+  setLayoutWidth: (key: 'sidebarW' | 'railW' | 'githubW' | 'filesW', width: number | null) => void
   /** Update an existing provider instance (key, base URL, label, apiKeys). */
   setProvider: (pid: string, patch: Partial<Omit<ProviderDef, 'id' | 'kind'>>) => void
   addProvider: (def: ProviderDef) => void
@@ -184,6 +197,14 @@ export const useSettings = create<SettingsState>((set, get) => ({
   },
   setAppearance: (patch) => {
     const next = { ...get().s, appearance: { ...get().s.appearance, ...patch } }
+    persist(next)
+    set({ s: next })
+  },
+  setLayoutWidth: (key, w) => {
+    const layout = { ...get().s.layout }
+    if (w === null) delete layout[key]
+    else layout[key] = Math.round(w)
+    const next = { ...get().s, layout }
     persist(next)
     set({ s: next })
   },

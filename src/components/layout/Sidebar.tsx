@@ -1,6 +1,8 @@
-import { memo, useCallback, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { MAX_TITLE_LENGTH, useChat } from '../../store/chat'
+import { useSettings } from '../../store/settings'
 import { useUI } from '../../store/ui'
+import { ResizeHandle } from '../common/ResizeHandle'
 import { formatDateTime } from '../../lib/format'
 import type { MenuAnchor } from '../../lib/menuPlacement'
 import type { Conversation } from '../../types'
@@ -118,6 +120,9 @@ export function Sidebar() {
   const [menu, setMenu] = useState<ConversationMenuState | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const listRef = useRef<HTMLElement>(null)
+  const asideRef = useRef<HTMLElement | null>(null)
+  const sidebarW = useSettings((s) => s.s.layout?.sidebarW)
+  const setLayoutWidth = useSettings((s) => s.setLayoutWidth)
 
   const searching = query.trim().length > 0
   // While searching, matches inside Archived are shown rather than hidden behind the toggle.
@@ -182,7 +187,12 @@ export function Sidebar() {
   return (
     <>
       {sidebarOpen && <div className="drawer-backdrop only-mobile" onClick={closeMobileSidebar} aria-hidden="true" />}
-      <aside className={`sidebar${sidebarOpen ? ' open' : ''}`} aria-label="Conversations" ref={(node) => { if (node) node.inert = !sidebarOpen }}>
+      <aside
+        className={`sidebar${sidebarOpen ? ' open' : ''}`}
+        aria-label="Conversations"
+        ref={(node) => { asideRef.current = node; if (node) node.inert = !sidebarOpen }}
+        style={sidebarW ? ({ '--sidebar-w': `${sidebarW}px` } as CSSProperties) : undefined}
+      >
         <div className="sidebar-head">
           <span className="logo" aria-hidden="true">
             <IconStarburst size={17} className="logo-mark" />
@@ -252,6 +262,15 @@ export function Sidebar() {
           </button>
           <span className="sidebar-version">v1.0 · never stalls</span>
         </footer>
+        <ResizeHandle
+          side="left"
+          panelRef={asideRef}
+          varName="--sidebar-w"
+          fallback={272}
+          width={sidebarW}
+          label="sidebar"
+          onCommit={(w) => setLayoutWidth('sidebarW', w)}
+        />
       </aside>
       {menu && (
         <ConversationMenu

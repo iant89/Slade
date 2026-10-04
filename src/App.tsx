@@ -87,7 +87,9 @@ function useHotkeys() {
         e.preventDefault()
         useUI.getState().toggleFiles()
       }
-      // Esc closes the GitHub or Files drawer unless something modal has focus.
+      // Esc closes the GitHub or Files drawer unless something modal has focus
+      // — and unless a resize drag owns the key (see ResizeHandle).
+      if (e.key === 'Escape' && document.documentElement.dataset.resizing) return
       if (e.key === 'Escape' && (useUI.getState().githubOpen || useUI.getState().filesOpen) && !useUI.getState().publishSource) {
         const tag = (e.target as HTMLElement | null)?.tagName
         if (tag !== 'INPUT' && tag !== 'TEXTAREA') {

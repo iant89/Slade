@@ -178,6 +178,16 @@ import { archiveWithUndo, unarchiveWithToast } from '../src/components/layout/Co
 import { Header } from '../src/components/layout/Header'
 import { Sidebar } from '../src/components/layout/Sidebar'
 import { MENU_GAP, MENU_MARGIN, placeMenu, type MenuAnchor } from '../src/lib/menuPlacement'
+import {
+  clampPanelWidth,
+  EDGE_SNAP_ZONE,
+  edgeDistance,
+  MAIN_MIN_W,
+  MIN_PANEL_W,
+  snapRect,
+  snapTargetWidth,
+  zoneFor,
+} from '../src/lib/panelResize'
 import { AddModelForm, ProviderTokenManager } from '../src/components/settings/SettingsModal'
 import { ModelPickerTable } from '../src/components/settings/ModelPickerModal'
 import { ProviderPickerList } from '../src/components/settings/AddProviderModal'
@@ -4853,6 +4863,49 @@ function seedConversations(list: Conversation[], openId?: string) {
   if (openId !== undefined) useChat.getState().selectConversation(openId)
 }
 
+function testPanelResize() {
+  console.log('panel resize geometry:')
+  const VW = 1440
+  check('clamp keeps the panel in range', clampPanelWidth(10, 240, 900) === 240 && clampPanelWidth(5000, 240, 900) === 900)
+  check('clamp rounds to whole pixels', clampPanelWidth(301.7, 240, 900) === 302)
+  check('an impossible range returns the minimum, never NaN', clampPanelWidth(500, 800, 300) === 800)
+  check('edge distance is side-symmetric (both measure to the far edge)', edgeDistance(VW, VW - EDGE_SNAP_ZONE) === EDGE_SNAP_ZONE)
+  check('inside the snap zone at exactly the boundary', zoneFor(EDGE_SNAP_ZONE) === 'near')
+  check('one pixel outside the zone is far', zoneFor(EDGE_SNAP_ZONE + 1) === 'far')
+  check('overlay drawers snap to the full viewport', snapTargetWidth({ side: 'right', overlay: true, viewportW: VW }) === VW)
+  check('grid panels leave the chat a live column', snapTargetWidth({ side: 'left', overlay: false, viewportW: VW }) === VW - MAIN_MIN_W)
+  check('a window barely wider than the min falls back to the min', snapTargetWidth({ side: 'right', overlay: false, viewportW: 500 }) === MIN_PANEL_W)
+  check('an absurdly small window still lands on the min', snapTargetWidth({ side: 'right', overlay: false, viewportW: 100 }) === MIN_PANEL_W)
+  const rectR = snapRect({ side: 'right', overlay: true, viewportW: VW })
+  check('the ghost rect covers the whole viewport for a full snap', rectR.left === 0 && rectR.width === VW)
+  const rectL = snapRect({ side: 'left', overlay: false, viewportW: VW })
+  check('left-docked ghost starts at the docking side', rectL.left === 0 && rectL.width === VW - MAIN_MIN_W)
+  let sane = true
+  for (let vw = 200; vw <= 4000; vw += 37) {
+    for (const overlay of [true, false]) {
+      for (const side of ['left', 'right'] as const) {
+        const t = snapTargetWidth({ side, overlay, viewportW: vw })
+        if (!Number.isFinite(t) || t !== Math.round(t) || t < MIN_PANEL_W || t > Math.max(vw, MIN_PANEL_W)) sane = false
+      }
+    }
+  }
+  check('snap target stays finite, integral and on-screen across window sizes', sane)
+
+  // The commit path: widths persist with settings, and a reset removes the key.
+  useSettings.getState().setLayoutWidth('sidebarW', 333)
+  useSettings.getState().setLayoutWidth('githubW', 640)
+  const saved = JSON.parse(localStorage.getItem('slade.settings.v1') ?? 'null')
+  check('resized widths persist with settings', saved?.layout?.sidebarW === 333 && saved?.layout?.githubW === 640, JSON.stringify(saved?.layout))
+  check('settings carrying a layout still validate', validateSettings(saved) !== null)
+  check('a non-integer or tiny width fails validation instead of stranding a panel',
+    validateSettings({ ...saved, layout: { sidebarW: 333.5 } }) === null && validateSettings({ ...saved, layout: { sidebarW: 40 } }) === null)
+  useSettings.getState().setLayoutWidth('sidebarW', null)
+  const after = JSON.parse(localStorage.getItem('slade.settings.v1') ?? 'null')
+  check('reset to the default drops the key rather than storing a width',
+    !('sidebarW' in (after?.layout ?? {})) && after?.layout?.githubW === 640, JSON.stringify(after?.layout))
+  useSettings.getState().setLayoutWidth('githubW', null)
+}
+
 function testConversationHelpers() {
   console.log('conversation helpers (titles · hydrate · schema · menu placement):')
 
@@ -6022,6 +6075,7 @@ async function main() {
   await testGitLocalFsReadWriteAcross()
   await testRoadmapFromGitHub()
   testInlineThoughtsRendering()
+  testPanelResize()
   testConversationHelpers()
   await testConversationArchive()
   testConversationMenuUi()

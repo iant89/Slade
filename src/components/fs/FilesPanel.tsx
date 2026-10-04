@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { FsFile } from '../../types'
 import { useFs } from '../../store/fs'
 import { useChat } from '../../store/chat'
@@ -12,6 +12,7 @@ import { guessLanguage } from '../../lib/github'
 import { buildFsTree, fsExt, isFsError, type FsDirNode } from '../../lib/fs'
 import { fileToDataURL } from '../../store/artifacts'
 import { createFsArchive, readFsArchive } from '../../lib/fs-archive'
+import { ResizeHandle } from '../common/ResizeHandle'
 import { CodeArtifact } from '../artifacts/CodeArtifact'
 import { SheetTable } from '../artifacts/SheetTable'
 import { Markdown } from '../chat/Markdown'
@@ -63,6 +64,9 @@ function FileKindIcon({ file }: { file: FsFile }) {
 export function FilesPanel() {
   const open = useUI((s) => s.filesOpen)
   const close = useUI((s) => s.closeFiles)
+  const drawerRef = useRef<HTMLElement>(null)
+  const filesW = useSettings((s) => s.s.layout?.filesW)
+  const setLayoutWidth = useSettings((s) => s.setLayoutWidth)
   const closeAndFocus = () => {
     close()
     document.querySelector<HTMLButtonElement>('[data-panel-toggle="files"]')?.focus()
@@ -458,7 +462,12 @@ export function FilesPanel() {
   return (
     <>
       <div className="gh-drawer-backdrop only-mobile" onClick={closeAndFocus} aria-hidden="true" />
-      <aside className="github-drawer files-drawer" aria-label="Local file system">
+      <aside
+        className="github-drawer files-drawer"
+        aria-label="Local file system"
+        ref={drawerRef}
+        style={filesW ? ({ '--gh-w': `${filesW}px` } as CSSProperties) : undefined}
+      >
         <header className="gh-head fs-drawer-head">
           <h2>
             <span className="fs-brand-mark"><IconFolder size={15} /></span> Workspace
@@ -1013,6 +1022,16 @@ export function FilesPanel() {
             ) : null}
           </div>
         </footer>
+        <ResizeHandle
+          side="right"
+          overlay
+          panelRef={drawerRef}
+          varName="--gh-w"
+          fallback={470}
+          width={filesW}
+          label="Files"
+          onCommit={(w) => setLayoutWidth('filesW', w)}
+        />
       </aside>
     </>
   )
