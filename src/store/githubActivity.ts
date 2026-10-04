@@ -167,8 +167,9 @@ function scopedEntry(input: GitHubActionInput, status: GitHubActionStatus): GitH
 
 /**
  * Insert one standalone card as a message of its own — the same way a saved
- * memory note announces itself — and return that message's id, so the card can
- * be kept current while its call is in flight.
+ * memory note announces itself, and into the same slot of that message — and
+ * return the message's id, so the card can be kept current while its call is
+ * in flight.
  */
 function insertCardMessage(card: GitHubActionArtifact): string {
   const chat = useChat.getState()

@@ -260,8 +260,12 @@ export function describeGitHubCall(call: GitHubCallLike): GitHubActionInfo {
   }
 
   /* ---------------- account + search + misc ---------------- */
+  // `GET /user/repos` — the signed-in user's own list, and the only list Slade
+  // can be about without saying whose it is. "Refreshing Repository List" is
+  // already the whole sentence, so the card carries no subject and reads as
+  // one line. A list for another account or an org still names it.
   if (head === 'user' && second === 'repos') {
-    return make('list-repos', 'your repositories', { ref })
+    return make('list-repos', '', { ref })
   }
   if (head === 'users' && second) {
     if (third === 'repos') return make('list-repos', `@${second}`, { ref })

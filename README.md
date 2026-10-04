@@ -330,6 +330,10 @@ Files pulled in from a GitHub repository are the same cards, with their origin
 kept on the card (`repo @ ref`, path, "open on GitHub") and a **Publish to
 GitHub** action in the footer.
 
+Cards arrive **collapsed** — the name and an expand toggle, nothing else — so a
+transcript full of them stays scannable; **Settings → Artifacts → Collapse
+artifact cards by default** opens them on arrival instead.
+
 ## GitHub (repo context & publishing)
 
 Open the workspace with the GitHub button in the header or `Ctrl/Cmd + G`. Two
@@ -381,8 +385,10 @@ card: the GitHub mark, the action ("`GitHub Action: Get File Contents`"), and
 the thing it touched (`/src/lib/util.ts`) underneath.
 
 - **A call is inserted like a saved memory.** Each card becomes an entry of its
-  own in the conversation, so it scrolls with the chat and is saved with it:
-  reload the page and the log is still there, in the order the calls happened.
+  own in the conversation and takes the same slot in it a Memory Added card
+  does, so the two line up exactly; it scrolls with the chat and is saved with
+  it: reload the page and the log is still there, in the order the calls
+  happened.
 - **A run's calls go inline with the run.** When the orchestrator makes GitHub
   calls — pulling mentioned files into Local Files, reading a repo's tree — its
   cards render in that run's activity timeline, in the order things happened,

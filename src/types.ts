@@ -731,6 +731,11 @@ export interface DefaultsSettings {
 }
 
 export interface ArtifactSettings {
+  /**
+   * Cards arrive closed — the name and its expand toggle, nothing else. A card
+   * that starts open (an image, when `autoExpandImages` is on and this is off)
+   * is the exception, not the rule.
+   */
   collapsedByDefault: boolean
   autoExpandImages: boolean
   maxPreviewHeight: number
@@ -810,7 +815,12 @@ export interface ProviderDef {
 }
 
 export interface Settings {
-  version: 1
+  /**
+   * Schema version. Bumped when a stored value needs upgrading on load; the
+   * upgrade itself lives in `settingsSchema` so every read of a saved blob —
+   * hydrate, backup import — gets it.
+   */
+  version: 1 | 2
   models: ModelDef[]
   defaults: DefaultsSettings
   artifacts: ArtifactSettings

@@ -2556,6 +2556,25 @@ async function testGitHubActionCards() {
   check('the rate-limit probe is titled', budget.title === 'GitHub Action: Checking API Budget', budget.title)
   const listing = describe({ method: 'GET', path: '/repos/octo/demo/contents/docs' })
   check('a directory read names the directory', listing.subject === '/docs', listing.subject)
+  // The signed-in user's own list: the title already says whose it is.
+  const ownRepos = describe({ method: 'GET', path: '/user/repos' })
+  check(
+    'refreshing your own repositories is titled and carries no subject',
+    ownRepos.title === 'GitHub Action: Refreshing Repository List' && ownRepos.subject === '',
+    `${ownRepos.title} / "${ownRepos.subject}"`,
+  )
+  const theirRepos = describe({ method: 'GET', path: '/users/octo/repos' })
+  check(
+    "another account's list still says whose it is",
+    theirRepos.title === 'GitHub Action: Refreshing Repository List' && theirRepos.subject === '@octo',
+    `${theirRepos.title} / "${theirRepos.subject}"`,
+  )
+  const orgRepos = describe({ method: 'GET', path: '/orgs/acme/repos' })
+  check(
+    "an organisation's list still names the organisation",
+    orgRepos.subject === 'acme (organisation)',
+    orgRepos.subject,
+  )
   const unknown = describe({ method: 'GET', path: '/emojis' })
   check('an unmapped call still gets a card', unknown.title === 'GitHub Action: Performed API Request' && unknown.subject === '/emojis', `${unknown.title} ${unknown.subject}`)
 
@@ -2699,7 +2718,16 @@ async function testGitHubActionCards() {
 
     const titles = () => useGitHubActivity.getState().entries.map((e) => `${e.title} ${e.subject}`)
     check('a clone gets its own card', titles().some((t) => t === 'GitHub Action: Cloning Repository 1 of 1 file in Local Files'), JSON.stringify(titles()))
-    check('listing repos logs a card', titles().some((t) => t === 'GitHub Action: Refreshing Repository List your repositories'), JSON.stringify(titles()))
+    check(
+      'listing repos logs a card with no subject line',
+      useGitHubActivity.getState().entries.some((e) => e.title === 'GitHub Action: Refreshing Repository List' && e.subject === ''),
+      JSON.stringify(titles()),
+    )
+    check(
+      '…and the card never says “your repositories”',
+      !useGitHubActivity.getState().entries.some((e) => e.subject === 'your repositories'),
+      JSON.stringify(titles().filter((t) => t.includes('Refreshing'))),
+    )
     check('opening a repo logs a card', titles().some((t) => t === 'GitHub Action: Fetching Repository octo/demo'), JSON.stringify(titles()))
     check('reading the tree logs a card', titles().some((t) => t.startsWith('GitHub Action: Read Repository Tree')), JSON.stringify(titles()))
     check('reading a file logs it with its path', titles().some((t) => t === 'GitHub Action: Get File Contents /src/lib/util.ts'), JSON.stringify(titles()))
@@ -2878,6 +2906,12 @@ async function testGitHubActionCards() {
       'a standalone card renders as its own message',
       messageHtml.includes('msg-gh-action') && messageHtml.includes('gh-artifact-card'),
       messageHtml.slice(0, 220),
+    )
+    check(
+      '…in the same attachment slot a Memory Added card takes, so the two line up',
+      messageHtml.includes('msg-attachments') &&
+        messageHtml.indexOf('msg-attachments') < messageHtml.indexOf('gh-artifact-card'),
+      messageHtml.slice(0, 260),
     )
     check(
       '…carrying the action and what it touched',
@@ -3340,6 +3374,24 @@ function testProviderManagement() {
   check('migrated instances keep kind-as-id and gain label/kind', openaiInstance?.kind === 'openai' && openaiInstance?.label === 'OpenAI')
   check('migrated keys and base URLs survive', openaiInstance?.apiKey === 'sk-legacy' && migratedProviders.find((p) => p.id === 'openai-compatible')?.baseURL === 'https://api.groq.com/openai/v1')
   check('migrated models keep pointing at the same provider', migrated?.models[0]?.provider === 'openai')
+
+  /* ---- artifact cards arrive closed ---- */
+  check('artifact cards are collapsed on a fresh install', DEFAULT_SETTINGS.artifacts.collapsedByDefault === true)
+  check(
+    'settings saved while cards still unfolded are upgraded to closed ones',
+    validateSettings({ ...legacy, version: 1 })?.artifacts.collapsedByDefault === true,
+    JSON.stringify(validateSettings({ ...legacy, version: 1 })?.artifacts),
+  )
+  check(
+    '…and an install that already moved to the new behaviour keeps its own choice',
+    validateSettings({ ...legacy, version: 2, providers: [] })?.artifacts.collapsedByDefault === false,
+    JSON.stringify(validateSettings({ ...legacy, version: 2, providers: [] })?.artifacts),
+  )
+  check(
+    'the upgrade leaves the rest of the artifact preferences alone',
+    validateSettings({ ...legacy, artifacts: { collapsedByDefault: false, autoExpandImages: false, maxPreviewHeight: 300 } })?.artifacts.maxPreviewHeight === 300,
+    JSON.stringify(validateSettings({ ...legacy, artifacts: { collapsedByDefault: false, autoExpandImages: false, maxPreviewHeight: 300 } })?.artifacts),
+  )
 
   // Store round-trip: add a connection, hang models off it, delete it and
   // confirm the cascade (models gone, pin cleared).
@@ -4222,6 +4274,13 @@ function testInlineThoughtsRendering() {
   check('streaming message renders open thought body with reasoning text', streamHtml.includes('thought-block') && streamHtml.includes('streaming') && streamHtml.includes('First consider step A'), streamHtml.slice(0, 400))
   check('streaming thought card is still called Thoughts', streamHtml.includes('thought-title\">Thoughts<') && streamHtml.includes('thinking…'), streamHtml.slice(0, 400))
   check('streaming thought card keeps the brain icon', streamHtml.includes('M9.5 2A2.5 2.5') && !streamHtml.includes('M12 3v3.5M12 17.5V21'), streamHtml.slice(0, 300))
+  // Thoughts are the one card that opens itself: it unfolds while it is being
+  // written and folds again the moment the thought is finished.
+  check(
+    'a thought opens as it is written and hides its text once it is finished',
+    streamHtml.includes('thought-text') && !html.includes('thought-text'),
+    `${streamHtml.includes('thought-text')} / ${html.includes('thought-text')}`,
+  )
 
   // 2. Disabling showThoughts on the model suppresses the thought block
   settingsInit.s = {
@@ -6206,6 +6265,22 @@ async function testMemoryFeature() {
       !collapsedCard.includes('artifact-foot') &&
         !['Copy reference', 'Send back to model', 'Publish to GitHub', 'Save to Files', 'Download'].some((label) => collapsedCard.includes(label)),
       collapsedCard.slice(0, 300),
+    )
+    // The settings a fresh install ships with, unseeded: the note stays closed.
+    settingsInitial.s = originalSettings
+    const stockCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')
+    check(
+      'a Memory Added card is closed out of the box',
+      stockCard.includes('Expand preview') && !stockCard.includes(note),
+      `${originalSettings.artifacts.collapsedByDefault} · ${stockCard.slice(0, 160)}`,
+    )
+    // The composer's queued-attachment chip is a peek at what will be sent, so
+    // it keeps its preview even while cards in the transcript stay closed.
+    const peekCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId, peek: true })).replace(/<!-- -->/g, '')
+    check(
+      'a queued attachment still previews itself, whatever the preference says',
+      peekCard.includes(note) && peekCard.includes('Collapse preview') && !peekCard.includes('artifact-foot'),
+      peekCard.slice(0, 200),
     )
     settingsInitial.s = { ...originalSettings, artifacts: { ...originalSettings.artifacts, collapsedByDefault: false } }
     const expandedCard = renderToString(createElement(ArtifactCard, { artifactId: artifact.id, conversationId })).replace(/<!-- -->/g, '')

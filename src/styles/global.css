@@ -2826,7 +2826,9 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* A standalone card is the whole message, so it takes the message column and
-   sits closer to its neighbours than a paragraph of prose would. */
+   sits closer to its neighbours than a paragraph of prose would. Inside it the
+   card sits in the same attachment slot a Memory Added card uses, so the two
+   kinds of card are the same width and share one alignment. */
 .msg-gh-action {
   margin-bottom: 4px;
 }
