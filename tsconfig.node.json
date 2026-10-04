@@ -8,7 +8,17 @@
     "strict": true,
     "noEmit": false,
     "emitDeclarationOnly": true,
-    "outDir": "node_modules/.tmp/tsnode"
+    "outDir": "node_modules/.tmp/tsnode",
+    "target": "ES2022"
   },
-  "include": ["vite.config.ts", "scripts/github-oauth-relay.ts"]
+  "include": [
+    "vite.config.ts",
+    "scripts/github-oauth-relay.ts",
+    "scripts/shell-server.ts",
+    "scripts/start-shell-server.ts",
+    "scripts/shell-test.ts",
+    "scripts/disk-files.ts",
+    "scripts/shell-plugin.ts",
+    "scripts/shell-startup-test.ts"
+  ]
 }

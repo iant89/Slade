@@ -9,7 +9,11 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
-    "test:smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/smoke.mjs --log-level=error && node node_modules/.cache/smoke.mjs"
+    "test:smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/smoke.mjs --log-level=error && node node_modules/.cache/smoke.mjs",
+    "shell:serve": "esbuild scripts/start-shell-server.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/shell-server.mjs && node node_modules/.cache/shell-server.mjs",
+    "test:shell": "esbuild scripts/shell-test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/shell-test.mjs && node node_modules/.cache/shell-test.mjs",
+    "test:disk": "esbuild scripts/disk-test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/disk-test.mjs && node node_modules/.cache/disk-test.mjs",
+    "test:shell-startup": "esbuild scripts/shell-startup-test.ts --bundle --platform=node --format=esm --external:vite --outfile=node_modules/.cache/shell-startup-test.mjs && node node_modules/.cache/shell-startup-test.mjs"
   },
   "dependencies": {
     "framer-motion": "^11.15.0",

@@ -304,12 +304,26 @@ export interface MemoryEntry {
   updatedAt: number
 }
 
+/** Captured shell execution; ordinary shell source files do not set this. */
+export type BashExecution = {
+  command: string
+  /** Captured stdout/stderr in arrival order, updated as output arrives. */
+  output: string
+  startedAt: number
+} & (
+  | { status: 'running'; finishedAt?: never; exitCode?: never }
+  | { status: 'finished'; finishedAt: number; exitCode: 0 }
+  | { status: 'failed'; finishedAt: number; exitCode?: number }
+)
+
 export interface Artifact {
   id: string
   name: string
   mime: string
   size: number
   kind: ArtifactKind
+  /** Execution metadata for the bash command card. */
+  bashExecution?: BashExecution
   createdAt: number
   provenance: ArtifactSource
   /** Set when the artifact was pulled from a repository rather than uploaded. */
@@ -361,6 +375,8 @@ export interface FsFile {
   encoding?: FsFileEncoding
   mime: string
   kind: ArtifactKind
+  /** Execution metadata for the bash command card. */
+  bashExecution?: BashExecution
   size: number
   createdAt: number
   updatedAt: number

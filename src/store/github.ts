@@ -666,10 +666,11 @@ export const useGitHub = create<GitHubState>((set, get) => {
           syncArtifact: true,
         })
         if (!opts?.silent) {
+          const diskConnected = Boolean((await import('../lib/shell')).useShell.getState().token)
           useUI.getState().toast({
             kind: 'success',
-            title: `Saved ${normPath} to Local Files`,
-            detail: `${repo} @ ${ref}`,
+            title: `Saved ${normPath} to ${diskConnected ? 'browser staging' : 'Local Files'}`,
+            detail: diskConnected ? 'Use Files → Import browser files to review and copy it to disk.' : `${repo} @ ${ref}`,
           })
         }
         return saved

@@ -16,6 +16,7 @@ import { nextProviderLabel, supportedProvider } from '../../lib/providerCatalog'
 import type { AddableProvider, CatalogModel } from '../../lib/modelCatalog'
 import { ProviderCombobox } from './ProviderCombobox'
 import { ModelPickerModal } from './ModelPickerModal'
+import { ShellSettings } from './ShellSettings'
 import { AddProviderModal } from './AddProviderModal'
 import { useGitHub } from '../../store/github'
 import { SCOPES_HELP } from '../../lib/github-auth'
@@ -568,6 +569,7 @@ function AgentTab() {
         </p>
       </div>
 
+      <ShellSettings />
       <SectionTitle>Orchestrator</SectionTitle>
       <SelectRow
         label="Orchestrator model"

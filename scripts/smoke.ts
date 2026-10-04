@@ -133,7 +133,7 @@ import {
 } from '../src/lib/questions'
 import { CODING_AGENT_ORCHESTRATOR_PROMPT } from '../src/engine/orchestratorPrompt'
 import { z } from 'zod'
-import { conversationSchema, exportBundleSchema, roadmapReportSchema } from '../src/lib/schemas'
+import { artifactSchema, conversationSchema, exportBundleSchema, roadmapReportSchema } from '../src/lib/schemas'
 import {
   buildRoadmapReport,
   describeRoadmapReport,
@@ -177,7 +177,11 @@ import {
 } from '../src/lib/github-actions'
 import { onGitHubCall } from '../src/lib/github'
 import { FilesPanel } from '../src/components/fs/FilesPanel'
+import { DiskImportReview } from '../src/components/fs/DiskImportReview'
 import { ArtifactCard } from '../src/components/artifacts/ArtifactCard'
+import { formatExecutionDuration } from '../src/lib/format'
+import { parseShellCommand, executeShellCommand, useShell } from '../src/lib/shell'
+import { runWorkerCompletion } from '../src/engine/shellCompletion'
 import { MessageBubble } from '../src/components/chat/MessageBubble'
 import { AgentQuestions } from '../src/components/chat/AgentQuestions'
 import { RoadmapTimeline } from '../src/components/chat/RoadmapTimeline'
@@ -6920,8 +6924,132 @@ async function main() {
   testChatPanelUi()
   testChatPanelRenders()
   await testMemoryFeature()
+  testBashArtifactCard()
+  await testShellClientAndLoop()
+  testDiskWorkspaceUi()
   console.log(failures === 0 ? '\nALL SMOKE TESTS PASSED' : `\n${failures} SMOKE TEST(S) FAILED`)
   process.exit(failures === 0 ? 0 : 1)
+}
+
+function testBashArtifactCard() {
+  for (const [ms, label] of [[0, '0ms'], [300, '300ms'], [999, '999ms'], [1000, '1s'], [1250, '1.25s'], [59999, '59.99s'], [60000, '1m'], [61300, '1m 1s']] as const) {
+    check(`bash duration ${ms}: ${label}`, formatExecutionDuration(ms) === label)
+  }
+  const initial = useArtifacts.getInitialState() as { byId: Record<string, Artifact> }
+  const previous = initial.byId
+  const artifact: Artifact = {
+    id: 'art_bash_test', name: 'Bash', kind: 'code', mime: 'text/plain', size: 0,
+    createdAt: 1000, provenance: { origin: 'user' },
+    bashExecution: { command: 'printf "<hello>"', output: '<hello>', startedAt: 1000, status: 'running' },
+  }
+  try {
+    const render = () => {
+      initial.byId = { ...previous, [artifact.id]: { ...artifact } }
+      return renderToString(createElement(ArtifactCard, { artifactId: artifact.id, peek: true })).replace(/<!-- -->/g, '')
+    }
+    const running = render()
+    check('bash running card shows spinner and expanded command/output', running.includes('Running…') && running.includes('spin') && running.includes('aria-expanded="true"') && running.includes('Executed command') && running.includes('Command output'))
+    check('bash output is escaped, not interpreted as markup', running.includes('&lt;hello&gt;') && !running.includes('<hello>'))
+    artifact.bashExecution = { ...artifact.bashExecution!, status: 'finished', finishedAt: 1300, exitCode: 0 }
+    const finished = render()
+    check('bash success shows measured duration and success class', finished.includes('Finished, 300ms') && finished.includes('is-finished') && !finished.includes('class="spin"'))
+    artifact.bashExecution = { ...artifact.bashExecution, status: 'failed', finishedAt: 2250, exitCode: 1, output: 'command failed' }
+    const failed = render()
+    check('bash failure shows duration and error output', failed.includes('Failed, 1.25s') && failed.includes('is-failed') && failed.includes('command failed'))
+    check('bash has no irrelevant file actions', !failed.includes('Copy reference'))
+    check('bash execution metadata survives backup validation', artifactSchema.parse(artifact).bashExecution?.status === 'failed')
+    const collapsed = renderToString(createElement(ArtifactCard, { artifactId: artifact.id }))
+    check('bash starts collapsed by default with connected panels hidden', collapsed.includes('aria-expanded="false"') && collapsed.includes('hidden=""'))
+  } finally {
+    initial.byId = previous
+  }
+}
+
+async function testShellClientAndLoop() {
+  check('bash parser accepts only explicit whole-response JSON', parseShellCommand('{"slade_bash":{"command":"pwd"}}')?.command === 'pwd')
+  check('bash parser never executes ordinary fenced bash', !parseShellCommand('```bash\npwd\n```'))
+  check('bash parser rejects malformed command types and extra response fields', !parseShellCommand('{"slade_bash":{"command":42}}') && !parseShellCommand('{"slade_bash":{"command":"pwd"},"text":"example"}'))
+  useShell.getState().connect('test-token', '/test-checkout')
+  const realFetch = globalThis.fetch
+  const conversationId = useChat.getState().currentId
+  const messageId = 'shell-client-test'
+  useChat.getState().appendMessage({ id: messageId, conversationId, role: 'assistant', content: '', createdAt: Date.now(), status: 'streaming' })
+  try {
+    globalThis.fetch = async (_url, init) => {
+      check('shell client authenticates the request', (init?.headers as Record<string, string>).Authorization === 'Bearer test-token')
+      const wire = [
+        { type: 'started', startedAt: 1000 },
+        { type: 'output', text: 'actual output' },
+        { type: 'done', startedAt: 1000, finishedAt: 1300, status: 'finished', exitCode: 0 },
+      ].map((event) => JSON.stringify(event) + '\n').join('')
+      // Split in the middle of a JSON record to exercise streaming buffering.
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(wire.slice(0, 11)))
+        controller.enqueue(new TextEncoder().encode(wire.slice(11)))
+        controller.close()
+      } }))
+    }
+    const context = { conversationId, messageId, modelId: 'mock-pro', modelLabel: 'Mock', signal: new AbortController().signal }
+    const executed = await executeShellCommand({ command: 'pwd' }, context)
+    check('shell client consumes stream and records backend duration', executed.status === 'finished' && executed.finishedAt - executed.startedAt === 300 && executed.output === 'actual output')
+    const message = useChat.getState().conversations[conversationId].messages.find((m) => m.id === messageId)
+    check('shell client attaches its execution card to the agent message', Boolean(message?.attachmentIds?.some((id) => useArtifacts.getState().byId[id]?.bashExecution?.output === 'actual output')))
+    globalThis.fetch = async () => new Response('{"type":"started","startedAt":1000}\n')
+    const interrupted = await executeShellCommand({ command: 'pwd' }, context)
+    check('shell client marks incomplete streams failed, never successful', interrupted.status === 'failed' && interrupted.output.includes('before an exit result'))
+    const request = { purpose: 'test', turns: [{ role: 'user' as const, text: 'Run pwd' }], systemPrompt: 'test', settings: DEFAULT_SETTINGS, candidates: [DEFAULT_SETTINGS.models[0]], signal: context.signal }
+    const result = (text: string) => ({ text, model: DEFAULT_SETTINGS.models[0], chain: [], failedChain: [], attempts: [] })
+    let calls = 0
+    let executions = 0
+    const completed = await runWorkerCompletion(request, context, {
+      complete: async (next) => {
+        calls++
+        if (calls === 1) return result('{"slade_bash":{"command":"pwd"}}')
+        check('worker receives observed output before continuing', next.turns.at(-1)?.text.includes('actual output'))
+        return result('Verified checkout.')
+      },
+      execute: async () => { executions++; return executed },
+    })
+    check('worker tool loop executes and then returns its deliverable with evidence', executions === 1 && calls === 2 && completed.text.includes('Verified checkout.') && completed.text.includes('runtime captured'))
+    executions = 0
+    await runWorkerCompletion(request, context, {
+      complete: async () => result('{"slade_bash":{"command":"pwd"}}'),
+      execute: async () => { executions++; return executed },
+    })
+    check('worker loop cannot exceed eight commands per step', executions === 8)
+    executions = 0
+    await runWorkerCompletion(request, context, {
+      complete: async () => ({ ...result('{"slade_bash":{"command":"pwd"}}'), truncated: true }),
+      execute: async () => { executions++; return executed },
+    })
+    check('truncated model output never triggers execution', executions === 0)
+  } finally {
+    globalThis.fetch = realFetch
+    useShell.getState().disconnect()
+  }
+}
+
+function testDiskWorkspaceUi() {
+  const ui = useUI.getInitialState()
+  const shell = useShell.getInitialState()
+  const wasOpen = ui.filesOpen
+  const previous = { token: shell.token, root: shell.root }
+  try {
+    ui.filesOpen = true
+    shell.token = 'test-ui-token'
+    shell.root = '/test/checkout'
+    const connected = renderToString(createElement(FilesPanel))
+    check('connected Files displays disk checkout and import controls', connected.includes('Disk checkout') && connected.includes('/test/checkout') && connected.includes('Import browser files') && connected.includes('Shared with bash'))
+    check('disk workspace names create/upload/refresh actions accessibly', connected.includes('New file') && connected.includes('Upload') && connected.includes('Refresh') && connected.includes('Filter disk file paths'))
+    const review = renderToString(createElement(DiskImportReview, { conversationId: 'test', onDone: () => {} }))
+    check('disk import explains preservation and explicit overwrite review', review.includes('Browser originals remain untouched') && review.includes('Existing disk files are unchecked') && review.includes('Review current browser files'))
+    shell.token = ''; shell.root = ''
+    const disconnected = renderToString(createElement(FilesPanel))
+    check('disconnected Files returns to the original browser workspace', disconnected.includes('Local files') && !disconnected.includes('Disk checkout'))
+  } finally {
+    ui.filesOpen = wasOpen
+    shell.token = previous.token; shell.root = previous.root
+  }
 }
 
 void main()

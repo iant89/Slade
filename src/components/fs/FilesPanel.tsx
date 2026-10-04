@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { FsFile } from '../../types'
+import { useShell } from '../../lib/shell'
+import { DiskFilesPanel } from './DiskFilesPanel'
 import { useFs } from '../../store/fs'
 import { useChat } from '../../store/chat'
 import { useGitHub } from '../../store/github'
@@ -62,6 +64,12 @@ function FileKindIcon({ file }: { file: FsFile }) {
  * them to GitHub.
  */
 export function FilesPanel() {
+  const token = useShell((s) => s.token)
+  const root = useShell((s) => s.root)
+  return token ? <DiskFilesPanel key={root} /> : <BrowserFilesPanel />
+}
+
+function BrowserFilesPanel() {
   const open = useUI((s) => s.filesOpen)
   const close = useUI((s) => s.closeFiles)
   const drawerRef = useRef<HTMLElement>(null)
