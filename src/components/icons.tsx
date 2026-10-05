@@ -87,6 +87,12 @@ export const IconImage = (p: P) => (
 export const IconCode = (p: P) => (
   <I {...p}><path d="m16 18 6-6-6-6" /><path d="m8 6-6 6 6 6" /></I>
 )
+export const IconTerminal = (p: P) => (
+  <I {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="m7 9 3 3-3 3M13 15h4" />
+  </I>
+)
 export const IconFileText = (p: P) => (
   <I {...p}><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><path d="M14 2v6h6" /><path d="M16 13H8" /><path d="M16 17H8" /></I>
 )
