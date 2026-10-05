@@ -26,15 +26,15 @@ export function BashArtifactCard({ execution, peek = false }: { execution: BashE
         aria-controls={bodyId}
         title={expanded ? 'Collapse command and output' : 'Expand command and output'}
       >
-        <span className="bash-chevron" aria-hidden="true">
-          {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-        </span>
         <span className="bash-status" aria-hidden="true">
           <StatusIcon size={16} className={running ? 'spin' : undefined} />
         </span>
         <span className="artifact-meta">
           <span className="artifact-name">Bash</span>
           <span className="artifact-sub" role="status" aria-live="polite">{subtitle}</span>
+        </span>
+        <span className="bash-chevron" aria-hidden="true">
+          {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
         </span>
       </button>
       <div id={bodyId} hidden={!expanded} className="bash-artifact-details">
