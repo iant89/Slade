@@ -110,6 +110,7 @@ function ensureBashArtifactFromCode(
     finishedAt,
     status: 'finished',
     exitCode: 0,
+    isMock: true,
   }
   if (
     existing?.bashExecution?.command === command &&

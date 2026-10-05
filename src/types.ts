@@ -310,6 +310,7 @@ export type BashExecution = {
   /** Captured stdout/stderr in arrival order, updated as output arrives. */
   output: string
   startedAt: number
+  isMock?: boolean
 } & (
   | { status: 'running'; finishedAt?: never; exitCode?: never }
   | { status: 'finished'; finishedAt: number; exitCode: 0 }
