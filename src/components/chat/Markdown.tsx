@@ -9,8 +9,6 @@ import { CopyButton } from '../artifacts/CodeArtifact'
 import { mimeFromName, classifyArtifact } from '../../lib/mime'
 import { fsBaseName, looksLikeFilePath, tryNormalizeFsPath } from '../../lib/fs'
 
-import { useShell } from '../../lib/shell'
-
 /** Info-string languages that mean "this fence is a shell command", not a file. */
 const SHELL_FENCE_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'terminal', 'shellscript', 'fish', 'ksh', 'csh'])
 
@@ -85,7 +83,7 @@ function ensureArtifactFromCode(
  * cards because `ls` has no extension and the fallback MIME is text/plain.
  */
 function isShellCommandFence(lang: string, fileName: string): boolean {
-  return Boolean(useShell.getState().token) && Boolean(fileName) && SHELL_FENCE_LANGS.has(lang.toLowerCase()) && !looksLikeFilePath(fileName)
+  return Boolean(fileName) && SHELL_FENCE_LANGS.has(lang.toLowerCase()) && !looksLikeFilePath(fileName)
 }
 
 /**
@@ -112,6 +110,7 @@ function ensureBashArtifactFromCode(
     finishedAt,
     status: 'finished',
     exitCode: 0,
+    isMock: true,
   }
   if (
     existing?.bashExecution?.command === command &&

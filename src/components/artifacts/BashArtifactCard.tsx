@@ -13,7 +13,9 @@ export function BashArtifactCard({ execution, peek = false }: { execution: BashE
   const failed = execution.status === 'failed'
   const subtitle = running
     ? 'Running…'
-    : `${failed ? 'Failed' : 'Finished'}, ${formatExecutionDuration(execution.finishedAt - execution.startedAt)}`
+    : execution.isMock
+      ? 'Simulated execution'
+      : `${failed ? 'Failed' : 'Finished'}, ${formatExecutionDuration(execution.finishedAt - execution.startedAt)}`
 
   return (
     <figure className={`artifact-card bash-artifact is-${execution.status}`} aria-label="Bash command">
