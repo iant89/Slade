@@ -2,7 +2,7 @@ import { useId, useState } from 'react'
 import type { BashExecution } from '../../types'
 import { useSettings } from '../../store/settings'
 import { formatExecutionDuration } from '../../lib/format'
-import { IconCheck, IconChevronDown, IconChevronRight, IconLoader, IconX } from '../icons'
+import { IconChevronDown, IconChevronRight, IconTerminal } from '../icons'
 
 /** An execution record, not a runnable shell or a preview of a shell script. */
 export function BashArtifactCard({ execution, peek = false }: { execution: BashExecution; peek?: boolean }) {
@@ -14,7 +14,6 @@ export function BashArtifactCard({ execution, peek = false }: { execution: BashE
   const subtitle = running
     ? 'Running…'
     : `${failed ? 'Failed' : 'Finished'}, ${formatExecutionDuration(execution.finishedAt - execution.startedAt)}`
-  const StatusIcon = running ? IconLoader : failed ? IconX : IconCheck
 
   return (
     <figure className={`artifact-card bash-artifact is-${execution.status}`} aria-label="Bash command">
@@ -26,15 +25,15 @@ export function BashArtifactCard({ execution, peek = false }: { execution: BashE
         aria-controls={bodyId}
         title={expanded ? 'Collapse command and output' : 'Expand command and output'}
       >
-        <span className="bash-chevron" aria-hidden="true">
-          {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-        </span>
-        <span className="bash-status" aria-hidden="true">
-          <StatusIcon size={16} className={running ? 'spin' : undefined} />
+        <span className="bash-terminal-icon" aria-hidden="true">
+          <IconTerminal size={16} />
         </span>
         <span className="artifact-meta">
           <span className="artifact-name">Bash</span>
           <span className="artifact-sub" role="status" aria-live="polite">{subtitle}</span>
+        </span>
+        <span className="bash-chevron" aria-hidden="true">
+          {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
         </span>
       </button>
       <div id={bodyId} hidden={!expanded} className="bash-artifact-details">

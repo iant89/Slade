@@ -4359,11 +4359,11 @@ button.agent-step-head:not(:disabled):hover { background: color-mix(in srgb, var
 }
 .bash-artifact-head:hover { background: var(--bg-hover); }
 .bash-artifact-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
-.bash-chevron, .bash-status { display: inline-flex; flex: none; }
+.bash-chevron, .bash-terminal-icon { display: inline-flex; flex: none; }
 .bash-chevron { color: var(--text-muted); }
-.bash-artifact.is-running .bash-status { color: var(--text-muted); }
-.bash-artifact.is-finished .bash-status { color: var(--ok); }
-.bash-artifact.is-failed .bash-status { color: var(--danger); }
+.bash-artifact.is-running .bash-terminal-icon { color: var(--text-muted); }
+.bash-artifact.is-finished .bash-terminal-icon { color: var(--ok); }
+.bash-artifact.is-failed .bash-terminal-icon { color: var(--danger); }
 .bash-command, .bash-output { border-top: 1px solid var(--border); padding: 10px 12px; }
 .bash-command { background: var(--bg-raised); }
 .bash-panel-label { font-size: 0.7em; color: var(--text-faint); margin-bottom: 6px; }
